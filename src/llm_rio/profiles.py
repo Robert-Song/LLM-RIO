@@ -9,6 +9,10 @@ from llm_rio.domain import Engine, PlacementProfile
 from llm_rio.storage import Database, _now
 
 
+def _optional_int(value: Any) -> int | None:
+    return None if value is None else int(value)
+
+
 def profile_from_dict(raw: dict[str, Any]) -> PlacementProfile:
     return PlacementProfile(
         id=raw["id"],
@@ -22,17 +26,24 @@ def profile_from_dict(raw: dict[str, Any]) -> PlacementProfile:
         pipeline_parallel_size=int(raw["pipeline_parallel_size"]),
         eligible_gpu_sets=tuple(tuple(group) for group in raw["eligible_gpu_sets"]),
         dtype=raw["dtype"],
-        quantization=raw.get("quantization"),
+        quantization=raw["quantization"],
         max_model_len=int(raw["max_model_len"]),
-        max_num_seqs=int(raw["max_num_seqs"]),
-        max_num_batched_tokens=int(raw["max_num_batched_tokens"]),
+        max_num_seqs=_optional_int(raw["max_num_seqs"]),
+        max_num_batched_tokens=_optional_int(raw["max_num_batched_tokens"]),
         predicted_tokens_per_second=float(raw["predicted_tokens_per_second"]),
         load_and_warmup_seconds=float(raw["load_and_warmup_seconds"]),
         idle_vram_mib_per_gpu=tuple(raw["idle_vram_mib_per_gpu"]),
         peak_vram_mib_per_gpu=tuple(raw["peak_vram_mib_per_gpu"]),
         gpu_headroom_mib_per_gpu=tuple(raw["gpu_headroom_mib_per_gpu"]),
         capabilities=frozenset(raw["capabilities"]),
-        launch_args=dict(raw.get("launch_args", {})),
+        launch_args=dict(raw["launch_args"]),
+        gpu_memory_utilization=float(raw["gpu_memory_utilization"]),
+        kv_cache_capacity_tokens=_optional_int(raw["kv_cache_capacity_tokens"]),
+        max_full_length_concurrency=(
+            None
+            if raw["max_full_length_concurrency"] is None
+            else float(raw["max_full_length_concurrency"])
+        ),
     )
 
 
@@ -63,6 +74,7 @@ def profile_key(raw: dict[str, Any]) -> str:
             "max_model_len",
             "max_num_seqs",
             "max_num_batched_tokens",
+            "gpu_memory_utilization",
             "multimodal_limits",
             "tool_parser",
             "eligible_gpu_sets",

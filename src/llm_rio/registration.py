@@ -233,7 +233,7 @@ class RegistrationManager:
             or tokenizer_config.get("model_max_length")
             or 4096
         )
-        max_model_len = min(max_model_len, 1_000_000)
+        max_model_len = max(1, max_model_len)
         quantization = config.get("quantization_config", {}).get("quant_method")
         dtype_value = str(config.get("torch_dtype") or "auto").lower()
         dtype = {
@@ -278,6 +278,10 @@ class RegistrationManager:
             reserved_vram_mib=self.settings.reserved_vram_mib,
             dtype=inspection["dtype"],
             quantization=inspection["quantization"],
+            gpu_memory_utilization=self.settings.engines.gpu_memory_utilization,
+            max_model_len_limit=self.settings.engines.max_model_len,
+            max_num_seqs=self.settings.engines.max_num_seqs,
+            max_num_batched_tokens=self.settings.engines.max_num_batched_tokens,
         )
         if not candidates:
             raise ValidationError("candidate_shapes", "model cannot fit any homogeneous GPU set")

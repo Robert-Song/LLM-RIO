@@ -12,6 +12,10 @@ class EngineSettings(BaseModel):
     llama_cpp_executable: str = "llama-server"
     enable_llama_cpp: bool = False
     environment: dict[str, str] = Field(default_factory=dict)
+    gpu_memory_utilization: float | None = Field(default=None, gt=0, le=1)
+    max_model_len: int | None = Field(default=None, gt=0)
+    max_num_seqs: int | None = Field(default=None, gt=0)
+    max_num_batched_tokens: int | None = Field(default=None, gt=0)
 
 
 class Settings(BaseSettings):
@@ -43,7 +47,7 @@ class Settings(BaseSettings):
     worker_port_start: int = 18000
     worker_port_end: int = 18999
     scheduler_tick_seconds: float = 1.0
-    max_prompt_tokens: int = 32768
+    max_prompt_tokens: int | None = Field(default=None, gt=0)
     max_output_tokens: int = 8192
     max_n: int = 4
     default_quota_tokens: int = 1_000_000

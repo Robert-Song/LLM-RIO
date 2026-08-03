@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib.metadata
 import json
+import re
 import secrets
 import time
 import uuid
@@ -35,8 +36,9 @@ class CandidateShape:
     gpu_count: int
     tensor_parallel_size: int
     max_model_len: int
-    max_num_seqs: int
-    max_num_batched_tokens: int
+    max_num_seqs: int | None
+    max_num_batched_tokens: int | None
+    gpu_memory_utilization: float
     dtype: str
     quantization: str | None
     eligible_gpu_sets: tuple[tuple[str, ...], ...]
@@ -50,6 +52,10 @@ def build_candidate_shapes(
     reserved_vram_mib: int,
     dtype: str,
     quantization: str | None,
+    gpu_memory_utilization: float | None = None,
+    max_model_len_limit: int | None = None,
+    max_num_seqs: int | None = None,
+    max_num_batched_tokens: int | None = None,
 ) -> list[CandidateShape]:
     required_mib = max(1, int(weight_bytes / (1024 * 1024) * 1.15))
     candidates: list[CandidateShape] = []
@@ -62,13 +68,31 @@ def build_candidate_shapes(
             if usable >= required_mib:
                 viable_sets.append(gpu_set)
         if viable_sets:
+            smallest_vram_mib = min(
+                device.total_vram_mib
+                for device in inventory.gpus
+                if any(device.uuid in gpu_set for gpu_set in viable_sets)
+            )
+            automatic_utilization = max(
+                0.01,
+                min(1.0, (smallest_vram_mib - reserved_vram_mib) / smallest_vram_mib),
+            )
             candidates.append(
                 CandidateShape(
                     gpu_count=gpu_count,
                     tensor_parallel_size=gpu_count,
-                    max_model_len=min(max_model_len, 32768),
-                    max_num_seqs=16,
-                    max_num_batched_tokens=min(8192, max_model_len),
+                    max_model_len=(
+                        min(max_model_len, max_model_len_limit)
+                        if max_model_len_limit is not None
+                        else max_model_len
+                    ),
+                    max_num_seqs=max_num_seqs,
+                    max_num_batched_tokens=max_num_batched_tokens,
+                    gpu_memory_utilization=(
+                        gpu_memory_utilization
+                        if gpu_memory_utilization is not None
+                        else automatic_utilization
+                    ),
                     dtype=dtype,
                     quantization=quantization,
                     eligible_gpu_sets=tuple(viable_sets),
@@ -152,11 +176,15 @@ class ProfileValidator:
             candidate.dtype,
             "--max-model-len",
             str(candidate.max_model_len),
-            "--max-num-seqs",
-            str(candidate.max_num_seqs),
-            "--max-num-batched-tokens",
-            str(candidate.max_num_batched_tokens),
+            "--gpu-memory-utilization",
+            str(candidate.gpu_memory_utilization),
         ]
+        if candidate.max_num_seqs is not None:
+            command.extend(["--max-num-seqs", str(candidate.max_num_seqs)])
+        if candidate.max_num_batched_tokens is not None:
+            command.extend(
+                ["--max-num-batched-tokens", str(candidate.max_num_batched_tokens)]
+            )
         if candidate.quantization:
             command.extend(["--quantization", candidate.quantization])
         validation_id = str(uuid.uuid4())
@@ -180,6 +208,7 @@ class ProfileValidator:
             try:
                 await self._wait_for_health(process, port, api_key)
                 load_seconds = time.monotonic() - started
+                kv_cache_capacity, max_concurrency = self._capacity_from_log(log_path)
                 idle_memory = self._used_vram(gpu_set)
                 throughput, peak_memory = await self._generation_contract(
                     process=process,
@@ -225,7 +254,22 @@ class ProfileValidator:
             ),
             capabilities=frozenset({"chat", "streaming"}),
             launch_args={},
+            gpu_memory_utilization=candidate.gpu_memory_utilization,
+            kv_cache_capacity_tokens=kv_cache_capacity,
+            max_full_length_concurrency=max_concurrency,
         )
+
+    @staticmethod
+    def _capacity_from_log(log_path: Path) -> tuple[int | None, float | None]:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+        capacities = re.findall(r"GPU KV cache size:\s*([\d,]+) tokens", text)
+        concurrencies = re.findall(
+            r"Maximum concurrency for [\d,]+ tokens per request:\s*([\d.]+)x", text
+        )
+        capacity = int(capacities[-1].replace(",", "")) if capacities else None
+        concurrency = float(concurrencies[-1]) if concurrencies else None
+        return capacity, concurrency
+
 
     async def _wait_for_health(
         self, process: asyncio.subprocess.Process, port: int, api_key: str

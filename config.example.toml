@@ -48,9 +48,10 @@ worker_port_end = 18999
 
 # =============================================================================
 # OPTIONAL: request limits
-# max_prompt_tokens is a fixed global ceiling; it is not "auto" in this release.
+# Omit max_prompt_tokens to use each validated model profile's full context window.
+# Uncomment it only to impose a global prompt ceiling.
 # =============================================================================
-max_prompt_tokens = 32768
+# max_prompt_tokens = 32768
 max_output_tokens = 8192
 max_n = 4
 
@@ -78,6 +79,13 @@ log_level = "INFO"
 vllm_executable = "vllm"
 llama_cpp_executable = "llama-server"
 enable_llama_cpp = false
+
+# Omit these limits to use the model maximum and vLLM's automatic scheduler values.
+# gpu_memory_utilization omitted: derive it from reserved_vram_mib and detected VRAM.
+# gpu_memory_utilization = 0.95
+# max_model_len = 32768
+# max_num_seqs = 128
+# max_num_batched_tokens = 8192
 
 [engines.environment]
 # Optional per-host environment inherited by validation and resident workers.

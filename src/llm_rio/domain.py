@@ -82,8 +82,8 @@ class PlacementProfile:
     dtype: str
     quantization: str | None
     max_model_len: int
-    max_num_seqs: int
-    max_num_batched_tokens: int
+    max_num_seqs: int | None
+    max_num_batched_tokens: int | None
     predicted_tokens_per_second: float
     load_and_warmup_seconds: float
     idle_vram_mib_per_gpu: tuple[int, ...]
@@ -91,6 +91,9 @@ class PlacementProfile:
     gpu_headroom_mib_per_gpu: tuple[int, ...]
     capabilities: frozenset[str]
     launch_args: dict[str, Any]
+    gpu_memory_utilization: float
+    kv_cache_capacity_tokens: int | None
+    max_full_length_concurrency: float | None
 
 
 @dataclass(slots=True)

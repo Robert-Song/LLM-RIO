@@ -79,13 +79,13 @@ async def _probe_llama_cpp(
         str(port),
         "--ctx-size",
         str(candidate.max_model_len),
-        "--parallel",
-        str(candidate.max_num_seqs),
         "--n-gpu-layers",
         "999",
         "--api-key",
         api_key,
     ]
+    if candidate.max_num_seqs is not None:
+        command.extend(["--parallel", str(candidate.max_num_seqs)])
     validation_id = str(uuid.uuid4())
     log_path = settings.log_dir / f"validation-llama-{validation_id}.log"
     started = time.monotonic()
@@ -143,6 +143,9 @@ async def _probe_llama_cpp(
         gpu_headroom_mib_per_gpu=tuple(settings.reserved_vram_mib for _ in gpu_set),
         capabilities=frozenset({"chat", "streaming"}),
         launch_args={"model": str(gguf_path), "n_gpu_layers": 999},
+        gpu_memory_utilization=candidate.gpu_memory_utilization,
+        kv_cache_capacity_tokens=None,
+        max_full_length_concurrency=None,
     )
 
 

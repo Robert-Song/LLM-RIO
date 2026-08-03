@@ -82,21 +82,23 @@ def _validate_request(
     request: Request, body: ChatCompletionRequest, model: dict[str, Any]
 ) -> tuple[int, int]:
     settings = request.app.state.settings
+    model_limits = model["request_limits"]
+    max_context_tokens = int(model_limits["max_context_tokens"])
+    max_prompt_tokens = (
+        min(settings.max_prompt_tokens, max_context_tokens)
+        if settings.max_prompt_tokens is not None
+        else max_context_tokens
+    )
     limits = {**{
-        "max_prompt_tokens": settings.max_prompt_tokens,
+        "max_prompt_tokens": max_prompt_tokens,
         "max_output_tokens": settings.max_output_tokens,
         "max_n": settings.max_n,
-    }, **model["request_limits"]}
+    }, **model_limits}
     prompt_tokens = _rough_tokens(body.messages)
     reservation_prompt_tokens = _conservative_prompt_tokens(body.messages)
     if prompt_tokens > int(limits["max_prompt_tokens"]):
         raise RioError("context_length_exceeded", "The prompt exceeds the configured limit")
-    max_context_tokens = int(
-        limits.get(
-            "max_context_tokens",
-            int(limits["max_prompt_tokens"]) + int(limits["max_output_tokens"]),
-        )
-    )
+    max_context_tokens = int(limits["max_context_tokens"])
     if prompt_tokens + body.output_limit > max_context_tokens:
         raise RioError("context_length_exceeded", "Prompt plus output exceeds the model context")
     if body.output_limit > int(limits["max_output_tokens"]):

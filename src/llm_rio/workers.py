@@ -149,11 +149,15 @@ class WorkerSupervisor:
                 profile.dtype,
                 "--max-model-len",
                 str(profile.max_model_len),
-                "--max-num-seqs",
-                str(profile.max_num_seqs),
-                "--max-num-batched-tokens",
-                str(profile.max_num_batched_tokens),
+                "--gpu-memory-utilization",
+                str(profile.gpu_memory_utilization),
             ]
+            if profile.max_num_seqs is not None:
+                command.extend(["--max-num-seqs", str(profile.max_num_seqs)])
+            if profile.max_num_batched_tokens is not None:
+                command.extend(
+                    ["--max-num-batched-tokens", str(profile.max_num_batched_tokens)]
+                )
             if profile.quantization:
                 command.extend(["--quantization", profile.quantization])
         elif profile.engine is Engine.LLAMA_CPP and self.settings.engines.enable_llama_cpp:
@@ -167,11 +171,11 @@ class WorkerSupervisor:
                 str(worker.port),
                 "--ctx-size",
                 str(profile.max_model_len),
-                "--parallel",
-                str(profile.max_num_seqs),
                 "--api-key",
                 self.internal_api_key,
             ]
+            if profile.max_num_seqs is not None:
+                command.extend(["--parallel", str(profile.max_num_seqs)])
         else:
             raise WorkerLaunchError(f"engine is disabled or unsupported: {profile.engine}")
         for key, value in profile.launch_args.items():
