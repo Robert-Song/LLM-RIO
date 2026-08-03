@@ -47,7 +47,7 @@ def _request(
     *,
     json_body: dict[str, Any] | None = None,
 ) -> Any:
-    headers = {"Authorization": f"Bearer {_api_key()}"} if authenticated else {}
+    headers = {"Authorization": f"Bearer {_api_key()}"}
     try:
         response = httpx.request(
             method,
