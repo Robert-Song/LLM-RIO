@@ -14,7 +14,7 @@ dependencies = [
   "aiosqlite==0.21.0",
   "argon2-cffi==25.1.0",
   "cryptography==49.0.0",
-  "fastapi==0.116.1",
+  "fastapi==0.136.3",
   "httpx==0.28.1",
   "huggingface-hub==0.34.4",
   "nvidia-ml-py==13.580.65",
