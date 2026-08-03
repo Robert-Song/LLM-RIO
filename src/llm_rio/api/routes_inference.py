@@ -12,10 +12,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from llm_rio.api.dependencies import CurrentPrincipal
 from llm_rio.api.schemas import ChatCompletionRequest
-from llm_rio.domain import CatalogState, ServiceMode
+from llm_rio.domain import CatalogState, Role, ServiceMode
 from llm_rio.errors import MaintenanceError, RioError
 from llm_rio.queueing import QueuedRequest
-from llm_rio.security import hash_idempotency_key
+from llm_rio.security import Principal, hash_idempotency_key
 
 router = APIRouter()
 
@@ -43,9 +43,24 @@ def _contains_multimodal(messages: list[dict[str, Any]]) -> bool:
     return False
 
 
-async def _resolve_model(request: Request, principal: CurrentPrincipal, nickname: str) -> dict[str, Any]:
+async def _available_models(request: Request, principal: Principal) -> list[dict[str, Any]]:
     database = request.app.state.database
-    available = [model["nickname"] for model in await database.list_models(principal.key_id)]
+    if principal.role is Role.USER:
+        return await database.list_models(principal.key_id)
+    return [
+        model
+        for model in await database.list_models()
+        if model["state"] == CatalogState.AVAILABLE.value
+    ]
+
+
+async def _resolve_model(
+    request: Request, principal: Principal, nickname: str
+) -> dict[str, Any]:
+    database = request.app.state.database
+    available = [
+        model["nickname"] for model in await _available_models(request, principal)
+    ]
     model = await database.model_by_nickname(nickname)
     if model is None:
         raise RioError(
@@ -54,7 +69,9 @@ async def _resolve_model(request: Request, principal: CurrentPrincipal, nickname
             status_code=404,
             details={"available_models": available},
         )
-    if not await database.has_model_grant(principal.key_id, model["id"]):
+    if principal.role is Role.USER and not await database.has_model_grant(
+        principal.key_id, model["id"]
+    ):
         raise RioError(
             "model_not_allowed",
             f"This key is not granted access to model '{nickname}'",
@@ -120,7 +137,7 @@ def _validate_request(
 
 @router.get("/v1/models")
 async def list_models(request: Request, principal: CurrentPrincipal) -> dict[str, object]:
-    models = await request.app.state.database.list_models(principal.key_id)
+    models = await _available_models(request, principal)
     return {
         "object": "list",
         "data": [
