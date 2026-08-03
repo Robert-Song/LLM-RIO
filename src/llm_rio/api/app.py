@@ -7,6 +7,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request, Response
@@ -191,7 +192,10 @@ def create_app(
         return JSONResponse(
             {
                 "error": {
-                    "message": "The requested nickname, grant, or related record conflicts with existing state",
+                    "message": (
+                        "The requested nickname, grant, or related record "
+                        "conflicts with existing state"
+                    ),
                     "type": "state_conflict",
                     "code": "state_conflict",
                 }
@@ -203,13 +207,31 @@ def create_app(
     async def validation_error_handler(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
+        # exc.errors() can embed non-serializable objects (e.g. ValueError in ctx)
+        # from pydantic field validators; coerce everything to JSON-safe values.
+        details = []
+        for error in exc.errors():
+            safe: dict[str, Any] = {}
+            for key, value in error.items():
+                if key == "ctx" and isinstance(value, dict):
+                    safe[key] = {
+                        str(k): (
+                            str(v)
+                            if not isinstance(v, str | int | float | bool | type(None))
+                            else v
+                        )
+                        for k, v in value.items()
+                    }
+                else:
+                    safe[key] = value
+            details.append(safe)
         return JSONResponse(
             {
                 "error": {
                     "message": "Request validation failed",
                     "type": "invalid_request_error",
                     "code": "invalid_request_error",
-                    "details": exc.errors(),
+                    "details": details,
                 }
             },
             status_code=422,

@@ -35,6 +35,8 @@ async def validate_llama_cpp(
     failures: list[ValidationError] = []
     for gpu_set in candidate.eligible_gpu_sets:
         while not await scheduler.acquire_validation_gpus(gpu_set):
+            if scheduler.validation_should_yield():
+                raise ValidationPreempted()
             await asyncio.sleep(5.0)
         try:
             profiles.append(
