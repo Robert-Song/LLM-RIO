@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 
 from llm_rio.api.dependencies import StaffPrincipal
 from llm_rio.api.schemas import GrantUpdate, RegisterModelRequest
+from llm_rio.domain import CatalogState
 
 router = APIRouter()
 
@@ -31,6 +32,25 @@ async def model_job(
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
+
+@router.post("/staff/model-jobs/{job_id}/retry", status_code=status.HTTP_202_ACCEPTED)
+async def retry_model_job(
+    job_id: str, request: Request, _: StaffPrincipal
+) -> dict[str, str]:
+    job = await request.app.state.database.get_model_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["state"] != "FAILED":
+        raise HTTPException(status_code=409, detail="Only failed model jobs can be retried")
+    await request.app.state.database.update_model_job(
+        job_id,
+        job_state="QUEUED",
+        stage="resolve",
+        catalog_state=CatalogState.REQUESTED,
+    )
+    request.app.state.registration.start(job_id)
+    return {"model_id": job["model_id"], "job_id": job_id}
 
 
 @router.get("/staff/models")

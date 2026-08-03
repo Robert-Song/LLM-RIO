@@ -153,7 +153,6 @@ class WorkerSupervisor:
                 str(profile.max_num_seqs),
                 "--max-num-batched-tokens",
                 str(profile.max_num_batched_tokens),
-                "--disable-frontend-multiprocessing",
             ]
             if profile.quantization:
                 command.extend(["--quantization", profile.quantization])

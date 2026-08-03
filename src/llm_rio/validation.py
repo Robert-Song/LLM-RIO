@@ -158,7 +158,6 @@ class ProfileValidator:
             str(candidate.max_num_seqs),
             "--max-num-batched-tokens",
             str(candidate.max_num_batched_tokens),
-            "--disable-frontend-multiprocessing",
         ]
         if candidate.quantization:
             command.extend(["--quantization", candidate.quantization])

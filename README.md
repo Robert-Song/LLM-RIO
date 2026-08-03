@@ -45,7 +45,8 @@ additional admin keys.
 - `POST /v1/chat/completions`
 - `GET /v1/models`
 - `GET /v1/me/usage`
-- `POST /staff/models` and `GET /staff/model-jobs/{job_id}`
+- `POST /staff/models`, `GET /staff/model-jobs/{job_id}`, and
+  `POST /staff/model-jobs/{job_id}/retry`
 - staff model-disable and grant-management routes
 - admin key, quota, and atomic maintenance routes
 

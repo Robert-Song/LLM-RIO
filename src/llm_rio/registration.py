@@ -282,6 +282,7 @@ class RegistrationManager:
         if not candidates:
             raise ValidationError("candidate_shapes", "model cannot fit any homogeneous GPU set")
         accepted = []
+        last_validation_error: ValidationError | None = None
         for candidate in candidates:
             while True:
                 await self.database.update_model_job(
@@ -311,7 +312,8 @@ class RegistrationManager:
                     )
                     await asyncio.sleep(5.0)
                     continue
-                except ValidationError:
+                except ValidationError as exc:
+                    last_validation_error = exc
                     break
             # Smallest viable placement is mandatory. Larger shapes are useful only when measured.
             if accepted and candidate.gpu_count >= min(item.gpu_count for item in accepted) + 1:
@@ -349,6 +351,8 @@ class RegistrationManager:
                 await asyncio.sleep(5.0)
                 continue
             break
+        if not accepted and last_validation_error is not None:
+            raise last_validation_error
         return accepted
 
     async def _record_failure(self, job_id: str, exc: Exception) -> None:

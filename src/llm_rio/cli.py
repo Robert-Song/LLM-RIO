@@ -242,6 +242,11 @@ def model_job(job_id: str) -> None:
     _print(_request("GET", f"/staff/model-jobs/{job_id}"))
 
 
+@models_app.command("retry")
+def retry_model_job(job_id: str) -> None:
+    _print(_request("POST", f"/staff/model-jobs/{job_id}/retry"))
+
+
 @models_app.command("disable")
 def disable_model(model_id: str) -> None:
     _print(_request("POST", f"/staff/models/{model_id}/disable"))
