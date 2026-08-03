@@ -1,0 +1,81 @@
+# LLM-RIO configuration reference
+# Values below are the built-in defaults unless marked CHANGE_ME.
+
+# =============================================================================
+# REQUIRED: change this for each independently operated host
+# =============================================================================
+machine_id = "CHANGE_ME"
+
+# =============================================================================
+# REQUIRED REVIEW: defaults work, but confirm them for the target HPC
+# =============================================================================
+
+# Loopback is safest. Use a trusted reverse proxy or deliberate network binding for remote access.
+api_host = "127.0.0.1"
+api_port = 8000
+
+database_path = "./state/llm-rio.db"
+model_store = "./models"
+log_dir = "./logs"
+
+# [] means automatic selection:
+# - inside Slurm/allocation: GPUs in CUDA_VISIBLE_DEVICES
+# - without CUDA_VISIBLE_DEVICES: every GPU reported by NVML
+# An explicit list restricts the automatic set and may not escape the scheduler allocation.
+# Example: managed_gpu_uuids = ["GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]
+managed_gpu_uuids = []
+
+# =============================================================================
+# OPTIONAL: GPU capacity and scheduler policy
+# =============================================================================
+reserved_vram_mib = 2048
+queue_capacity_per_model = 1024
+queue_capacity_per_tenant = 128
+wait_duration_seconds = 900
+minimum_residency_seconds = 300
+placement_cooldown_seconds = 60
+fair_share_seconds = 7200
+validation_idle_window_seconds = 600
+scheduler_tick_seconds = 1
+
+# =============================================================================
+# OPTIONAL: worker processes
+# =============================================================================
+worker_startup_timeout_seconds = 900
+worker_drain_watchdog_seconds = 600
+worker_port_start = 18000
+worker_port_end = 18999
+
+# =============================================================================
+# OPTIONAL: request limits
+# max_prompt_tokens is a fixed global ceiling; it is not "auto" in this release.
+# =============================================================================
+max_prompt_tokens = 32768
+max_output_tokens = 8192
+max_n = 4
+
+# =============================================================================
+# OPTIONAL: quotas
+# false charges actual use and refunds unused reservation; true charges the requested maximum.
+# =============================================================================
+default_quota_tokens = 1000000
+quota_charge_requested_maximum = false
+
+# =============================================================================
+# OPTIONAL: logging
+# Keep engine capture on during HPC setup/debugging, then disable it for steady-state operation.
+# =============================================================================
+capture_worker_engine_logs = true
+log_level = "INFO"
+
+# Hugging Face credentials are supported through LLMRIO_HF_TOKEN in .env.
+# Do not put hf_token in this TOML file.
+
+# =============================================================================
+# OPTIONAL: inference-engine commands
+# =============================================================================
+[engines]
+vllm_executable = "vllm"
+llama_cpp_executable = "llama-server"
+enable_llama_cpp = false
+

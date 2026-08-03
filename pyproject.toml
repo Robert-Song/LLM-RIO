@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "llm-rio"
+version = "0.1.0"
+description = "Machine-local, multi-tenant LLM inference router for GPU research hosts"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { file = "LICENSE" }
+authors = [{ name = "Robert Song" }]
+dependencies = [
+  "aiosqlite==0.21.0",
+  "argon2-cffi==25.1.0",
+  "cryptography==49.0.0",
+  "fastapi==0.116.1",
+  "httpx==0.28.1",
+  "huggingface-hub==0.34.4",
+  "nvidia-ml-py==13.580.65",
+  "pydantic==2.11.7",
+  "pydantic-settings==2.10.1",
+  "python-dotenv==1.1.1",
+  "typer==0.16.0",
+  "uvicorn==0.35.0",
+]
+
+[project.optional-dependencies]
+engine = ["vllm==0.26.0"]
+dev = [
+  "mypy==1.17.1",
+  "pytest==8.4.1",
+  "pytest-asyncio==1.1.0",
+  "respx==0.22.0",
+  "ruff==0.12.8",
+]
+
+[project.scripts]
+llm-rio = "llm_rio.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/llm_rio"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["llm_rio"]
+

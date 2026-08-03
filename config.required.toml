@@ -1,0 +1,21 @@
+# Minimal LLM-RIO configuration
+# Copy this file to config.toml, then change the REQUIRED value.
+
+# =============================================================================
+# REQUIRED
+# =============================================================================
+machine_id = "CHANGE_ME"
+
+# =============================================================================
+# REQUIRED REVIEW
+# These defaults are valid, but confirm them for the target HPC.
+# =============================================================================
+api_host = "127.0.0.1"
+api_port = 8000
+
+database_path = "./state/llm-rio.db"
+model_store = "./models"
+log_dir = "./logs"
+
+# Automatic: honor CUDA_VISIBLE_DEVICES, or use all NVML GPUs when it is unset.
+managed_gpu_uuids = []
