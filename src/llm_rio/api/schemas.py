@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 from llm_rio.domain import Role
 
@@ -12,9 +12,24 @@ class CreateKeyRequest(BaseModel):
     role: Role
     quota_account_id: str | None = None
     quota_account_nickname: str | None = None
-    balance_tokens: int = Field(default=1_000_000, ge=0)
+    limit_tokens: int = Field(
+        default=1_000_000,
+        ge=0,
+        validation_alias=AliasChoices("limit_tokens", "balance_tokens"),
+    )
     unlimited: bool = False
-    model_ids: list[str] = Field(default_factory=list)
+    models: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("models", "model_ids"),
+    )
+    api_key: str | None = Field(default=None, min_length=24)
+
+    @field_validator("api_key")
+    @classmethod
+    def custom_api_key_uses_rio_format(cls, value: str | None) -> str | None:
+        if value is not None and not value.startswith("rio_"):
+            raise ValueError("custom API keys must start with rio_")
+        return value
 
 
 class KeySecretResponse(BaseModel):
@@ -25,7 +40,10 @@ class KeySecretResponse(BaseModel):
 
 
 class QuotaUpdate(BaseModel):
-    balance_tokens: int = Field(ge=0)
+    limit_tokens: int = Field(
+        ge=0,
+        validation_alias=AliasChoices("limit_tokens", "balance_tokens"),
+    )
     unlimited: bool = False
 
 
@@ -33,11 +51,20 @@ class GrantUpdate(BaseModel):
     model_ids: list[str]
 
 
+class ModelAccessUpdate(BaseModel):
+    key: str = Field(min_length=1)
+    models: list[str]
+    mode: Literal["add", "remove", "replace"] = "add"
+
+
 class RegisterModelRequest(BaseModel):
     nickname: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
     huggingface_repo: str = Field(pattern=r"^[^/\s]+/[^/\s]+$")
     revision: str | None = None
-    grant_to_key_ids: list[str] = Field(default_factory=list)
+    grant_to_keys: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("grant_to_keys", "grant_to_key_ids"),
+    )
 
 
 class MaintenanceRequest(BaseModel):

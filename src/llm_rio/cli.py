@@ -5,8 +5,10 @@ import json
 import os
 import platform
 import shutil
+import sqlite3
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import typer
@@ -16,8 +18,9 @@ from llm_rio.api.app import create_app
 from llm_rio.config import Settings
 from llm_rio.domain import Role
 from llm_rio.inventory import InventoryError, discover_inventory
+from llm_rio.security import ApiKeyVault, default_key_vault_path
 
-app = typer.Typer(help="Admin client and local lifecycle commands for LLM-RIO.")
+app = typer.Typer(help="Local administration and lifecycle commands for LLM-RIO.")
 keys_app = typer.Typer(help="Manage API keys.")
 models_app = typer.Typer(help="Manage the model catalog.")
 maintenance_app = typer.Typer(help="Drain or resume this machine.")
@@ -31,14 +34,51 @@ def _settings(config: Path) -> Settings:
 
 
 def _base_url() -> str:
-    return os.environ.get("LLMRIO_API_URL", "http://127.0.0.1:8000").rstrip("/")
+    configured = os.environ.get("LLMRIO_API_URL")
+    if configured:
+        return configured.rstrip("/")
+    settings = _settings(Path(os.environ.get("LLMRIO_CONFIG", "config.toml")))
+    return f"http://127.0.0.1:{settings.api_port}"
 
 
 def _api_key() -> str:
     value = os.environ.get("LLMRIO_API_KEY")
-    if not value:
-        raise typer.BadParameter("Set LLMRIO_API_KEY for authenticated management commands")
-    return value
+    if value:
+        return value
+    hostname = urlsplit(_base_url()).hostname
+    if hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise typer.ClickException(
+            "Remote administration requires LLMRIO_API_KEY; local commands recover an admin "
+            "credential automatically from the protected host database."
+        )
+    config_path = Path(os.environ.get("LLMRIO_CONFIG", "config.toml"))
+    settings = _settings(config_path)
+    database_path = settings.database_path.resolve()
+    vault_path = default_key_vault_path(database_path)
+    if not database_path.exists():
+        raise typer.ClickException(
+            f"Local database not found at {database_path}. Start LLM-RIO once before using "
+            "management commands."
+        )
+    if not vault_path.exists():
+        raise typer.ClickException(f"Local API-key vault not found at {vault_path}.")
+    try:
+        with sqlite3.connect(database_path) as connection:
+            row = connection.execute(
+                """
+                SELECT encrypted_api_key FROM api_keys
+                 WHERE role = 'admin' AND active = 1
+                 ORDER BY created_at, id LIMIT 1
+                """
+            ).fetchone()
+    except sqlite3.Error as exc:
+        raise typer.ClickException(f"Cannot read local administrator data: {exc}") from exc
+    if row is None:
+        raise typer.ClickException("No active local administrator key exists.")
+    try:
+        return ApiKeyVault(vault_path).decrypt(str(row[0]))
+    except (OSError, RuntimeError) as exc:
+        raise typer.ClickException(f"Cannot recover a local administrator key: {exc}") from exc
 
 
 def _request(
@@ -69,6 +109,78 @@ def _request(
 
 def _print(value: Any) -> None:
     typer.echo(json.dumps(value, indent=2, sort_keys=True))
+
+
+def _key_records() -> list[dict[str, Any]]:
+    payload = _request("GET", "/admin/keys")
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        raise typer.ClickException("The server returned an invalid API-key list.")
+    return [record for record in data if isinstance(record, dict)]
+
+
+def _key_record(selector: str) -> dict[str, Any]:
+    matches = [
+        record
+        for record in _key_records()
+        if selector == record.get("nickname") or selector == record.get("api_key")
+    ]
+    if not matches:
+        raise typer.ClickException(
+            f"API key '{selector}' was not found. Use its nickname or full API key."
+        )
+    if len(matches) > 1:
+        raise typer.ClickException(f"API key selector '{selector}' is ambiguous.")
+    return matches[0]
+
+
+def _model_records() -> list[dict[str, Any]]:
+    payload = _request("GET", "/staff/models")
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        raise typer.ClickException("The server returned an invalid model list.")
+    return [record for record in data if isinstance(record, dict)]
+
+
+def _model_record(nickname: str) -> dict[str, Any]:
+    matches = [record for record in _model_records() if nickname == record.get("nickname")]
+    if not matches:
+        raise typer.ClickException(f"Model nickname '{nickname}' was not found.")
+    return matches[0]
+
+
+def _print_key_record(record: dict[str, Any], number: int | None = None) -> None:
+    heading = f"{number}. {record.get('nickname')}" if number is not None else str(
+        record.get("nickname")
+    )
+    typer.echo(heading)
+    typer.echo(f"   API key: {record.get('api_key')}")
+    typer.echo(f"   Role: {record.get('role')}")
+    typer.echo(f"   Quota account: {record.get('account_nickname')}")
+    typer.echo(f"   Active: {'yes' if record.get('active') else 'no'}")
+    if record.get("unlimited"):
+        typer.echo("   Token limit: unlimited")
+    else:
+        typer.echo(f"   Token limit: {int(record.get('limit_tokens') or 0):,}")
+        typer.echo(f"   Used since reset: {int(record.get('used_tokens') or 0):,}")
+        typer.echo(f"   Remaining: {int(record.get('balance_tokens') or 0):,}")
+    typer.echo(
+        f"   Lifetime charged: {int(record.get('key_lifetime_charged_tokens') or 0):,}"
+    )
+    granted_models = record.get("granted_models") or []
+    typer.echo(f"   Models: {', '.join(granted_models) if granted_models else '(none)'}")
+    typer.echo(f"   Created: {record.get('created_at')}")
+    typer.echo(f"   Last used: {record.get('last_used_at') or 'never'}")
+
+
+def _print_key_records(records: list[dict[str, Any]]) -> None:
+    if not records:
+        typer.echo("No API keys found.")
+        return
+    typer.echo("API keys\n")
+    for index, record in enumerate(records, 1):
+        _print_key_record(record, index)
+        typer.echo()
 
 
 @app.command()
@@ -149,66 +261,132 @@ def doctor(
         raise typer.Exit(1)
 
 
-
 @keys_app.command("list")
-def list_keys() -> None:
-    _print(_request("GET", "/admin/keys"))
+def list_keys(json_output: bool = typer.Option(False, "--json")) -> None:
+    """List every API key, including full recoverable key values."""
+    records = _key_records()
+    if json_output:
+        internal_fields = {"id", "quota_account_id", "usage_baseline_tokens"}
+        public_records = [
+            {key: value for key, value in record.items() if key not in internal_fields}
+            for record in records
+        ]
+        _print({"data": public_records})
+    else:
+        _print_key_records(records)
+
+
+@keys_app.command("show")
+def show_key(key: str) -> None:
+    """Show one API key selected by nickname or full key."""
+    _print_key_record(_key_record(key))
+
+
+@keys_app.command("usage")
+def show_key_usage(key: str) -> None:
+    """Show quota and usage for one API key selected by nickname or full key."""
+    _print_key_record(_key_record(key))
 
 
 @keys_app.command("create")
 def create_key(
     nickname: str,
     role: Role = typer.Option(Role.USER, "--role"),
-    balance_tokens: int = typer.Option(1_000_000, "--balance"),
+    limit_tokens: int = typer.Option(1_000_000, "--limit", "--balance"),
     unlimited: bool = typer.Option(False, "--unlimited"),
     account_id: str | None = typer.Option(None, "--account-id"),
-    grant: list[str] | None = typer.Option(None, "--grant"),
+    grant: list[str] | None = typer.Option(None, "--grant", help="Model nickname to grant."),
+    api_key: str | None = typer.Option(
+        None, "--api-key", help="Optional custom rio_ API key; generated when omitted."
+    ),
 ) -> None:
-    _print(
-        _request(
-            "POST",
-            "/admin/keys",
-            json_body={
-                "nickname": nickname,
-                "role": role.value,
-                "balance_tokens": balance_tokens,
-                "unlimited": unlimited,
-                "quota_account_id": account_id,
-                "model_ids": grant or [],
-            },
-        )
+    """Create an API key and print its complete value."""
+    result = _request(
+        "POST",
+        "/admin/keys",
+        json_body={
+            "nickname": nickname,
+            "role": role.value,
+            "limit_tokens": limit_tokens,
+            "unlimited": unlimited,
+            "quota_account_id": account_id,
+            "models": grant or [],
+            "api_key": api_key,
+        },
     )
+    typer.echo(f"API key created for '{result['nickname']}'.")
+    typer.echo(f"API key: {result['api_key']}")
 
 
 @keys_app.command("rotate")
-def rotate_key(key_id: str) -> None:
-    _print(_request("POST", f"/admin/keys/{key_id}/rotate"))
+def rotate_key(key: str) -> None:
+    """Rotate an API key selected by nickname or full key."""
+    record = _key_record(key)
+    result = _request("POST", f"/admin/keys/{record['id']}/rotate")
+    typer.echo(f"API key rotated for '{result['nickname']}'.")
+    typer.echo(f"API key: {result['api_key']}")
 
 
 @keys_app.command("revoke")
-def revoke_key(key_id: str) -> None:
-    _request("POST", f"/admin/keys/{key_id}/revoke")
-    typer.echo("Key revoked.")
+def revoke_key(key: str) -> None:
+    """Deactivate an API key selected by nickname or full key."""
+    record = _key_record(key)
+    _request("POST", f"/admin/keys/{record['id']}/revoke")
+    typer.echo(f"API key '{record['nickname']}' revoked.")
 
 
 @keys_app.command("delete")
-def delete_key(key_id: str) -> None:
-    _request("DELETE", f"/admin/keys/{key_id}")
-    typer.echo("Key deleted.")
+def delete_key(key: str) -> None:
+    """Remove credential utility while retaining audit history."""
+    record = _key_record(key)
+    _request("DELETE", f"/admin/keys/{record['id']}")
+    typer.echo(f"API key '{record['nickname']}' deleted.")
+
+
+@keys_app.command("remove")
+def remove_key(key: str) -> None:
+    """Alias for keys delete."""
+    delete_key(key)
+
+
+def _set_key_limit(key: str, limit_tokens: int, unlimited: bool | None) -> None:
+    record = _key_record(key)
+    resolved_unlimited = bool(record.get("unlimited")) if unlimited is None else unlimited
+    _request(
+        "PUT",
+        f"/admin/keys/{record['id']}/quota",
+        json_body={"limit_tokens": limit_tokens, "unlimited": resolved_unlimited},
+    )
+    typer.echo(f"Token limit updated for '{record['nickname']}'.")
+
+
+@keys_app.command("limit")
+def update_limit(
+    key: str,
+    limit_tokens: int = typer.Option(..., "--limit", "--balance"),
+    unlimited: bool | None = typer.Option(None, "--unlimited/--limited"),
+) -> None:
+    """Set the lifetime token limit for the current usage period."""
+    _set_key_limit(key, limit_tokens, unlimited)
 
 
 @keys_app.command("quota")
 def update_quota(
-    key_id: str,
-    balance_tokens: int = typer.Option(..., "--balance"),
-    unlimited: bool = typer.Option(False, "--unlimited"),
+    key: str,
+    limit_tokens: int = typer.Option(..., "--limit", "--balance"),
+    unlimited: bool | None = typer.Option(None, "--unlimited/--limited"),
 ) -> None:
-    _request(
-        "PUT",
-        f"/admin/keys/{key_id}/quota",
-        json_body={"balance_tokens": balance_tokens, "unlimited": unlimited},
-    )
-    typer.echo("Quota updated.")
+    """Alias for keys limit."""
+    _set_key_limit(key, limit_tokens, unlimited)
+
+
+@keys_app.command("reset-usage")
+def reset_usage(key: str) -> None:
+    """Reset current-period usage while preserving lifetime audit totals."""
+    record = _key_record(key)
+    result = _request("POST", f"/admin/keys/{record['id']}/usage/reset")
+    typer.echo(f"Usage reset for '{record['nickname']}'.")
+    _print(result)
 
 
 @models_app.command("add")
@@ -216,8 +394,11 @@ def add_model(
     nickname: str,
     huggingface_repo: str,
     revision: str | None = typer.Option(None, "--revision"),
-    grant_to: list[str] | None = typer.Option(None, "--grant-to"),
+    grant_to: list[str] | None = typer.Option(
+        None, "--grant-to", help="API-key nickname or full API key."
+    ),
 ) -> None:
+    """Register a model and optionally grant it to named API keys."""
     _print(
         _request(
             "POST",
@@ -226,7 +407,7 @@ def add_model(
                 "nickname": nickname,
                 "huggingface_repo": huggingface_repo,
                 "revision": revision,
-                "grant_to_key_ids": grant_to or [],
+                "grant_to_keys": grant_to or [],
             },
         )
     )
@@ -248,16 +429,40 @@ def retry_model_job(job_id: str) -> None:
 
 
 @models_app.command("disable")
-def disable_model(model_id: str) -> None:
-    _print(_request("POST", f"/staff/models/{model_id}/disable"))
+def disable_model(nickname: str) -> None:
+    """Disable a model selected by nickname."""
+    model = _model_record(nickname)
+    _print(_request("POST", f"/staff/models/{model['id']}/disable"))
+
+
+@models_app.command("access")
+def model_access(key: str) -> None:
+    """List model access for an API-key nickname or full API key."""
+    record = _key_record(key)
+    models = record.get("granted_models") or []
+    typer.echo(f"{record['nickname']}: {', '.join(models) if models else '(none)'}")
 
 
 @models_app.command("grant")
-def grant_models(key_id: str, model_id: list[str]) -> None:
-    _request(
-        "PUT", f"/staff/keys/{key_id}/model-grants", json_body={"model_ids": model_id}
+def grant_models(key: str, model: list[str]) -> None:
+    """Add model nicknames without removing the key's existing access."""
+    result = _request(
+        "POST",
+        "/staff/model-access",
+        json_body={"key": key, "models": model, "mode": "add"},
     )
-    typer.echo("Model grants replaced.")
+    typer.echo(f"Granted {', '.join(model)} to '{result['key']}'.")
+
+
+@models_app.command("revoke")
+def revoke_models(key: str, model: list[str]) -> None:
+    """Remove model nicknames without changing the key's other access."""
+    result = _request(
+        "POST",
+        "/staff/model-access",
+        json_body={"key": key, "models": model, "mode": "remove"},
+    )
+    typer.echo(f"Revoked {', '.join(model)} from '{result['key']}'.")
 
 
 @maintenance_app.command("drain")

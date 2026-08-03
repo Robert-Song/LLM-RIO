@@ -9,7 +9,13 @@ from llm_rio.config import Settings
 from llm_rio.domain import Engine, MachineInventory, PlacementProfile
 from llm_rio.inventory import gpu_environment
 from llm_rio.runtime import ResidencyScheduler
-from llm_rio.validation import CandidateShape, ProfileValidator, ValidationError, ValidationPreempted
+from llm_rio.validation import (
+    CandidateShape,
+    ProfileValidator,
+    ValidationError,
+    ValidationPreempted,
+    validation_log_path,
+)
 
 
 async def validate_llama_cpp(
@@ -86,8 +92,14 @@ async def _probe_llama_cpp(
     ]
     if candidate.max_num_seqs is not None:
         command.extend(["--parallel", str(candidate.max_num_seqs)])
-    validation_id = str(uuid.uuid4())
-    log_path = settings.log_dir / f"validation-llama-{validation_id}.log"
+    gpu_indices = tuple(device.index for device in inventory.gpus if device.uuid in gpu_set)
+    log_path = validation_log_path(
+        log_dir=settings.log_dir,
+        nickname=nickname,
+        engine="llama-cpp",
+        tensor_parallel_size=1,
+        gpu_indices=gpu_indices,
+    )
     started = time.monotonic()
     with log_path.open("ab", buffering=0) as log_handle:
         try:

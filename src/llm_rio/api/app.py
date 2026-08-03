@@ -48,7 +48,7 @@ async def _ensure_initial_admin(database: Database, default_quota_tokens: int) -
         account_nickname="admin-account",
         prefix=prefix,
         api_key=api_key,
-        balance_tokens=default_quota_tokens,
+        limit_tokens=default_quota_tokens,
         unlimited=True,
     )
     access_logger.warning("FIRST STARTUP: created initial administrator 'admin'")

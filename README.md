@@ -36,8 +36,10 @@ chmod +x llmctl
 `config.required.toml` is the minimal starting file. `config.example.toml` is the complete,
 sectioned reference for every customizable setting.
 Load site-specific Python or CUDA modules before these commands when required by the HPC. The first
-startup prints the initial admin key before accepting requests; that admin can create any number of
-additional admin keys.
+startup prints the initial admin key before accepting requests; administrators can create any
+number of additional admin keys. Local `llmctl` management commands automatically recover an
+active admin credential from the protected host database, so they do not require
+`LLMRIO_API_KEY`. Remote management still requires an explicitly supplied admin key.
 
 
 ## API surface
@@ -47,11 +49,12 @@ additional admin keys.
 - `GET /v1/me/usage`
 - `POST /staff/models`, `GET /staff/model-jobs/{job_id}`, and
   `POST /staff/model-jobs/{job_id}/retry`
-- staff model-disable and grant-management routes
+- `POST /staff/model-access` using API-key selectors and model nicknames
 - admin key, quota, and atomic maintenance routes
 
-The admin CLI is a thin HTTP client for the same management routes. Only `serve` and `doctor` are
-local lifecycle/diagnostic commands.
+The admin CLI uses the authenticated management routes but automatically recovers a local admin
+credential from the protected database/vault. Key and model access commands accept human-readable
+nicknames (or a complete API key for key selection), so internal database IDs are not required.
 
 ## Development
 

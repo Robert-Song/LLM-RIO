@@ -8,6 +8,7 @@ import secrets
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,29 @@ class ValidationError(RuntimeError):
 class ValidationPreempted(ValidationError):
     def __init__(self) -> None:
         super().__init__("validation", "validation yielded to production inference")
+
+
+def validation_log_path(
+    *,
+    log_dir: Path,
+    nickname: str,
+    engine: str,
+    tensor_parallel_size: int,
+    gpu_indices: tuple[int, ...],
+) -> Path:
+    """Build a readable, sortable, and collision-resistant validation log path."""
+    safe_nickname = re.sub(r"[^a-zA-Z0-9._-]+", "-", nickname).strip("._-").lower()
+    safe_nickname = safe_nickname[:80] or "model"
+    safe_engine = re.sub(r"[^a-zA-Z0-9._-]+", "-", engine).strip("._-").lower()
+    safe_engine = safe_engine[:32] or "engine"
+    gpu_label = "-".join(str(index) for index in gpu_indices) or "unknown"
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    unique_suffix = uuid.uuid4().hex[:8]
+    filename = (
+        f"validation-{safe_nickname}-{safe_engine}-tp{tensor_parallel_size}-"
+        f"gpus{gpu_label}-{timestamp}-{unique_suffix}.log"
+    )
+    return log_dir / filename
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,8 +211,16 @@ class ProfileValidator:
             )
         if candidate.quantization:
             command.extend(["--quantization", candidate.quantization])
-        validation_id = str(uuid.uuid4())
-        log_path = self.settings.log_dir / f"validation-{validation_id}.log"
+        gpu_indices = tuple(
+            device.index for device in self.inventory.gpus if device.uuid in gpu_set
+        )
+        log_path = validation_log_path(
+            log_dir=self.settings.log_dir,
+            nickname=nickname,
+            engine="vllm",
+            tensor_parallel_size=candidate.tensor_parallel_size,
+            gpu_indices=gpu_indices,
+        )
         environment = gpu_environment(gpu_set, self.settings.engines.environment)
         environment["VLLM_API_KEY"] = api_key
         started = time.monotonic()

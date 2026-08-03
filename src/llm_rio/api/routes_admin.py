@@ -7,20 +7,32 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 from llm_rio.api.dependencies import AdminPrincipal
 from llm_rio.api.schemas import (
     CreateKeyRequest,
-    GrantUpdate,
     KeySecretResponse,
     MaintenanceRequest,
     QuotaUpdate,
 )
 from llm_rio.domain import RuntimeState, ServiceMode
 from llm_rio.errors import RioError
-from llm_rio.security import issue_api_key
+from llm_rio.security import issue_api_key, token_prefix
 
 router = APIRouter()
 
 
 async def _create_key(request: Request, body: CreateKeyRequest) -> KeySecretResponse:
     database = request.app.state.database
+
+    if body.models:
+        available_models = {
+            str(model["nickname"]) for model in await database.list_models()
+        }
+        missing_models = sorted(set(body.models) - available_models)
+        if missing_models:
+            raise RioError(
+                "model_not_found",
+                "One or more model nicknames do not exist",
+                status_code=404,
+                details={"missing_models": missing_models},
+            )
     key_id = str(uuid.uuid4())
     if body.quota_account_id:
         account = await database.fetchone(
@@ -33,7 +45,11 @@ async def _create_key(request: Request, body: CreateKeyRequest) -> KeySecretResp
     else:
         account_id = str(uuid.uuid4())
         account_nickname = body.quota_account_nickname or body.nickname
-    token, prefix = issue_api_key(key_id)
+    if body.api_key is None:
+        token, prefix = issue_api_key(key_id)
+    else:
+        token = body.api_key
+        prefix = token_prefix(token)
     await database.create_key(
         key_id=key_id,
         nickname=body.nickname,
@@ -42,11 +58,13 @@ async def _create_key(request: Request, body: CreateKeyRequest) -> KeySecretResp
         account_nickname=account_nickname,
         prefix=prefix,
         api_key=token,
-        balance_tokens=body.balance_tokens,
+        limit_tokens=body.limit_tokens,
         unlimited=body.unlimited,
     )
-    if body.model_ids:
-        await database.replace_model_grants(key_id, body.model_ids)
+    if body.models:
+        await database.update_model_access(
+            key_id=key_id, model_nicknames=body.models, mode="replace"
+        )
     return KeySecretResponse(id=key_id, nickname=body.nickname, api_key=token)
 
 
@@ -89,10 +107,8 @@ async def revoke_key(key_id: str, request: Request, _: AdminPrincipal) -> Respon
 
 @router.delete("/admin/keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_key(
-    key_id: str, request: Request, principal: AdminPrincipal
+    key_id: str, request: Request, _: AdminPrincipal
 ) -> Response:
-    if key_id == principal.key_id:
-        raise RioError("cannot_delete_self", "The active admin key cannot delete itself", status_code=409)
     if not await request.app.state.database.delete_key(key_id):
         raise HTTPException(status_code=404, detail="Key not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -103,10 +119,20 @@ async def update_quota(
     key_id: str, body: QuotaUpdate, request: Request, _: AdminPrincipal
 ) -> Response:
     if not await request.app.state.database.update_quota(
-        key_id, body.balance_tokens, body.unlimited
+        key_id, body.limit_tokens, body.unlimited
     ):
         raise HTTPException(status_code=404, detail="Key not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/admin/keys/{key_id}/usage/reset")
+async def reset_usage(
+    key_id: str, request: Request, _: AdminPrincipal
+) -> dict[str, object]:
+    result = await request.app.state.database.reset_usage(key_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Key not found")
+    return result
 
 
 @router.post("/admin/maintenance", status_code=status.HTTP_202_ACCEPTED)

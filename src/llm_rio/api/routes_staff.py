@@ -3,8 +3,9 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request, Response, status
 
 from llm_rio.api.dependencies import StaffPrincipal
-from llm_rio.api.schemas import GrantUpdate, RegisterModelRequest
+from llm_rio.api.schemas import GrantUpdate, ModelAccessUpdate, RegisterModelRequest
 from llm_rio.domain import CatalogState
+from llm_rio.errors import RioError
 
 router = APIRouter()
 
@@ -13,12 +14,23 @@ router = APIRouter()
 async def register_model(
     body: RegisterModelRequest, request: Request, principal: StaffPrincipal
 ) -> dict[str, str]:
-    model_id, job_id = await request.app.state.database.create_model_job(
+    database = request.app.state.database
+    grant_key_ids: list[str] = []
+    for selector in body.grant_to_keys:
+        key = await database.key_by_selector(selector)
+        if key is None:
+            raise RioError(
+                "grant_key_not_found",
+                f"API key '{selector}' does not exist or is inactive",
+                status_code=404,
+            )
+        grant_key_ids.append(str(key["id"]))
+    model_id, job_id = await database.create_model_job(
         nickname=body.nickname,
         repo=body.huggingface_repo,
         revision=body.revision,
         creator_key_id=principal.key_id,
-        grant_key_ids=body.grant_to_key_ids,
+        grant_key_ids=grant_key_ids,
     )
     request.app.state.registration.start(job_id)
     return {"model_id": model_id, "job_id": job_id}
@@ -68,6 +80,26 @@ async def disable_model(
         if worker.model_id == model_id:
             await request.app.state.supervisor.drain(worker.id)
     return {"state": "DISABLED"}
+
+
+@router.post("/staff/model-access")
+async def update_model_access(
+    body: ModelAccessUpdate, request: Request, _: StaffPrincipal
+) -> dict[str, object]:
+    database = request.app.state.database
+    key = await database.key_by_selector(body.key)
+    if key is None:
+        raise RioError(
+            "grant_key_not_found",
+            f"API key '{body.key}' does not exist or is inactive",
+            status_code=404,
+        )
+    models = await database.update_model_access(
+        key_id=str(key["id"]),
+        model_nicknames=body.models,
+        mode=body.mode,
+    )
+    return {"key": key["nickname"], "models": models}
 
 
 @router.put("/staff/keys/{key_id}/model-grants", status_code=status.HTTP_204_NO_CONTENT)
