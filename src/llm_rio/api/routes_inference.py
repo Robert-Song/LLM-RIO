@@ -138,7 +138,7 @@ async def usage(request: Request, principal: CurrentPrincipal) -> dict[str, Any]
     return await request.app.state.database.usage(principal)
 
 
-@router.post("/v1/chat/completions")
+@router.post("/v1/chat/completions", response_model=None)
 async def chat_completions(
     request: Request, body: ChatCompletionRequest, principal: CurrentPrincipal
 ) -> JSONResponse | StreamingResponse:
