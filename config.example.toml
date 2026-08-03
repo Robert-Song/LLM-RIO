@@ -79,3 +79,7 @@ vllm_executable = "vllm"
 llama_cpp_executable = "llama-server"
 enable_llama_cpp = false
 
+[engines.environment]
+# Optional per-host environment inherited by validation and resident workers.
+# NCCL_NET_PLUGIN = "none"  # Disable a crashing external NCCL net plugin on one host.
+

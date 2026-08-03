@@ -11,6 +11,7 @@ class EngineSettings(BaseModel):
     vllm_executable: str = "vllm"
     llama_cpp_executable: str = "llama-server"
     enable_llama_cpp: bool = False
+    environment: dict[str, str] = Field(default_factory=dict)
 
 
 class Settings(BaseSettings):

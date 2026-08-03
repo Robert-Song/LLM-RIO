@@ -167,8 +167,11 @@ def discover_inventory(machine_id: str, managed_gpu_uuids: list[str]) -> Machine
     )
 
 
-def gpu_environment(gpu_uuids: tuple[str, ...]) -> dict[str, str]:
+def gpu_environment(
+    gpu_uuids: tuple[str, ...], overrides: dict[str, str] | None = None
+) -> dict[str, str]:
     environment = dict(os.environ)
+    environment.update(overrides or {})
     environment["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_uuids)
     return environment
 

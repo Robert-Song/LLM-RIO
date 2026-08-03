@@ -146,8 +146,6 @@ class ProfileValidator:
             str(port),
             "--served-model-name",
             nickname,
-            "--api-key",
-            api_key,
             "--tensor-parallel-size",
             str(candidate.tensor_parallel_size),
             "--dtype",
@@ -163,6 +161,8 @@ class ProfileValidator:
             command.extend(["--quantization", candidate.quantization])
         validation_id = str(uuid.uuid4())
         log_path = self.settings.log_dir / f"validation-{validation_id}.log"
+        environment = gpu_environment(gpu_set, self.settings.engines.environment)
+        environment["VLLM_API_KEY"] = api_key
         started = time.monotonic()
         with log_path.open("ab", buffering=0) as log_handle:
             try:
@@ -170,7 +170,7 @@ class ProfileValidator:
                     *command,
                     stdout=log_handle,
                     stderr=asyncio.subprocess.STDOUT,
-                    env=gpu_environment(gpu_set),
+                    env=environment,
                     start_new_session=True,
                 )
             except OSError as exc:

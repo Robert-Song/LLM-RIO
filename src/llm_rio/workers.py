@@ -78,7 +78,9 @@ class WorkerSupervisor:
             except BaseException:
                 self.workers.pop(worker_id, None)
                 raise
-            environment = gpu_environment(gpu_uuids)
+            environment = gpu_environment(gpu_uuids, self.settings.engines.environment)
+            if worker.profile.engine is Engine.VLLM:
+                environment["VLLM_API_KEY"] = self.internal_api_key
             log_path: Path | None = None
             log_handle: Any | None = None
             worker_output: Any = asyncio.subprocess.DEVNULL
@@ -139,8 +141,6 @@ class WorkerSupervisor:
                 str(worker.port),
                 "--served-model-name",
                 served_model_name,
-                "--api-key",
-                self.internal_api_key,
                 "--tensor-parallel-size",
                 str(profile.tensor_parallel_size),
                 "--pipeline-parallel-size",
