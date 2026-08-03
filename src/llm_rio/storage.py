@@ -668,7 +668,9 @@ class Database:
             result[key.removesuffix("_json")] = json.loads(result.pop(key))
         return result
 
-    async def list_models(self, key_id: str | None = None) -> list[dict[str, Any]]:
+    async def list_models(
+        self, key_id: str | None = None, *, include_registration_jobs: bool = False
+    ) -> list[dict[str, Any]]:
         if key_id is None:
             rows = await self.fetchall("SELECT * FROM model_catalog ORDER BY nickname")
         else:
@@ -680,7 +682,31 @@ class Database:
                 """,
                 (key_id, CatalogState.AVAILABLE.value),
             )
-        return [self._decode_model(row) for row in rows]
+        result = [self._decode_model(row) for row in rows]
+        if not include_registration_jobs or key_id is not None or not result:
+            return result
+
+        job_rows = await self.fetchall(
+            """
+            SELECT j.id, j.model_id, j.state, j.stage, j.failure_json, j.created_at, j.updated_at
+              FROM model_jobs j
+             WHERE j.id = (
+                 SELECT newer.id
+                   FROM model_jobs newer
+                  WHERE newer.model_id = j.model_id
+                  ORDER BY newer.created_at DESC, newer.id DESC
+                  LIMIT 1
+             )
+            """
+        )
+        jobs_by_model: dict[str, dict[str, Any]] = {}
+        for row in job_rows:
+            job = dict(row)
+            job["failure"] = json.loads(job.pop("failure_json") or "null")
+            jobs_by_model[str(job.pop("model_id"))] = job
+        for model in result:
+            model["registration_job"] = jobs_by_model.get(str(model["id"]))
+        return result
 
     async def has_model_grant(self, key_id: str, model_id: str) -> bool:
         row = await self.fetchone(

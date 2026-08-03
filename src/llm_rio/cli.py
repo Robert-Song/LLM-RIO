@@ -149,6 +149,98 @@ def _model_record(nickname: str) -> dict[str, Any]:
     return matches[0]
 
 
+def _job_id_for_model(nickname: str) -> str:
+    model = _model_record(nickname)
+    job = model.get("registration_job")
+    if not isinstance(job, dict) or not isinstance(job.get("id"), str):
+        raise typer.ClickException(f"Model '{nickname}' has no registration job.")
+    return job["id"]
+
+
+def _job_id_from_selector(job_or_model: str) -> str:
+    """Accept a job UUID or a model nickname so review does not require internal IDs."""
+    try:
+        return _job_id_for_model(job_or_model)
+    except typer.ClickException:
+        return job_or_model
+
+
+def _review_guidance(stage: object) -> str:
+    guidance = {
+        "resolve": (
+            "Verify the Hugging Face repository, requested revision, and HF token access."
+        ),
+        "disk_capacity": "Free enough model-store space, then retry the registration.",
+        "inspection": "Confirm the snapshot contains a supported config and model-weight files.",
+        "candidate_shapes": (
+            "Use a smaller or quantized model, or make enough homogeneous GPU VRAM available."
+        ),
+        "engine_launch": (
+            "Check the validation log and confirm the configured vLLM executable can start."
+        ),
+        "engine_startup": (
+            "Read the validation log, then correct the engine, CUDA, or model compatibility issue."
+        ),
+        "generation": (
+            "Read the validation log and correct the model or engine compatibility issue."
+        ),
+        "streaming_contract": (
+            "Read the validation log and correct the model or engine streaming compatibility issue."
+        ),
+        "llama_cpp_launch": (
+            "Check the validation log and confirm the configured llama.cpp executable can start."
+        ),
+    }
+    return guidance.get(
+        str(stage),
+        "Review the failure details and traceback, correct the host or model issue, then retry.",
+    )
+
+
+def _print_model_job(job: dict[str, Any]) -> None:
+    typer.echo(f"Model: {job.get('nickname', '(unknown)')}")
+    typer.echo(f"Registration job: {job.get('id')}")
+    typer.echo(f"Status: {job.get('state')} / {job.get('catalog_state')}")
+    typer.echo(f"Stage: {job.get('stage')}")
+    failure = job.get("failure")
+    if not isinstance(failure, dict):
+        return
+    typer.echo(f"Failure: {failure.get('message', '(no message recorded)')}")
+    details = failure.get("details")
+    if isinstance(details, dict):
+        log_path = details.get("log_path")
+        if log_path:
+            typer.echo(f"Diagnostic log: {log_path}")
+    typer.echo("\nAdministrator action:")
+    typer.echo(f"  1. {_review_guidance(failure.get('stage', job.get('stage')))}")
+    typer.echo(f"  2. Retry: ./llmctl models retry {job.get('id')}")
+    typer.echo(
+        f"  3. If this model will not be fixed, disable it: "
+        f"./llmctl models disable {job.get('nickname')}"
+    )
+
+
+def _print_model_records(records: list[dict[str, Any]]) -> None:
+    if not records:
+        typer.echo("No models found.")
+        return
+    typer.echo("Models\n")
+    for model in records:
+        typer.echo(str(model.get("nickname")))
+        typer.echo(f"   State: {model.get('state')}")
+        typer.echo(f"   Repository: {model.get('huggingface_repo')}")
+        job = model.get("registration_job")
+        if isinstance(job, dict):
+            typer.echo(f"   Registration job: {job.get('id')}")
+            typer.echo(f"   Job: {job.get('state')} at {job.get('stage')}")
+            failure = job.get("failure")
+            if isinstance(failure, dict):
+                typer.echo(f"   Failure: {failure.get('message', '(no message recorded)')}")
+            if model.get("state") == "NEEDS_ADMIN_REVIEW":
+                typer.echo(f"   Next: ./llmctl models review {model.get('nickname')}")
+        typer.echo()
+
+
 def _print_key_record(record: dict[str, Any], number: int | None = None) -> None:
     heading = f"{number}. {record.get('nickname')}" if number is not None else str(
         record.get("nickname")
@@ -399,33 +491,54 @@ def add_model(
     ),
 ) -> None:
     """Register a model and optionally grant it to named API keys."""
-    _print(
-        _request(
-            "POST",
-            "/staff/models",
-            json_body={
-                "nickname": nickname,
-                "huggingface_repo": huggingface_repo,
-                "revision": revision,
-                "grant_to_keys": grant_to or [],
-            },
-        )
+    result = _request(
+        "POST",
+        "/staff/models",
+        json_body={
+            "nickname": nickname,
+            "huggingface_repo": huggingface_repo,
+            "revision": revision,
+            "grant_to_keys": grant_to or [],
+        },
     )
+    typer.echo(f"Registration started for '{nickname}'.")
+    typer.echo(f"Registration job: {result['job_id']}")
+    typer.echo(f"Check progress: ./llmctl models review {nickname}")
 
 
 @models_app.command("list")
-def list_models() -> None:
-    _print(_request("GET", "/staff/models"))
+def list_models(json_output: bool = typer.Option(False, "--json")) -> None:
+    """List models with registration jobs and next steps for failed registrations."""
+    payload = _request("GET", "/staff/models")
+    if json_output:
+        _print(payload)
+        return
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        raise typer.ClickException("The server returned an invalid model list.")
+    _print_model_records([record for record in data if isinstance(record, dict)])
 
 
+@models_app.command("review")
 @models_app.command("job")
-def model_job(job_id: str) -> None:
-    _print(_request("GET", f"/staff/model-jobs/{job_id}"))
+def model_job(
+    job_or_model: str,
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Explain a registration job; accepts its ID or the model nickname."""
+    job = _request("GET", f"/staff/model-jobs/{_job_id_from_selector(job_or_model)}")
+    if json_output:
+        _print(job)
+        return
+    _print_model_job(job)
 
 
 @models_app.command("retry")
-def retry_model_job(job_id: str) -> None:
-    _print(_request("POST", f"/staff/model-jobs/{job_id}/retry"))
+def retry_model_job(job_or_model: str) -> None:
+    """Retry a failed registration; accepts its ID or the model nickname."""
+    job_id = _job_id_from_selector(job_or_model)
+    result = _request("POST", f"/staff/model-jobs/{job_id}/retry")
+    typer.echo(f"Registration job {result['job_id']} was queued for retry.")
 
 
 @models_app.command("disable")

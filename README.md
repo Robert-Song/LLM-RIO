@@ -48,7 +48,8 @@ active admin credential from the protected host database, so they do not require
 - `GET /v1/models`
 - `GET /v1/me/usage`
 - `POST /staff/models`, `GET /staff/model-jobs/{job_id}`, and
-  `POST /staff/model-jobs/{job_id}/retry`
+  `POST /staff/model-jobs/{job_id}/retry`. `GET /staff/models` includes each
+  model's registration job so failed registrations can be reviewed by model nickname.
 - `POST /staff/model-access` using API-key selectors and model nicknames
 - admin key, quota, and atomic maintenance routes
 

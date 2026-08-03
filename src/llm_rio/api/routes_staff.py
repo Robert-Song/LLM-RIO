@@ -67,7 +67,9 @@ async def retry_model_job(
 
 @router.get("/staff/models")
 async def staff_models(request: Request, _: StaffPrincipal) -> dict[str, object]:
-    return {"data": await request.app.state.database.list_models()}
+    return {
+        "data": await request.app.state.database.list_models(include_registration_jobs=True)
+    }
 
 
 @router.post("/staff/models/{model_id}/disable", status_code=status.HTTP_202_ACCEPTED)
