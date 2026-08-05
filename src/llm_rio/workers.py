@@ -7,6 +7,7 @@ import secrets
 import signal
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -228,7 +229,9 @@ class WorkerSupervisor:
         await self._fail(worker, "startup_timeout")
 
     async def _monitor(self, worker: WorkerPlacement) -> None:
-        process = self._processes[worker.id]
+        process = self._processes.get(worker.id)
+        if process is None:
+            return
         return_code = await process.wait()
         if worker.state not in {RuntimeState.STOPPING, RuntimeState.COLD}:
             await self._fail(worker, f"unexpected_exit_{return_code}")
@@ -321,10 +324,8 @@ class WorkerSupervisor:
             if force:
                 process.kill()
             else:
-                try:
+                with suppress(ProcessLookupError):
                     process.send_signal(signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
             try:
                 await asyncio.wait_for(process.wait(), timeout=30.0)
             except TimeoutError:

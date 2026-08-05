@@ -151,6 +151,8 @@ class ProfileValidator:
         failures: list[ValidationError] = []
         for gpu_set in candidate.eligible_gpu_sets:
             while not await self.scheduler.acquire_validation_gpus(gpu_set):
+                if self.scheduler.validation_should_yield():
+                    raise ValidationPreempted()
                 await asyncio.sleep(5.0)
             try:
                 profile = await self._probe_vllm(
@@ -348,23 +350,29 @@ class ProfileValidator:
         saw_done = False
         peak = list(self._used_vram(gpu_set))
         started = time.monotonic()
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            async with client.stream(
+        async with (
+            httpx.AsyncClient(timeout=120.0) as client,
+            client.stream(
                 "POST",
                 f"http://127.0.0.1:{port}/v1/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}"},
                 json=payload,
-            ) as response:
+            ) as response,
+        ):
                 if not response.is_success:
                     body = (await response.aread()).decode(errors="replace")[-2000:]
                     raise ValidationError(
-                        "generation", f"generation returned HTTP {response.status_code}", {"body": body}
+                        "generation",
+                        f"generation returned HTTP {response.status_code}",
+                        {"body": body},
                     )
                 async for line in response.aiter_lines():
                     if self.scheduler.validation_should_yield():
                         raise ValidationPreempted()
                     current = self._used_vram(gpu_set)
-                    peak = [max(old, new) for old, new in zip(peak, current, strict=True)]
+                    peak = [
+                        max(old, new) for old, new in zip(peak, current, strict=True)
+                    ]
                     if not line.startswith("data: "):
                         continue
                     data = line[6:]
