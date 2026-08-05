@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+import click
 import httpx
 import typer
 import uvicorn
@@ -47,7 +48,7 @@ def _api_key() -> str:
         return value
     hostname = urlsplit(_base_url()).hostname
     if hostname not in {"127.0.0.1", "localhost", "::1"}:
-        raise typer.ClickException(
+        raise click.ClickException(
             "Remote administration requires LLMRIO_API_KEY; local commands recover an admin "
             "credential automatically from the protected host database."
         )
@@ -56,12 +57,12 @@ def _api_key() -> str:
     database_path = settings.database_path.resolve()
     vault_path = default_key_vault_path(database_path)
     if not database_path.exists():
-        raise typer.ClickException(
+        raise click.ClickException(
             f"Local database not found at {database_path}. Start LLM-RIO once before using "
             "management commands."
         )
     if not vault_path.exists():
-        raise typer.ClickException(f"Local API-key vault not found at {vault_path}.")
+        raise click.ClickException(f"Local API-key vault not found at {vault_path}.")
     try:
         with sqlite3.connect(database_path) as connection:
             row = connection.execute(
@@ -72,13 +73,13 @@ def _api_key() -> str:
                 """
             ).fetchone()
     except sqlite3.Error as exc:
-        raise typer.ClickException(f"Cannot read local administrator data: {exc}") from exc
+        raise click.ClickException(f"Cannot read local administrator data: {exc}") from exc
     if row is None:
-        raise typer.ClickException("No active local administrator key exists.")
+        raise click.ClickException("No active local administrator key exists.")
     try:
         return ApiKeyVault(vault_path).decrypt(str(row[0]))
     except (OSError, RuntimeError) as exc:
-        raise typer.ClickException(f"Cannot recover a local administrator key: {exc}") from exc
+        raise click.ClickException(f"Cannot recover a local administrator key: {exc}") from exc
 
 
 def _request(
@@ -115,7 +116,7 @@ def _key_records() -> list[dict[str, Any]]:
     payload = _request("GET", "/admin/keys")
     data = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(data, list):
-        raise typer.ClickException("The server returned an invalid API-key list.")
+        raise click.ClickException("The server returned an invalid API-key list.")
     return [record for record in data if isinstance(record, dict)]
 
 
@@ -126,11 +127,11 @@ def _key_record(selector: str) -> dict[str, Any]:
         if selector == record.get("nickname") or selector == record.get("api_key")
     ]
     if not matches:
-        raise typer.ClickException(
+        raise click.ClickException(
             f"API key '{selector}' was not found. Use its nickname or full API key."
         )
     if len(matches) > 1:
-        raise typer.ClickException(f"API key selector '{selector}' is ambiguous.")
+        raise click.ClickException(f"API key selector '{selector}' is ambiguous.")
     return matches[0]
 
 
@@ -138,14 +139,14 @@ def _model_records() -> list[dict[str, Any]]:
     payload = _request("GET", "/staff/models")
     data = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(data, list):
-        raise typer.ClickException("The server returned an invalid model list.")
+        raise click.ClickException("The server returned an invalid model list.")
     return [record for record in data if isinstance(record, dict)]
 
 
 def _model_record(nickname: str) -> dict[str, Any]:
     matches = [record for record in _model_records() if nickname == record.get("nickname")]
     if not matches:
-        raise typer.ClickException(f"Model nickname '{nickname}' was not found.")
+        raise click.ClickException(f"Model nickname '{nickname}' was not found.")
     return matches[0]
 
 
@@ -153,7 +154,7 @@ def _job_id_for_model(nickname: str) -> str:
     model = _model_record(nickname)
     job = model.get("registration_job")
     if not isinstance(job, dict) or not isinstance(job.get("id"), str):
-        raise typer.ClickException(f"Model '{nickname}' has no registration job.")
+        raise click.ClickException(f"Model '{nickname}' has no registration job.")
     return job["id"]
 
 
@@ -161,7 +162,7 @@ def _job_id_from_selector(job_or_model: str) -> str:
     """Accept a job UUID or a model nickname so review does not require internal IDs."""
     try:
         return _job_id_for_model(job_or_model)
-    except typer.ClickException:
+    except click.ClickException:
         return job_or_model
 
 
@@ -515,7 +516,7 @@ def list_models(json_output: bool = typer.Option(False, "--json")) -> None:
         return
     data = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(data, list):
-        raise typer.ClickException("The server returned an invalid model list.")
+        raise click.ClickException("The server returned an invalid model list.")
     _print_model_records([record for record in data if isinstance(record, dict)])
 
 
