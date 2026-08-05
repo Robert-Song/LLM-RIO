@@ -14,6 +14,7 @@ import click
 import httpx
 import typer
 import uvicorn
+import click
 
 from llm_rio.api.app import create_app
 from llm_rio.config import Settings
