@@ -101,26 +101,39 @@ def _validate_request(
     settings = request.app.state.settings
     model_limits = model["request_limits"]
     max_context_tokens = int(model_limits["max_context_tokens"])
-    max_prompt_tokens = (
-        min(settings.max_prompt_tokens, max_context_tokens)
-        if settings.max_prompt_tokens is not None
-        else max_context_tokens
-    )
-    limits = {**{
-        "max_prompt_tokens": max_prompt_tokens,
-        "max_output_tokens": settings.max_output_tokens,
-        "max_n": settings.max_n,
-    }, **model_limits}
+
+    raw_prompt_cap = model_limits.get("max_prompt_tokens")
+    if raw_prompt_cap is not None:
+        max_prompt_tokens = int(raw_prompt_cap)
+        if settings.max_prompt_tokens is not None:
+            max_prompt_tokens = min(max_prompt_tokens, settings.max_prompt_tokens)
+    elif settings.max_prompt_tokens is not None:
+        max_prompt_tokens = min(settings.max_prompt_tokens, max_context_tokens)
+    else:
+        max_prompt_tokens = max_context_tokens
+
+    raw_output_cap = model_limits.get("max_output_tokens")
+    if raw_output_cap is not None:
+        max_output_tokens = int(raw_output_cap)
+        if settings.max_output_tokens is not None:
+            max_output_tokens = min(max_output_tokens, settings.max_output_tokens)
+    elif settings.max_output_tokens is not None:
+        max_output_tokens = min(settings.max_output_tokens, max_context_tokens)
+    else:
+        max_output_tokens = None
+
+    raw_n_cap = model_limits.get("max_n")
+    max_n = int(raw_n_cap) if raw_n_cap is not None else settings.max_n
+
     prompt_tokens = _rough_tokens(body.messages)
     reservation_prompt_tokens = _conservative_prompt_tokens(body.messages)
-    if prompt_tokens > int(limits["max_prompt_tokens"]):
+    if prompt_tokens > max_prompt_tokens:
         raise RioError("context_length_exceeded", "The prompt exceeds the configured limit")
-    max_context_tokens = int(limits["max_context_tokens"])
     if prompt_tokens + body.output_limit > max_context_tokens:
         raise RioError("context_length_exceeded", "Prompt plus output exceeds the model context")
-    if body.output_limit > int(limits["max_output_tokens"]):
+    if max_output_tokens is not None and body.output_limit > max_output_tokens:
         raise RioError("max_tokens_exceeded", "The requested output limit is too high")
-    if body.n > int(limits["max_n"]):
+    if body.n > max_n:
         raise RioError("n_exceeded", "The requested number of choices is too high")
     capabilities = set(model["capabilities"])
     if body.tools and "tools" not in capabilities:

@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     worker_port_end: int = 18999
     scheduler_tick_seconds: float = 1.0
     max_prompt_tokens: int | None = Field(default=None, gt=0)
-    max_output_tokens: int = 8192
+    max_output_tokens: int | None = Field(default=None, gt=0)
     max_n: int = 4
     default_quota_tokens: int = 1_000_000
     quota_charge_requested_maximum: bool = False
