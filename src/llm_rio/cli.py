@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+import click
 import httpx
 import typer
 import uvicorn
