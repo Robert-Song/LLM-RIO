@@ -594,6 +594,316 @@ def maintenance_resume() -> None:
     _print(_request("POST", "/admin/maintenance", json_body={"mode": "active"}))
 
 
+def _prompt_str(prompt_text: str, default: str | None = None, required: bool = True) -> str:
+    prompt_msg = f"{prompt_text} [{default}]: " if default is not None else f"{prompt_text}: "
+    while True:
+        try:
+            val = input(prompt_msg).strip()
+        except (EOFError, KeyboardInterrupt):
+            typer.echo()
+            return default if default is not None else ""
+        if not val:
+            if default is not None:
+                return default
+            if not required:
+                return ""
+            typer.echo("Error: Input cannot be empty. Please try again.")
+            continue
+        return val
+
+
+def _prompt_bool(prompt_text: str, default: bool = False) -> bool:
+    default_str = "Y/n" if default else "y/N"
+    try:
+        val = input(f"{prompt_text} ({default_str}): ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        typer.echo()
+        return default
+    if not val:
+        return default
+    return val in {"y", "yes", "true", "1"}
+
+
+def _prompt_int(prompt_text: str, default: int | None = None) -> int:
+    prompt_msg = f"{prompt_text} [{default:,}]: " if default is not None else f"{prompt_text}: "
+    while True:
+        try:
+            val = input(prompt_msg).strip()
+        except (EOFError, KeyboardInterrupt):
+            typer.echo()
+            return default or 0
+        if not val and default is not None:
+            return default
+        try:
+            num = int(val)
+            if num < 0:
+                typer.echo("Error: Value must be non-negative.")
+                continue
+            return num
+        except ValueError:
+            typer.echo("Error: Invalid integer. Please try again.")
+
+
+def _interactive_keys_menu() -> None:
+    while True:
+        typer.echo("\n" + "=" * 50)
+        typer.echo("Key Management")
+        typer.echo("=" * 50)
+        typer.echo("1. List all API keys")
+        typer.echo("2. Show API key / usage details")
+        typer.echo("3. Create new API key")
+        typer.echo("4. Rotate API key")
+        typer.echo("5. Update token limit / quota")
+        typer.echo("6. Reset key usage")
+        typer.echo("7. Revoke (deactivate) API key")
+        typer.echo("8. Delete API key")
+        typer.echo("0. Back to Main Menu")
+        typer.echo("=" * 50)
+
+        choice = _prompt_str("Select option", default="0", required=False)
+
+        try:
+            if choice == "1":
+                list_keys(json_output=False)
+            elif choice == "2":
+                key = _prompt_str("Enter API key nickname or full API key")
+                if key:
+                    show_key(key)
+            elif choice == "3":
+                nickname = _prompt_str("Enter key nickname")
+                if not nickname:
+                    continue
+                role_str = _prompt_str("Enter role (user/admin)", default="user")
+                role_val = Role.ADMIN if role_str.lower() == "admin" else Role.USER
+                unlimited_val = _prompt_bool("Unlimited quota?", default=False)
+                limit_val = 1_000_000
+                if not unlimited_val:
+                    limit_val = _prompt_int("Enter lifetime token limit", default=1_000_000)
+                custom_key = _prompt_str("Enter custom API key (leave blank to auto-generate)", required=False)
+                custom_key_opt = custom_key if custom_key else None
+                grants_raw = _prompt_str("Model nicknames to grant (comma-separated, optional)", required=False)
+                grants = [g.strip() for g in grants_raw.split(",") if g.strip()] if grants_raw else None
+                create_key(
+                    nickname=nickname,
+                    role=role_val,
+                    limit_tokens=limit_val,
+                    unlimited=unlimited_val,
+                    account_id=None,
+                    grant=grants,
+                    api_key=custom_key_opt,
+                )
+            elif choice == "4":
+                key = _prompt_str("Enter API key nickname or full API key")
+                if key and _prompt_bool(f"Are you sure you want to rotate key '{key}'?", default=False):
+                    rotate_key(key)
+            elif choice == "5":
+                key = _prompt_str("Enter API key nickname or full API key")
+                if not key:
+                    continue
+                unlimited_val = _prompt_bool("Unlimited token quota?", default=False)
+                limit_val = 1_000_000
+                if not unlimited_val:
+                    limit_val = _prompt_int("Enter new token limit", default=1_000_000)
+                update_limit(key=key, limit_tokens=limit_val, unlimited=unlimited_val)
+            elif choice == "6":
+                key = _prompt_str("Enter API key nickname or full API key")
+                if key and _prompt_bool(f"Are you sure you want to reset usage to 0 for '{key}'?", default=False):
+                    reset_usage(key)
+            elif choice == "7":
+                key = _prompt_str("Enter API key nickname or full API key to revoke")
+                if key and _prompt_bool(f"Are you sure you want to revoke '{key}'?", default=False):
+                    revoke_key(key)
+            elif choice == "8":
+                key = _prompt_str("Enter API key nickname or full API key to delete")
+                if key and _prompt_bool(f"Are you sure you want to DELETE key '{key}'?", default=False):
+                    delete_key(key)
+            elif choice == "0":
+                break
+            else:
+                typer.echo("Invalid option. Please try again.")
+        except click.ClickException as exc:
+            typer.echo(f"Error: {exc}")
+        except Exception as exc:
+            typer.echo(f"Error executing command: {exc}")
+
+
+def _interactive_models_menu() -> None:
+    while True:
+        typer.echo("\n" + "=" * 50)
+        typer.echo("Model Management")
+        typer.echo("=" * 50)
+        typer.echo("1. List all models")
+        typer.echo("2. Add / Register new model")
+        typer.echo("3. Review registration job / failure details")
+        typer.echo("4. Retry failed registration job")
+        typer.echo("5. Disable model")
+        typer.echo("6. Show model access for key")
+        typer.echo("7. Grant model access to key")
+        typer.echo("8. Revoke model access from key")
+        typer.echo("0. Back to Main Menu")
+        typer.echo("=" * 50)
+
+        choice = _prompt_str("Select option", default="0", required=False)
+
+        try:
+            if choice == "1":
+                list_models(json_output=False)
+            elif choice == "2":
+                nickname = _prompt_str("Enter model nickname")
+                if not nickname:
+                    continue
+                repo = _prompt_str("Enter HuggingFace repository (e.g. meta-llama/Llama-3.2-1B)")
+                if not repo:
+                    continue
+                revision = _prompt_str("Enter revision (optional, press Enter to skip)", required=False)
+                rev_opt = revision if revision else None
+                grants_raw = _prompt_str("API key nicknames to grant access (comma-separated, optional)", required=False)
+                grants = [g.strip() for g in grants_raw.split(",") if g.strip()] if grants_raw else None
+                add_model(nickname=nickname, huggingface_repo=repo, revision=rev_opt, grant_to=grants)
+            elif choice == "3":
+                target = _prompt_str("Enter model nickname or registration job ID")
+                if target:
+                    model_job(target, json_output=False)
+            elif choice == "4":
+                target = _prompt_str("Enter model nickname or registration job ID to retry")
+                if target:
+                    retry_model_job(target)
+            elif choice == "5":
+                nickname = _prompt_str("Enter model nickname to disable")
+                if nickname and _prompt_bool(f"Are you sure you want to disable model '{nickname}'?", default=False):
+                    disable_model(nickname)
+            elif choice == "6":
+                key = _prompt_str("Enter API key nickname or full API key")
+                if key:
+                    model_access(key)
+            elif choice == "7":
+                key = _prompt_str("Enter API key nickname or full API key")
+                if not key:
+                    continue
+                models_raw = _prompt_str("Enter model nicknames to grant (comma-separated)")
+                models_list = [m.strip() for m in models_raw.split(",") if m.strip()]
+                if models_list:
+                    grant_models(key=key, model=models_list)
+            elif choice == "8":
+                key = _prompt_str("Enter API key nickname or full API key")
+                if not key:
+                    continue
+                models_raw = _prompt_str("Enter model nicknames to revoke (comma-separated)")
+                models_list = [m.strip() for m in models_raw.split(",") if m.strip()]
+                if models_list:
+                    revoke_models(key=key, model=models_list)
+            elif choice == "0":
+                break
+            else:
+                typer.echo("Invalid option. Please try again.")
+        except click.ClickException as exc:
+            typer.echo(f"Error: {exc}")
+        except Exception as exc:
+            typer.echo(f"Error executing command: {exc}")
+
+
+def _interactive_maintenance_menu() -> None:
+    while True:
+        typer.echo("\n" + "=" * 50)
+        typer.echo("Maintenance Operations")
+        typer.echo("=" * 50)
+        typer.echo("1. View maintenance status & active workers")
+        typer.echo("2. Enter maintenance mode (Drain)")
+        typer.echo("3. Resume normal operations (Active)")
+        typer.echo("0. Back to Main Menu")
+        typer.echo("=" * 50)
+
+        choice = _prompt_str("Select option", default="0", required=False)
+
+        try:
+            if choice == "1":
+                maintenance_status()
+            elif choice == "2":
+                if _prompt_bool("Are you sure you want to drain this machine into maintenance mode?", default=False):
+                    maintenance_drain()
+            elif choice == "3":
+                if _prompt_bool("Are you sure you want to resume normal service operations?", default=True):
+                    maintenance_resume()
+            elif choice == "0":
+                break
+            else:
+                typer.echo("Invalid option. Please try again.")
+        except click.ClickException as exc:
+            typer.echo(f"Error: {exc}")
+        except Exception as exc:
+            typer.echo(f"Error executing command: {exc}")
+
+
+def interactive_menu() -> None:
+    """Interactive administration console for LLM-RIO."""
+    typer.echo("Welcome to LLM-RIO Administration Console!")
+
+    while True:
+        typer.echo("\n" + "=" * 50)
+        typer.echo("        LLM-RIO Interactive Console")
+        typer.echo("=" * 50)
+        typer.echo("1. Key Management")
+        typer.echo("2. Model Management")
+        typer.echo("3. Maintenance Operations")
+        typer.echo("4. Host Diagnostics (doctor)")
+        typer.echo("5. Start Service (serve)")
+        typer.echo("6. Service & Configuration Info")
+        typer.echo("0. Exit")
+        typer.echo("=" * 50)
+
+
+        choice = _prompt_str("Select option (0-6)", default="0", required=False)
+
+        if choice == "1":
+            _interactive_keys_menu()
+        elif choice == "2":
+            _interactive_models_menu()
+        elif choice == "3":
+            _interactive_maintenance_menu()
+        elif choice == "4":
+            try:
+                config_path = Path(os.environ.get("LLMRIO_CONFIG", "config.toml"))
+                doctor(config=config_path, json_output=False)
+            except (click.ClickException, typer.Exit):
+                pass
+            except Exception as exc:
+                typer.echo(f"Doctor failed: {exc}")
+        elif choice == "5":
+            config_input = _prompt_str("Config file path", default="config.toml", required=False)
+            try:
+                serve(config=Path(config_input))
+            except Exception as exc:
+                typer.echo(f"Serve terminated: {exc}")
+        elif choice == "6":
+            base_url = _base_url()
+            config_path = Path(os.environ.get("LLMRIO_CONFIG", "config.toml"))
+            typer.echo(f"API Base URL: {base_url}")
+            typer.echo(f"Config File: {config_path.resolve()}")
+            try:
+                admin_key = _api_key()
+                typer.echo("Local Administrator Key: Recovered from local database")
+            except Exception as exc:
+                typer.echo(f"Local Administrator Key: {exc}")
+        elif choice in {"0", "exit", "quit", "q"}:
+            typer.echo("\nGoodbye!")
+            break
+        else:
+            typer.echo("Invalid option. Please try again.")
+
+
+@app.callback(invoke_without_command=True)
+def main(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        interactive_menu()
+
+
+@app.command("interactive")
+def interactive_cmd() -> None:
+    """Launch the interactive administration console."""
+    interactive_menu()
+
+
 if __name__ == "__main__":
     app()
+
 
