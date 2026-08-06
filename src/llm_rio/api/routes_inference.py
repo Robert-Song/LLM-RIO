@@ -123,7 +123,14 @@ def _validate_request(
         max_output_tokens = None
 
     raw_n_cap = model_limits.get("max_n")
-    max_n = int(raw_n_cap) if raw_n_cap is not None else settings.max_n
+    if raw_n_cap is not None:
+        max_n = int(raw_n_cap)
+        if settings.max_n is not None:
+            max_n = min(max_n, settings.max_n)
+    elif settings.max_n is not None:
+        max_n = settings.max_n
+    else:
+        max_n = None
 
     prompt_tokens = _rough_tokens(body.messages)
     reservation_prompt_tokens = _conservative_prompt_tokens(body.messages)
@@ -133,7 +140,7 @@ def _validate_request(
         raise RioError("context_length_exceeded", "Prompt plus output exceeds the model context")
     if max_output_tokens is not None and body.output_limit > max_output_tokens:
         raise RioError("max_tokens_exceeded", "The requested output limit is too high")
-    if body.n > max_n:
+    if max_n is not None and body.n > max_n:
         raise RioError("n_exceeded", "The requested number of choices is too high")
     capabilities = set(model["capabilities"])
     if body.tools and "tools" not in capabilities:

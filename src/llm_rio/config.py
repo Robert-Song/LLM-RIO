@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     scheduler_tick_seconds: float = 1.0
     max_prompt_tokens: int | None = Field(default=None, gt=0)
     max_output_tokens: int | None = Field(default=None, gt=0)
-    max_n: int = 4
+    max_n: int | None = Field(default=None, gt=0)
     default_quota_tokens: int = 1_000_000
     quota_charge_requested_maximum: bool = False
     capture_worker_engine_logs: bool = True
