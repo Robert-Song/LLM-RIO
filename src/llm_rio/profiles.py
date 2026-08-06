@@ -93,13 +93,18 @@ class ProfileRepository:
         rows = await self.database.fetchall(
             """
             SELECT profile_json FROM model_profiles
-             WHERE model_id = ? AND machine_fingerprint = ? AND active = 1
+             WHERE model_id = ? AND machine_fingerprint = ?
              ORDER BY json_extract(profile_json, '$.gpu_count'),
                       json_extract(profile_json, '$.predicted_tokens_per_second') DESC
             """,
             (model_id, self.machine_fingerprint),
         )
-        return [profile_from_dict(json.loads(row["profile_json"])) for row in rows]
+        profiles: list[PlacementProfile] = []
+        for row in rows:
+            data = json.loads(row["profile_json"])
+            data["machine_fingerprint"] = self.machine_fingerprint
+            profiles.append(profile_from_dict(data))
+        return profiles
 
     async def save(self, profile: PlacementProfile, raw_profile_key: str) -> None:
         await self.database.execute(

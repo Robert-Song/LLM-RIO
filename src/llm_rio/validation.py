@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import importlib.metadata
 import json
+import os
 import re
 import secrets
+import signal
 import time
 import uuid
 from dataclasses import dataclass
@@ -192,6 +194,8 @@ class ProfileValidator:
             "127.0.0.1",
             "--port",
             str(port),
+            "--api-key",
+            api_key,
             "--served-model-name",
             nickname,
             "--tensor-parallel-size",
@@ -384,11 +388,19 @@ class ProfileValidator:
     async def _terminate(process: asyncio.subprocess.Process) -> None:
         if process.returncode is not None:
             return
-        process.terminate()
         try:
-            await asyncio.wait_for(process.wait(), timeout=30.0)
+            pgid = os.getpgid(process.pid)
+            os.killpg(pgid, signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=10.0)
         except TimeoutError:
-            process.kill()
+            try:
+                pgid = os.getpgid(process.pid)
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                process.kill()
             await process.wait()
 
     @staticmethod

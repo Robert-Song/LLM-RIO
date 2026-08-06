@@ -139,6 +139,8 @@ class WorkerSupervisor:
                 "127.0.0.1",
                 "--port",
                 str(worker.port),
+                "--api-key",
+                self.internal_api_key,
                 "--served-model-name",
                 served_model_name,
                 "--tensor-parallel-size",
@@ -318,18 +320,17 @@ class WorkerSupervisor:
             process = self._processes.get(worker_id)
         await self._persist(worker)
         if process and process.returncode is None:
-            if force:
-                process.kill()
-            else:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
                 try:
-                    process.send_signal(signal.SIGTERM)
+                    process.kill()
                 except ProcessLookupError:
                     pass
             try:
-                await asyncio.wait_for(process.wait(), timeout=30.0)
-            except TimeoutError:
-                process.kill()
-                await process.wait()
+                await asyncio.wait_for(process.wait(), timeout=1.0)
+            except (TimeoutError, Exception):
+                pass
         async with self._lock:
             worker.state = RuntimeState.COLD
             worker.process_pid = None
@@ -341,11 +342,13 @@ class WorkerSupervisor:
         await self._emit(worker_id, "cold")
 
     async def stop_all(self, *, force: bool = False) -> None:
-        for worker_id in list(self.workers):
-            await self.drain(worker_id)
-        if force:
-            for worker_id in list(self.workers):
-                await self.stop(worker_id, force=True)
+        worker_ids = list(self.workers)
+        if not force:
+            for worker_id in worker_ids:
+                await self.drain(worker_id)
+        tasks = [self.stop(worker_id, force=True) for worker_id in worker_ids]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _cleanup(self, worker_id: str) -> None:
         self._processes.pop(worker_id, None)
