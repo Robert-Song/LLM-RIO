@@ -227,10 +227,16 @@ class RegistrationManager:
         if not weight_files:
             raise ValidationError("inspection", "no supported weight artifact was found")
         architectures = config.get("architectures") or []
+        text_cfg = config.get("text_config") if isinstance(config.get("text_config"), dict) else {}
+        tok_max_len = tokenizer_config.get("model_max_length")
+        if not isinstance(tok_max_len, int) or tok_max_len >= 10_000_000:
+            tok_max_len = None
         max_model_len = int(
             config.get("max_position_embeddings")
+            or text_cfg.get("max_position_embeddings")
             or config.get("model_max_length")
-            or tokenizer_config.get("model_max_length")
+            or text_cfg.get("model_max_length")
+            or tok_max_len
             or 4096
         )
         max_model_len = max(1, max_model_len)
