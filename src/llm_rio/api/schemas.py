@@ -12,12 +12,11 @@ class CreateKeyRequest(BaseModel):
     role: Role
     quota_account_id: str | None = None
     quota_account_nickname: str | None = None
-    limit_tokens: int = Field(
-        default=1_000_000,
+    limit_tokens: int | None = Field(
+        default=None,
         ge=0,
         validation_alias=AliasChoices("limit_tokens", "balance_tokens"),
     )
-    unlimited: bool = False
     models: list[str] = Field(
         default_factory=list,
         validation_alias=AliasChoices("models", "model_ids"),
@@ -76,8 +75,8 @@ class ChatCompletionRequest(BaseModel):
 
     model: str
     messages: list[dict[str, Any]]
-    max_tokens: int | None = None
-    max_completion_tokens: int | None = None
+    max_tokens: int | None = Field(default=None, gt=0)
+    max_completion_tokens: int | None = Field(default=None, gt=0)
     n: int = Field(default=1, ge=1)
     stream: bool = False
     stream_options: dict[str, Any] | None = None
@@ -99,11 +98,12 @@ class ChatCompletionRequest(BaseModel):
         return value
 
     @property
-    def output_limit(self) -> int:
-        return self.max_completion_tokens or self.max_tokens or 1024
+    def output_limit(self) -> int | None:
+        if self.max_completion_tokens is not None:
+            return self.max_completion_tokens
+        return self.max_tokens
 
 
 class MaintenanceStatus(BaseModel):
     mode: str
     workers: list[dict[str, Any]]
-

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -25,6 +26,7 @@ class WorkerLease:
     base_url: str
     internal_api_key: str
     estimated_tokens: int
+    admitted_at: datetime
 
 
 class ResidencyScheduler:
@@ -76,10 +78,10 @@ class ResidencyScheduler:
         await self.supervisor.stop_all(force=True)
 
     async def enqueue(self, request: QueuedRequest) -> WorkerLease:
-        if await self.database.service_mode() is not ServiceMode.ACTIVE:
-            raise MaintenanceError()
         request.assignment = asyncio.get_running_loop().create_future()
         async with self._state_lock:
+            if await self.database.service_mode() is not ServiceMode.ACTIVE:
+                raise MaintenanceError()
             self.queues.for_model(request.model_id).put(request)
             self._last_arrival_at = datetime.now(UTC)
         self._event.set()
@@ -93,10 +95,9 @@ class ResidencyScheduler:
             raise
 
     async def release(self, lease: WorkerLease) -> None:
-        self._request_leases.pop(lease.request_id, None)
-        await self.supervisor.release(
-            lease.worker_id, lease.request_id, lease.estimated_tokens
-        )
+        if self._request_leases.pop(lease.request_id, None) is None:
+            return
+        await self.supervisor.release(lease.worker_id, lease.request_id, lease.estimated_tokens)
         self._event.set()
 
     async def worker_event(self, worker_id: str, event: str) -> None:
@@ -152,27 +153,25 @@ class ResidencyScheduler:
         self._event.set()
 
     async def resume(self) -> None:
-        if any(
-            worker.state is not RuntimeState.COLD
-            for worker in self.supervisor.workers.values()
-        ):
-            raise RioError(
-                "maintenance_not_ready",
-                "Workers are still draining or stopping",
-                status_code=409,
-            )
-        await self.database.set_service_mode(ServiceMode.ACTIVE)
-        self._maintenance_requested = False
+        async with self._state_lock:
+            if any(
+                worker.state is not RuntimeState.COLD for worker in self.supervisor.workers.values()
+            ):
+                raise RioError(
+                    "maintenance_not_ready",
+                    "Workers are still draining or stopping",
+                    status_code=409,
+                )
+            await self.database.set_service_mode(ServiceMode.ACTIVE)
+            self._maintenance_requested = False
         self._event.set()
 
     async def _run(self) -> None:
         while not self._closed:
-            try:
+            with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(
                     self._event.wait(), timeout=self.settings.scheduler_tick_seconds
                 )
-            except TimeoutError:
-                pass
             self._event.clear()
             try:
                 await self._reconcile()
@@ -180,20 +179,18 @@ class ResidencyScheduler:
                 logger.exception("scheduler reconciliation failed")
 
     async def _reconcile(self) -> None:
+        await self._release_settled_leases()
         overdue = await self.supervisor.enforce_drain_watchdogs()
         for _, request_ids in overdue:
             for request_id in request_ids:
                 lease = self._request_leases.pop(request_id, None)
                 if lease:
-                    await self.database.release_reservation(
-                        lease.reservation_id, "drain_watchdog"
-                    )
+                    await self.database.release_reservation(lease.reservation_id, "drain_watchdog")
 
         mode = await self.database.service_mode()
         if mode is ServiceMode.DRAINING:
             if not self._validation_gpu_uuids and all(
-                worker.state is RuntimeState.COLD
-                for worker in self.supervisor.workers.values()
+                worker.state is RuntimeState.COLD for worker in self.supervisor.workers.values()
             ):
                 await self.database.set_service_mode(ServiceMode.MAINTENANCE_READY)
             return
@@ -218,20 +215,42 @@ class ResidencyScheduler:
             if isinstance(action, DrainPlacement):
                 await self.supervisor.drain(action.worker_id)
             elif isinstance(action, StartPlacement):
-                model = await self.database.model_by_id(action.profile.model_id)
-                if model is None or not model.get("artifact_path"):
-                    await self.database.record_event(
-                        "PLACEMENT_REJECTED",
-                        action.profile.model_id,
-                        {"reason": "artifact_path_missing"},
-                    )
-                    continue
-                await self.supervisor.launch(
-                    profile=action.profile,
-                    gpu_uuids=action.gpu_uuids,
-                    model_path=model["artifact_path"],
-                    served_model_name=model["nickname"],
+                await self._launch_if_active(action)
+
+    async def _release_settled_leases(self) -> None:
+        admitted_request_ids = await self.database.admitted_request_ids()
+        stale_leases = [
+            lease
+            for request_id, lease in self._request_leases.items()
+            if request_id not in admitted_request_ids
+        ]
+        for lease in stale_leases:
+            logger.warning(
+                "Releasing stale worker admission for completed request %s", lease.request_id
+            )
+            await self.release(lease)
+
+    async def _launch_if_active(self, action: StartPlacement) -> None:
+        async with self._state_lock:
+            if (
+                self._maintenance_requested
+                or await self.database.service_mode() is not ServiceMode.ACTIVE
+            ):
+                return
+            model = await self.database.model_by_id(action.profile.model_id)
+            if model is None or not model.get("artifact_path"):
+                await self.database.record_event(
+                    "PLACEMENT_REJECTED",
+                    action.profile.model_id,
+                    {"reason": "artifact_path_missing"},
                 )
+                return
+            await self.supervisor.launch(
+                profile=action.profile,
+                gpu_uuids=action.gpu_uuids,
+                model_path=model["artifact_path"],
+                served_model_name=model["nickname"],
+            )
 
     async def _route_ready_work(self) -> None:
         async with self._state_lock:
@@ -250,9 +269,7 @@ class ResidencyScheduler:
                     if request is None:
                         break
                     try:
-                        await self.supervisor.admit(
-                            worker.id, request.id, request.estimated_tokens
-                        )
+                        await self.supervisor.admit(worker.id, request.id, request.estimated_tokens)
                         await self.database.mark_request_admitted(request.id, worker.id)
                     except Exception as exc:
                         if request.assignment and not request.assignment.done():
@@ -265,6 +282,7 @@ class ResidencyScheduler:
                         base_url=f"http://127.0.0.1:{worker.port}",
                         internal_api_key=self.supervisor.internal_api_key,
                         estimated_tokens=request.estimated_tokens,
+                        admitted_at=datetime.now(UTC),
                     )
                     self._request_leases[request.id] = lease
                     if request.assignment and not request.assignment.done():
@@ -272,17 +290,37 @@ class ResidencyScheduler:
 
     def _pressures(self) -> list[QueuePressure]:
         pressures: list[QueuePressure] = []
-        for model_id in self.queues.pending_models():
+        model_ids = set(self.queues.pending_models())
+        model_ids.update(
+            worker.model_id
+            for worker in self.supervisor.workers.values()
+            if worker.admitted_request_ids
+        )
+        for model_id in model_ids:
             queue = self.queues.for_model(model_id)
-            oldest = queue.oldest_enqueued_at
-            if oldest:
-                pressures.append(
-                    QueuePressure(
-                        model_id=model_id,
-                        requests=len(queue),
-                        estimated_tokens=queue.estimated_token_work,
-                        oldest_enqueued_at=oldest,
-                    )
+            active_workers = [
+                worker
+                for worker in self.supervisor.workers.values()
+                if worker.model_id == model_id and worker.admitted_request_ids
+            ]
+            oldest_candidates = [
+                value
+                for value in (
+                    queue.oldest_enqueued_at,
+                    *(worker.last_demand_at for worker in active_workers),
                 )
+                if value is not None
+            ]
+            if not oldest_candidates:
+                continue
+            pressures.append(
+                QueuePressure(
+                    model_id=model_id,
+                    requests=len(queue)
+                    + sum(len(worker.admitted_request_ids) for worker in active_workers),
+                    estimated_tokens=queue.estimated_token_work
+                    + sum(worker.outstanding_token_work for worker in active_workers),
+                    oldest_enqueued_at=min(oldest_candidates),
+                )
+            )
         return pressures
-

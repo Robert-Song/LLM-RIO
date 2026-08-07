@@ -26,15 +26,15 @@ python3 -m pip install --user uv==0.12.1
 export PATH="$HOME/.local/bin:$PATH"
 uv venv --python 3.12
 uv sync --extra engine
-cp config.required.toml config.toml
+cp config.example.toml config.toml
 mkdir -p state models logs diagnostics
 chmod +x llmctl
 ./llmctl serve
 ```
 
 
-`config.required.toml` is the minimal starting file. `config.example.toml` is the complete,
-sectioned reference for every customizable setting.
+`config.example.toml` is the single configuration template. It explains every setting; optional
+restrictions remain commented out so copying it preserves permissive research defaults.
 Load site-specific Python or CUDA modules before these commands when required by the HPC. The first
 startup prints the initial admin key before accepting requests; administrators can create any
 number of additional admin keys. Local `llmctl` management commands automatically recover an
@@ -56,6 +56,31 @@ active admin credential from the protected host database, so they do not require
 The admin CLI uses the authenticated management routes but automatically recovers a local admin
 credential from the protected database/vault. Key and model access commands accept human-readable
 nicknames (or a complete API key for key selection), so internal database IDs are not required.
+
+### Image inputs
+
+The chat-completions endpoint forwards OpenAI-compatible image content directly to the selected
+model worker without applying a catalog capability gate. The caller is responsible for choosing a
+model that supports the supplied image format; an incompatible model returns its worker error.
+Both remote URLs and base64 data URLs can be supplied using an `image_url` content part:
+
+```json
+{
+  "model": "gemma-4-31b-it-nvfp4",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Describe this image."},
+        {
+          "type": "image_url",
+          "image_url": {"url": "data:image/jpeg;base64,<encoded image>"}
+        }
+      ]
+    }
+  ]
+}
+```
 
 ## Development
 

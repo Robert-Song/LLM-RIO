@@ -34,7 +34,7 @@ InventoryProvider = Callable[[str, list[str]], MachineInventory]
 access_logger = logging.getLogger("uvicorn.error")
 
 
-async def _ensure_initial_admin(database: Database, default_quota_tokens: int) -> None:
+async def _ensure_initial_admin(database: Database) -> None:
     if await database.key_count() != 0:
         return
     key_id = str(uuid.uuid4())
@@ -48,14 +48,12 @@ async def _ensure_initial_admin(database: Database, default_quota_tokens: int) -
         account_nickname="admin-account",
         prefix=prefix,
         api_key=api_key,
-        limit_tokens=default_quota_tokens,
+        limit_tokens=0,
         unlimited=True,
     )
     access_logger.warning("FIRST STARTUP: created initial administrator 'admin'")
     access_logger.warning("INITIAL ADMIN API KEY: %s", api_key)
-    access_logger.warning(
-        "Create additional admins with: llmctl keys create NAME --role admin"
-    )
+    access_logger.warning("Create additional admins with: llmctl keys create NAME --role admin")
 
 
 def create_app(
@@ -92,7 +90,7 @@ def create_app(
                 "MACHINE_FINGERPRINT_CHANGED",
                 payload={"previous": previous_fingerprint, "current": inventory.fingerprint},
             )
-        await _ensure_initial_admin(database, resolved_settings.default_quota_tokens)
+        await _ensure_initial_admin(database)
 
         profiles = ProfileRepository(database, inventory.fingerprint)
         supervisor = WorkerSupervisor(resolved_settings, database)
@@ -163,8 +161,7 @@ def create_app(
             queue_wait_ms = getattr(request.state, "queue_wait_ms", None)
             queue_text = f" - Queue: {queue_wait_ms}ms" if queue_wait_ms is not None else ""
             access_logger.info(
-                '%s:%s - "%s %s HTTP/%s" %s %s'
-                " - Model: %s - Key: %s - Request: %s%s (%.2fs)",
+                '%s:%s - "%s %s HTTP/%s" %s %s - Model: %s - Key: %s - Request: %s%s (%.2fs)',
                 client_host,
                 client_port,
                 request.method,
@@ -232,4 +229,3 @@ def create_app(
 
 
 app = create_app()
-

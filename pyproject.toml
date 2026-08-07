@@ -43,7 +43,7 @@ packages = ["src/llm_rio"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+testpaths = ["tests", "scripts"]
 pythonpath = ["src"]
 addopts = "--basetemp=.pytest_tmp"
 

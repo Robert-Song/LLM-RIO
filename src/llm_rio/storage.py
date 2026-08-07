@@ -136,6 +136,10 @@ CREATE TABLE IF NOT EXISTS inference_requests (
     actual_prompt_tokens INTEGER,
     actual_completion_tokens INTEGER,
     error_code TEXT,
+    test_run_id TEXT,
+    client_worker TEXT,
+    accepted_count INTEGER NOT NULL DEFAULT 0,
+    completion_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     admitted_at TEXT,
     completed_at TEXT
@@ -167,7 +171,8 @@ CREATE TABLE IF NOT EXISTS service_state (
     machine_fingerprint TEXT,
     updated_at TEXT NOT NULL
 );
-INSERT OR IGNORE INTO service_state(singleton, mode, updated_at) VALUES (1, 'ACTIVE', CURRENT_TIMESTAMP);
+INSERT OR IGNORE INTO service_state(singleton, mode, updated_at)
+VALUES (1, 'ACTIVE', CURRENT_TIMESTAMP);
 """
 
 
@@ -214,8 +219,23 @@ class Database:
                 "ALTER TABLE quota_accounts ADD COLUMN usage_reset_at TEXT"
             )
         await self.connection.execute(
-            "UPDATE quota_accounts SET limit_tokens = balance_tokens "
-            "WHERE limit_tokens IS NULL"
+            "UPDATE quota_accounts SET limit_tokens = balance_tokens WHERE limit_tokens IS NULL"
+        )
+        cursor = await self.connection.execute("PRAGMA table_info(inference_requests)")
+        request_columns = {row["name"] for row in await cursor.fetchall()}
+        for column, definition in (
+            ("test_run_id", "TEXT"),
+            ("client_worker", "TEXT"),
+            ("accepted_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("completion_count", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if column not in request_columns:
+                await self.connection.execute(
+                    f"ALTER TABLE inference_requests ADD COLUMN {column} {definition}"
+                )
+        await self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_inference_requests_test_run "
+            "ON inference_requests(test_run_id, created_at)"
         )
 
     async def close(self) -> None:
@@ -248,7 +268,7 @@ class Database:
     async def fetchall(self, sql: str, parameters: Iterable[Any] = ()) -> list[aiosqlite.Row]:
         async with self._transaction_lock:
             cursor = await self.connection.execute(sql, tuple(parameters))
-            return await cursor.fetchall()
+            return list(await cursor.fetchall())
 
     async def authenticate(self, prefix: str, token: str) -> Principal | None:
         row = await self.fetchone(
@@ -259,7 +279,7 @@ class Database:
             """,
             (prefix,),
         )
-        if row is None or not verify_api_key(row["token_hash"], token):
+        if row is None or not await asyncio.to_thread(verify_api_key, row["token_hash"], token):
             return None
         await self.execute("UPDATE api_keys SET last_used_at = ? WHERE id = ?", (_now(), row["id"]))
         return Principal(
@@ -283,8 +303,7 @@ class Database:
         if not selector.startswith("rio_") or len(selector) < 24:
             return None
         row = await self.fetchone(
-            f"SELECT id, nickname, token_hash FROM api_keys "
-            f"WHERE token_prefix = ?{active_clause}",
+            f"SELECT id, nickname, token_hash FROM api_keys WHERE token_prefix = ?{active_clause}",
             (selector[:24],),
         )
         if row is None or not verify_api_key(str(row["token_hash"]), selector):
@@ -429,9 +448,11 @@ class Database:
 
     async def delete_key(self, key_id: str) -> bool:
         async with self.transaction() as connection:
-            row = await (await connection.execute(
-                "SELECT quota_account_id, role, active FROM api_keys WHERE id = ?", (key_id,)
-            )).fetchone()
+            row = await (
+                await connection.execute(
+                    "SELECT quota_account_id, role, active FROM api_keys WHERE id = ?", (key_id,)
+                )
+            ).fetchone()
             if row is None:
                 return False
             if row["role"] == Role.ADMIN.value and bool(row["active"]):
@@ -463,24 +484,30 @@ class Database:
 
     async def update_quota(self, key_id: str, limit_tokens: int, unlimited: bool) -> bool:
         async with self.transaction() as connection:
-            row = await (await connection.execute(
-                "SELECT role, quota_account_id FROM api_keys WHERE id = ?", (key_id,)
-            )).fetchone()
+            row = await (
+                await connection.execute(
+                    "SELECT role, quota_account_id FROM api_keys WHERE id = ?", (key_id,)
+                )
+            ).fetchone()
             if row is None:
                 return False
             if row["role"] == Role.ADMIN.value and not unlimited:
                 raise RioError("invalid_quota", "Admin keys must remain unlimited", status_code=409)
-            account = await (await connection.execute(
-                "SELECT usage_baseline_tokens FROM quota_accounts WHERE id = ?",
-                (row["quota_account_id"],),
-            )).fetchone()
-            totals = await (await connection.execute(
-                """
+            account = await (
+                await connection.execute(
+                    "SELECT usage_baseline_tokens FROM quota_accounts WHERE id = ?",
+                    (row["quota_account_id"],),
+                )
+            ).fetchone()
+            totals = await (
+                await connection.execute(
+                    """
                 SELECT COALESCE(SUM(actual_tokens), 0) AS charged_tokens
                   FROM quota_reservations WHERE account_id = ? AND state = 'SETTLED'
                 """,
-                (row["quota_account_id"],),
-            )).fetchone()
+                    (row["quota_account_id"],),
+                )
+            ).fetchone()
             baseline = int(account["usage_baseline_tokens"]) if account else 0
             charged = int(totals["charged_tokens"]) if totals else 0
             used_tokens = max(0, charged - baseline)
@@ -497,23 +524,27 @@ class Database:
 
     async def reset_usage(self, key_id: str) -> dict[str, Any] | None:
         async with self.transaction() as connection:
-            row = await (await connection.execute(
-                """
+            row = await (
+                await connection.execute(
+                    """
                 SELECT k.quota_account_id, a.limit_tokens, a.unlimited
                   FROM api_keys k JOIN quota_accounts a ON a.id = k.quota_account_id
                  WHERE k.id = ?
                 """,
-                (key_id,),
-            )).fetchone()
+                    (key_id,),
+                )
+            ).fetchone()
             if row is None:
                 return None
-            totals = await (await connection.execute(
-                """
+            totals = await (
+                await connection.execute(
+                    """
                 SELECT COALESCE(SUM(actual_tokens), 0) AS charged_tokens
                   FROM quota_reservations WHERE account_id = ? AND state = 'SETTLED'
                 """,
-                (row["quota_account_id"],),
-            )).fetchone()
+                    (row["quota_account_id"],),
+                )
+            ).fetchone()
             charged = int(totals["charged_tokens"]) if totals else 0
             reset_at = _now()
             await connection.execute(
@@ -546,10 +577,12 @@ class Database:
         async with self.transaction() as connection:
             if grant_key_ids:
                 placeholders = ",".join("?" for _ in grant_key_ids)
-                rows = await (await connection.execute(
-                    f"SELECT id FROM api_keys WHERE active = 1 AND id IN ({placeholders})",
-                    grant_key_ids,
-                )).fetchall()
+                rows = await (
+                    await connection.execute(
+                        f"SELECT id FROM api_keys WHERE active = 1 AND id IN ({placeholders})",
+                        grant_key_ids,
+                    )
+                ).fetchall()
                 existing = {row["id"] for row in rows}
                 missing = sorted(set(grant_key_ids) - existing)
                 if missing:
@@ -601,9 +634,9 @@ class Database:
         capabilities: list[str] | None = None,
     ) -> None:
         async with self.transaction() as connection:
-            job = await (await connection.execute(
-                "SELECT model_id FROM model_jobs WHERE id = ?", (job_id,)
-            )).fetchone()
+            job = await (
+                await connection.execute("SELECT model_id FROM model_jobs WHERE id = ?", (job_id,))
+            ).fetchone()
             if job is None:
                 raise KeyError(job_id)
             await connection.execute(
@@ -625,7 +658,10 @@ class Database:
             for column, value in (
                 ("resolved_revision", resolved_revision),
                 ("artifact_path", artifact_path),
-                ("capabilities_json", json.dumps(capabilities) if capabilities is not None else None),
+                (
+                    "capabilities_json",
+                    json.dumps(capabilities) if capabilities is not None else None,
+                ),
             ):
                 if value is not None:
                     updates.append(f"{column} = ?")
@@ -716,9 +752,9 @@ class Database:
 
     async def replace_model_grants(self, key_id: str, model_ids: list[str]) -> None:
         async with self.transaction() as connection:
-            key = await (await connection.execute(
-                "SELECT 1 FROM api_keys WHERE id = ?", (key_id,)
-            )).fetchone()
+            key = await (
+                await connection.execute("SELECT 1 FROM api_keys WHERE id = ?", (key_id,))
+            ).fetchone()
             if key is None:
                 raise KeyError(key_id)
             await connection.execute("DELETE FROM model_grants WHERE key_id = ?", (key_id,))
@@ -736,23 +772,24 @@ class Database:
     ) -> list[str]:
         requested_names = set(model_nicknames)
         async with self.transaction() as connection:
-            key = await (await connection.execute(
-                "SELECT 1 FROM api_keys WHERE id = ? AND active = 1", (key_id,)
-            )).fetchone()
+            key = await (
+                await connection.execute(
+                    "SELECT 1 FROM api_keys WHERE id = ? AND active = 1", (key_id,)
+                )
+            ).fetchone()
             if key is None:
                 raise KeyError(key_id)
             models_by_name: dict[str, str] = {}
             if requested_names:
                 placeholders = ",".join("?" for _ in requested_names)
-                rows = await (await connection.execute(
-                    f"SELECT id, nickname FROM model_catalog "
-                    f"WHERE nickname IN ({placeholders})",
-                    sorted(requested_names),
-                )).fetchall()
-                models_by_name = {
-                    str(row["nickname"]): str(row["id"])
-                    for row in rows
-                }
+                rows = await (
+                    await connection.execute(
+                        f"SELECT id, nickname FROM model_catalog "
+                        f"WHERE nickname IN ({placeholders})",
+                        sorted(requested_names),
+                    )
+                ).fetchall()
+                models_by_name = {str(row["nickname"]): str(row["id"]) for row in rows}
             missing = sorted(requested_names - set(models_by_name))
             if missing:
                 raise RioError(
@@ -761,18 +798,17 @@ class Database:
                     status_code=404,
                     details={"missing_models": missing},
                 )
-            existing_rows = await (await connection.execute(
-                """
+            existing_rows = await (
+                await connection.execute(
+                    """
                 SELECT m.id, m.nickname FROM model_grants g
                   JOIN model_catalog m ON m.id = g.model_id
                  WHERE g.key_id = ?
                 """,
-                (key_id,),
-            )).fetchall()
-            existing = {
-                str(row["nickname"]): str(row["id"])
-                for row in existing_rows
-            }
+                    (key_id,),
+                )
+            ).fetchall()
+            existing = {str(row["nickname"]): str(row["id"]) for row in existing_rows}
             if mode == "add":
                 desired = {**existing, **models_by_name}
             elif mode == "remove":
@@ -809,13 +845,15 @@ class Database:
         estimated_tokens: int,
     ) -> str:
         async with self.transaction() as connection:
-            existing = await (await connection.execute(
-                """
+            existing = await (
+                await connection.execute(
+                    """
                 SELECT id, request_id FROM quota_reservations
                  WHERE key_id = ? AND idempotency_hash = ?
                 """,
-                (principal.key_id, idempotency_hash),
-            )).fetchone()
+                    (principal.key_id, idempotency_hash),
+                )
+            ).fetchone()
             if existing:
                 if existing["request_id"] != request_id:
                     raise RioError(
@@ -824,10 +862,12 @@ class Database:
                         status_code=409,
                     )
                 return str(existing["id"])
-            account = await (await connection.execute(
-                "SELECT balance_tokens, unlimited FROM quota_accounts WHERE id = ?",
-                (principal.quota_account_id,),
-            )).fetchone()
+            account = await (
+                await connection.execute(
+                    "SELECT balance_tokens, unlimited FROM quota_accounts WHERE id = ?",
+                    (principal.quota_account_id,),
+                )
+            ).fetchone()
             if account is None:
                 raise RuntimeError("quota account is missing")
             unlimited = bool(account["unlimited"])
@@ -882,13 +922,15 @@ class Database:
         model_id: str,
         reservation_id: str,
         estimated_tokens: int,
+        test_run_id: str | None,
+        client_worker: str | None,
     ) -> None:
         await self.execute(
             """
             INSERT OR IGNORE INTO inference_requests
                 (id, key_id, account_id, model_id, reservation_id, state,
-                 estimated_tokens, created_at)
-            VALUES (?, ?, ?, ?, ?, 'QUEUED', ?, ?)
+                 estimated_tokens, test_run_id, client_worker, created_at)
+            VALUES (?, ?, ?, ?, ?, 'QUEUED', ?, ?, ?, ?)
             """,
             (
                 request_id,
@@ -897,6 +939,8 @@ class Database:
                 model_id,
                 reservation_id,
                 estimated_tokens,
+                test_run_id,
+                client_worker,
                 _now(),
             ),
         )
@@ -904,11 +948,19 @@ class Database:
     async def mark_request_admitted(self, request_id: str, worker_id: str) -> None:
         await self.execute(
             """
-            UPDATE inference_requests SET state = 'ADMITTED', worker_id = ?, admitted_at = ?
+            UPDATE inference_requests
+               SET state = 'ADMITTED', worker_id = ?, admitted_at = ?,
+                   accepted_count = accepted_count + 1
              WHERE id = ? AND state = 'QUEUED'
             """,
             (worker_id, _now(), request_id),
         )
+
+    async def admitted_request_ids(self) -> set[str]:
+        rows = await self.fetchall(
+            "SELECT id FROM inference_requests WHERE state = 'ADMITTED'"
+        )
+        return {str(row["id"]) for row in rows}
 
     async def settle_quota(
         self,
@@ -921,14 +973,19 @@ class Database:
     ) -> None:
         actual_tokens = max(0, actual_tokens)
         async with self.transaction() as connection:
-            reservation = await (await connection.execute(
-                "SELECT * FROM quota_reservations WHERE id = ?", (reservation_id,)
-            )).fetchone()
+            reservation = await (
+                await connection.execute(
+                    "SELECT * FROM quota_reservations WHERE id = ?", (reservation_id,)
+                )
+            ).fetchone()
             if reservation is None or reservation["state"] != "RESERVED":
                 return
-            account = await (await connection.execute(
-                "SELECT unlimited FROM quota_accounts WHERE id = ?", (reservation["account_id"],)
-            )).fetchone()
+            account = await (
+                await connection.execute(
+                    "SELECT unlimited FROM quota_accounts WHERE id = ?",
+                    (reservation["account_id"],),
+                )
+            ).fetchone()
             reserved = int(reservation["reserved_tokens"])
             charged = min(actual_tokens, reserved)
             refund = reserved - charged
@@ -957,14 +1014,52 @@ class Database:
                 """
                 UPDATE inference_requests
                    SET state = ?, actual_prompt_tokens = ?, actual_completion_tokens = ?,
-                       error_code = ?, completed_at = ?
+                       error_code = ?, completed_at = ?,
+                       completion_count = completion_count + 1
                  WHERE reservation_id = ?
                 """,
                 (state, prompt_tokens, completion_tokens, error_code, _now(), reservation_id),
             )
 
     async def release_reservation(self, reservation_id: str, error_code: str) -> None:
-        await self.settle_quota(reservation_id=reservation_id, actual_tokens=0, error_code=error_code)
+        await self.settle_quota(
+            reservation_id=reservation_id, actual_tokens=0, error_code=error_code
+        )
+
+    async def inference_requests_for_test_run(self, test_run_id: str) -> list[dict[str, Any]]:
+        rows = await self.fetchall(
+            """
+            SELECT r.id AS request_id, r.test_run_id, r.client_worker,
+                   m.nickname AS model, r.worker_id,
+                   r.state AS completion_status, r.error_code,
+                   r.estimated_tokens, r.actual_prompt_tokens,
+                   r.actual_completion_tokens, r.accepted_count, r.completion_count,
+                   r.created_at AS admission_time,
+                   r.admitted_at AS worker_accepted_time,
+                   r.completed_at AS completion_time,
+                   w.gpu_uuids_json,
+                   json_extract(p.profile_json, '$.tensor_parallel_size')
+                       AS tensor_parallel_size
+              FROM inference_requests r
+              JOIN model_catalog m ON m.id = r.model_id
+              LEFT JOIN workers w ON w.id = r.worker_id
+              LEFT JOIN model_profiles p ON p.id = w.profile_id
+             WHERE r.test_run_id = ?
+             ORDER BY r.created_at, r.id
+            """,
+            (test_run_id,),
+        )
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            raw_gpu_uuids = item.pop("gpu_uuids_json")
+            item["gpu_uuids"] = json.loads(raw_gpu_uuids) if raw_gpu_uuids else []
+            item["token_usage"] = {
+                "prompt_tokens": item.pop("actual_prompt_tokens"),
+                "completion_tokens": item.pop("actual_completion_tokens"),
+            }
+            result.append(item)
+        return result
 
     async def usage(self, principal: Principal) -> dict[str, Any]:
         account = await self.fetchone(
@@ -1011,9 +1106,11 @@ class Database:
 
     async def set_machine_fingerprint(self, fingerprint: str) -> str | None:
         async with self.transaction() as connection:
-            row = await (await connection.execute(
-                "SELECT machine_fingerprint FROM service_state WHERE singleton = 1"
-            )).fetchone()
+            row = await (
+                await connection.execute(
+                    "SELECT machine_fingerprint FROM service_state WHERE singleton = 1"
+                )
+            ).fetchone()
             previous = row["machine_fingerprint"] if row else None
             if previous and previous != fingerprint:
                 await connection.execute(
@@ -1021,7 +1118,8 @@ class Database:
                     (fingerprint,),
                 )
             await connection.execute(
-                "UPDATE service_state SET machine_fingerprint = ?, updated_at = ? WHERE singleton = 1",
+                "UPDATE service_state SET machine_fingerprint = ?, updated_at = ? "
+                "WHERE singleton = 1",
                 (fingerprint, _now()),
             )
         return previous
@@ -1029,9 +1127,11 @@ class Database:
     async def recover_orphaned_state(self) -> None:
         """Begin cold and refund reservations that cannot have a live local request."""
         async with self.transaction() as connection:
-            reservations = await (await connection.execute(
-                "SELECT id FROM quota_reservations WHERE state = 'RESERVED'"
-            )).fetchall()
+            reservations = await (
+                await connection.execute(
+                    "SELECT id FROM quota_reservations WHERE state = 'RESERVED'"
+                )
+            ).fetchall()
         for reservation in reservations:
             await self.release_reservation(reservation["id"], "service_restarted")
         await self.execute(
@@ -1056,4 +1156,3 @@ class Database:
             """,
             (event_type, entity_id, json.dumps(payload or {}), _now()),
         )
-

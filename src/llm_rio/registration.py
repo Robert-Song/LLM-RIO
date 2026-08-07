@@ -108,6 +108,14 @@ class RegistrationManager:
             if not profiles:
                 raise ValidationError("validation", "no candidate placement passed validation")
             async with self.database.transaction() as connection:
+                await connection.execute(
+                    """
+                    UPDATE model_profiles
+                       SET active = 0
+                     WHERE model_id = ? AND machine_fingerprint = ?
+                    """,
+                    (job["model_id"], self.inventory.fingerprint),
+                )
                 for profile in profiles:
                     raw = profile_to_dict(profile)
                     await connection.execute(
@@ -117,7 +125,9 @@ class RegistrationManager:
                              verified_at, active)
                         VALUES (?, ?, ?, ?, ?, ?, 1)
                         ON CONFLICT(profile_key) DO UPDATE SET
-                            profile_json = excluded.profile_json,
+                            profile_json = json_set(
+                                excluded.profile_json, '$.id', model_profiles.id
+                            ),
                             verified_at = excluded.verified_at,
                             active = 1
                         """,
@@ -134,7 +144,8 @@ class RegistrationManager:
                     """
                     UPDATE model_catalog
                        SET state = ?, resolved_revision = ?, artifact_path = ?,
-                           artifact_hashes_json = ?, capabilities_json = ?, request_limits_json = ?, updated_at = ?
+                           artifact_hashes_json = ?, capabilities_json = ?,
+                           request_limits_json = ?, updated_at = ?
                      WHERE id = ?
                     """,
                     (
@@ -142,16 +153,20 @@ class RegistrationManager:
                         resolved["revision"],
                         str(artifact_path),
                         json.dumps(resolved["artifact_hashes"]),
-                        json.dumps(sorted(set.intersection(*(
-                            set(profile.capabilities) for profile in profiles
-                        )))),
-                        json.dumps({
-                            "max_context_tokens": min(
-                                profile.max_model_len for profile in profiles
-                            ),
-                            "max_output_tokens": self.settings.max_output_tokens,
-                            "max_n": self.settings.max_n,
-                        }),
+                        json.dumps(
+                            sorted(
+                                set.intersection(
+                                    *(set(profile.capabilities) for profile in profiles)
+                                )
+                            )
+                        ),
+                        json.dumps(
+                            {
+                                "max_context_tokens": min(
+                                    profile.max_model_len for profile in profiles
+                                ),
+                            }
+                        ),
                         _now(),
                         job["model_id"],
                     ),
@@ -333,24 +348,22 @@ class RegistrationManager:
             for name in inspection["weight_files"]
             if name.lower().endswith(".gguf")
         ]
-        while (
-            not accepted
-            and self.settings.engines.enable_llama_cpp
-            and gguf_files
-        ):
+        while not accepted and self.settings.engines.enable_llama_cpp and gguf_files:
             try:
                 async with self._validation_lock:
-                    accepted.extend(await validate_llama_cpp(
-                        settings=self.settings,
-                        inventory=self.inventory,
-                        scheduler=self.validator.scheduler,
-                        probes=self.validator,
-                        model_id=job["model_id"],
-                        model_revision=resolved_revision,
-                        gguf_path=gguf_files[0],
-                        nickname=job["nickname"],
-                        candidate=candidates[0],
-                    ))
+                    accepted.extend(
+                        await validate_llama_cpp(
+                            settings=self.settings,
+                            inventory=self.inventory,
+                            scheduler=self.validator.scheduler,
+                            probes=self.validator,
+                            model_id=job["model_id"],
+                            model_revision=resolved_revision,
+                            gguf_path=gguf_files[0],
+                            nickname=job["nickname"],
+                            candidate=candidates[0],
+                        )
+                    )
             except ValidationPreempted:
                 await self.database.update_model_job(
                     job_id,
@@ -387,4 +400,3 @@ class RegistrationManager:
             catalog_state=CatalogState.NEEDS_ADMIN_REVIEW,
             failure=failure,
         )
-

@@ -37,9 +37,7 @@ async def register_model(
 
 
 @router.get("/staff/model-jobs/{job_id}")
-async def model_job(
-    job_id: str, request: Request, _: StaffPrincipal
-) -> dict[str, object]:
+async def model_job(job_id: str, request: Request, _: StaffPrincipal) -> dict[str, object]:
     job = await request.app.state.database.get_model_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -47,14 +45,12 @@ async def model_job(
 
 
 @router.post("/staff/model-jobs/{job_id}/retry", status_code=status.HTTP_202_ACCEPTED)
-async def retry_model_job(
-    job_id: str, request: Request, _: StaffPrincipal
-) -> dict[str, str]:
+async def retry_model_job(job_id: str, request: Request, _: StaffPrincipal) -> dict[str, str]:
     job = await request.app.state.database.get_model_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job["state"] != "FAILED":
-        raise HTTPException(status_code=409, detail="Only failed model jobs can be retried")
+    if job["state"] in {"QUEUED", "RUNNING"}:
+        raise HTTPException(status_code=409, detail="The model job is already running")
     await request.app.state.database.update_model_job(
         job_id,
         job_state="QUEUED",
@@ -67,15 +63,11 @@ async def retry_model_job(
 
 @router.get("/staff/models")
 async def staff_models(request: Request, _: StaffPrincipal) -> dict[str, object]:
-    return {
-        "data": await request.app.state.database.list_models(include_registration_jobs=True)
-    }
+    return {"data": await request.app.state.database.list_models(include_registration_jobs=True)}
 
 
 @router.post("/staff/models/{model_id}/disable", status_code=status.HTTP_202_ACCEPTED)
-async def disable_model(
-    model_id: str, request: Request, _: StaffPrincipal
-) -> dict[str, str]:
+async def disable_model(model_id: str, request: Request, _: StaffPrincipal) -> dict[str, str]:
     if not await request.app.state.database.disable_model(model_id):
         raise HTTPException(status_code=404, detail="Model not found")
     for worker in request.app.state.supervisor.workers.values():
@@ -113,4 +105,3 @@ async def update_grants(
     except KeyError:
         raise HTTPException(status_code=404, detail="Key not found") from None
     return Response(status_code=status.HTTP_204_NO_CONTENT)
-

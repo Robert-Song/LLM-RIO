@@ -53,7 +53,7 @@ def _read_topology() -> tuple[dict[str, dict[str, str]], str]:
 
 def discover_inventory(machine_id: str, managed_gpu_uuids: list[str]) -> MachineInventory:
     try:
-        import pynvml
+        import pynvml  # type: ignore[import-untyped]
 
         pynvml.nvmlInit()
     except Exception as exc:

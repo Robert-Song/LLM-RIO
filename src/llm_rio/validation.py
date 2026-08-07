@@ -20,6 +20,7 @@ from llm_rio.config import Settings
 from llm_rio.domain import Engine, MachineInventory, PlacementProfile
 from llm_rio.inventory import candidate_gpu_sets, gpu_environment
 from llm_rio.runtime import ResidencyScheduler
+from llm_rio.tool_support import detect_vllm_tool_parser
 
 
 class ValidationError(RuntimeError):
@@ -152,7 +153,7 @@ class ProfileValidator:
         profiles: list[PlacementProfile] = []
         failures: list[ValidationError] = []
         for gpu_set in candidate.eligible_gpu_sets:
-            while not await self.scheduler.acquire_validation_gpus(gpu_set):
+            while not await self.scheduler.acquire_validation_gpus(gpu_set):  # noqa: ASYNC110
                 await asyncio.sleep(5.0)
             try:
                 profile = await self._probe_vllm(
@@ -185,7 +186,7 @@ class ProfileValidator:
         gpu_set: tuple[str, ...],
     ) -> PlacementProfile:
         port = self.settings.worker_port_end + 1
-        api_key = secrets.token_urlsafe(32)
+        api_key = f"rio_validation_{secrets.token_urlsafe(32)}"
         command = [
             self.settings.engines.vllm_executable,
             "serve",
@@ -210,11 +211,12 @@ class ProfileValidator:
         if candidate.max_num_seqs is not None:
             command.extend(["--max-num-seqs", str(candidate.max_num_seqs)])
         if candidate.max_num_batched_tokens is not None:
-            command.extend(
-                ["--max-num-batched-tokens", str(candidate.max_num_batched_tokens)]
-            )
+            command.extend(["--max-num-batched-tokens", str(candidate.max_num_batched_tokens)])
         if candidate.quantization:
             command.extend(["--quantization", candidate.quantization])
+        tool_parser = detect_vllm_tool_parser(model_path)
+        if tool_parser is not None:
+            command.extend(["--enable-auto-tool-choice", "--tool-call-parser", tool_parser])
         gpu_indices = tuple(
             device.index for device in self.inventory.gpus if device.uuid in gpu_set
         )
@@ -285,10 +287,10 @@ class ProfileValidator:
             load_and_warmup_seconds=load_seconds,
             idle_vram_mib_per_gpu=idle_memory,
             peak_vram_mib_per_gpu=peak_memory,
-            gpu_headroom_mib_per_gpu=tuple(
-                self.settings.reserved_vram_mib for _ in gpu_set
+            gpu_headroom_mib_per_gpu=tuple(self.settings.reserved_vram_mib for _ in gpu_set),
+            capabilities=frozenset(
+                {"chat", "streaming", "tools"} if tool_parser is not None else {"chat", "streaming"}
             ),
-            capabilities=frozenset({"chat", "streaming"}),
             launch_args={},
             gpu_memory_utilization=candidate.gpu_memory_utilization,
             kv_cache_capacity_tokens=kv_cache_capacity,
@@ -306,13 +308,13 @@ class ProfileValidator:
         concurrency = float(concurrencies[-1]) if concurrencies else None
         return capacity, concurrency
 
-
     async def _wait_for_health(
         self, process: asyncio.subprocess.Process, port: int, api_key: str
     ) -> None:
-        deadline = time.monotonic() + self.settings.worker_startup_timeout_seconds
+        startup_timeout = self.settings.worker_startup_timeout_seconds
+        deadline = time.monotonic() + startup_timeout if startup_timeout is not None else None
         async with httpx.AsyncClient(timeout=5.0) as client:
-            while time.monotonic() < deadline:
+            while deadline is None or time.monotonic() < deadline:
                 if self.scheduler.validation_should_yield():
                     raise ValidationPreempted()
                 if process.returncode is not None:
@@ -352,7 +354,7 @@ class ProfileValidator:
         saw_done = False
         peak = list(self._used_vram(gpu_set))
         started = time.monotonic()
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:  # noqa: SIM117
             async with client.stream(
                 "POST",
                 f"http://127.0.0.1:{port}/v1/chat/completions",
@@ -362,7 +364,9 @@ class ProfileValidator:
                 if not response.is_success:
                     body = (await response.aread()).decode(errors="replace")[-2000:]
                     raise ValidationError(
-                        "generation", f"generation returned HTTP {response.status_code}", {"body": body}
+                        "generation",
+                        f"generation returned HTTP {response.status_code}",
+                        {"body": body},
                     )
                 async for line in response.aiter_lines():
                     if self.scheduler.validation_should_yield():
@@ -417,4 +421,3 @@ class ProfileValidator:
             return tuple(result)
         finally:
             pynvml.nvmlShutdown()
-

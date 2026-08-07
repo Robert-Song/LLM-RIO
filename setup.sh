@@ -39,7 +39,7 @@ uv sync --extra engine
 
 failed_stage="configuration"
 if [[ ! -f config.toml ]]; then
-  cp config.required.toml config.toml
+  cp config.example.toml config.toml
 fi
 mkdir -p state models logs
 for path in state models logs; do

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
+import os
 import secrets
 import signal
 import uuid
@@ -17,6 +19,7 @@ from llm_rio.config import Settings
 from llm_rio.domain import Engine, PlacementProfile, RuntimeState, WorkerPlacement
 from llm_rio.inventory import gpu_environment
 from llm_rio.storage import Database, _now
+from llm_rio.tool_support import detect_vllm_tool_parser
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +39,7 @@ class WorkerSupervisor:
         self._log_handles: dict[str, Any] = {}
         self._lock = asyncio.Lock()
         self._event_callback: WorkerEventCallback | None = None
-        self.internal_api_key = secrets.token_urlsafe(32)
+        self.internal_api_key = f"rio_internal_{secrets.token_urlsafe(32)}"
 
     def set_event_callback(self, callback: WorkerEventCallback) -> None:
         self._event_callback = callback
@@ -105,22 +108,33 @@ class WorkerSupervisor:
                 raise
             worker.process_pid = process.pid
             self._processes[worker_id] = process
-            await self._persist(worker)
-            await self.database.record_event(
-                "WORKER_LOADING",
-                worker_id,
-                {
-                    "gpu_uuids": gpu_uuids,
-                    "command": self._redact_command(command),
-                    "log_path": str(log_path) if log_path else None,
-                },
-            )
+            try:
+                await self._persist(worker)
+                await self.database.record_event(
+                    "WORKER_LOADING",
+                    worker_id,
+                    {
+                        "gpu_uuids": gpu_uuids,
+                        "command": self._redact_command(command),
+                        "log_path": str(log_path) if log_path else None,
+                    },
+                )
+            except BaseException:
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(process.wait(), timeout=10)
+                await self._cleanup(worker_id)
+                self.workers.pop(worker_id, None)
+                raise
             asyncio.create_task(self._await_ready(worker), name=f"worker-ready-{worker_id}")
             asyncio.create_task(self._monitor(worker), name=f"worker-monitor-{worker_id}")
             return worker
 
     def _allocate_port(self) -> int:
-        used = {worker.port for worker in self.workers.values()}
+        used = {
+            worker.port for worker in self.workers.values() if worker.state is not RuntimeState.COLD
+        }
         for port in range(self.settings.worker_port_start, self.settings.worker_port_end + 1):
             if port not in used:
                 return port
@@ -157,11 +171,12 @@ class WorkerSupervisor:
             if profile.max_num_seqs is not None:
                 command.extend(["--max-num-seqs", str(profile.max_num_seqs)])
             if profile.max_num_batched_tokens is not None:
-                command.extend(
-                    ["--max-num-batched-tokens", str(profile.max_num_batched_tokens)]
-                )
+                command.extend(["--max-num-batched-tokens", str(profile.max_num_batched_tokens)])
             if profile.quantization:
                 command.extend(["--quantization", profile.quantization])
+            tool_parser = detect_vllm_tool_parser(model_path)
+            if tool_parser is not None:
+                command.extend(["--enable-auto-tool-choice", "--tool-call-parser", tool_parser])
         elif profile.engine is Engine.LLAMA_CPP and self.settings.engines.enable_llama_cpp:
             command = [
                 self.settings.engines.llama_cpp_executable,
@@ -201,10 +216,15 @@ class WorkerSupervisor:
         return redacted
 
     async def _await_ready(self, worker: WorkerPlacement) -> None:
-        deadline = asyncio.get_running_loop().time() + self.settings.worker_startup_timeout_seconds
+        startup_timeout = self.settings.worker_startup_timeout_seconds
+        deadline = (
+            asyncio.get_running_loop().time() + startup_timeout
+            if startup_timeout is not None
+            else None
+        )
         headers = {"Authorization": f"Bearer {self.internal_api_key}"}
         async with httpx.AsyncClient(timeout=5.0) as client:
-            while asyncio.get_running_loop().time() < deadline:
+            while deadline is None or asyncio.get_running_loop().time() < deadline:
                 process = self._processes.get(worker.id)
                 if process is None or process.returncode is not None:
                     await self._fail(worker, "process_exited_during_startup")
@@ -261,6 +281,7 @@ class WorkerSupervisor:
             if worker.state is not RuntimeState.READY:
                 raise RuntimeError("worker is not routable")
             worker.admitted_request_ids.add(request_id)
+            worker.accepted_requests += 1
             worker.outstanding_token_work += estimated_tokens
             worker.last_demand_at = datetime.now(UTC)
 
@@ -271,6 +292,7 @@ class WorkerSupervisor:
             if worker is None:
                 return
             worker.admitted_request_ids.discard(request_id)
+            worker.last_demand_at = datetime.now(UTC)
             worker.outstanding_token_work = max(0, worker.outstanding_token_work - estimated_tokens)
             should_stop = worker.state is RuntimeState.DRAINING and not worker.admitted_request_ids
         if should_stop:
@@ -297,13 +319,14 @@ class WorkerSupervisor:
 
     async def enforce_drain_watchdogs(self) -> list[tuple[str, list[str]]]:
         now = datetime.now(UTC)
+        watchdog = self.settings.worker_drain_watchdog_seconds
         overdue: list[tuple[str, list[str]]] = []
         for worker in list(self.workers.values()):
             if (
-                worker.state is RuntimeState.DRAINING
+                watchdog is not None
+                and worker.state is RuntimeState.DRAINING
                 and worker.drain_started_at
-                and (now - worker.drain_started_at).total_seconds()
-                > self.settings.worker_drain_watchdog_seconds
+                and (now - worker.drain_started_at).total_seconds() > watchdog
             ):
                 overdue.append((worker.id, list(worker.admitted_request_ids)))
                 await self.stop(worker.id, force=True)
@@ -321,16 +344,22 @@ class WorkerSupervisor:
         await self._persist(worker)
         if process and process.returncode is None:
             try:
-                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                os.killpg(
+                    os.getpgid(process.pid),
+                    signal.SIGKILL if force else signal.SIGTERM,
+                )
             except (ProcessLookupError, OSError):
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill() if force else process.terminate()
             try:
-                await asyncio.wait_for(process.wait(), timeout=1.0)
-            except (TimeoutError, Exception):
-                pass
+                await asyncio.wait_for(process.wait(), timeout=5.0 if force else 30.0)
+            except TimeoutError:
+                try:
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    with contextlib.suppress(ProcessLookupError):
+                        process.kill()
+                await process.wait()
         async with self._lock:
             worker.state = RuntimeState.COLD
             worker.process_pid = None
@@ -346,7 +375,7 @@ class WorkerSupervisor:
         if not force:
             for worker_id in worker_ids:
                 await self.drain(worker_id)
-        tasks = [self.stop(worker_id, force=True) for worker_id in worker_ids]
+        tasks = [self.stop(worker_id, force=force) for worker_id in worker_ids]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -381,4 +410,3 @@ class WorkerSupervisor:
     async def _emit(self, worker_id: str, event: str) -> None:
         if self._event_callback:
             await self._event_callback(worker_id, event)
-

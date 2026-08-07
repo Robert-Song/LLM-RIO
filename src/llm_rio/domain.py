@@ -104,6 +104,7 @@ class WorkerPlacement:
     port: int
     state: RuntimeState = RuntimeState.LOADING
     admitted_request_ids: set[str] = field(default_factory=set)
+    accepted_requests: int = 0
     outstanding_token_work: int = 0
     ready_at: datetime | None = None
     last_demand_at: datetime = field(default_factory=utc_now)
@@ -117,4 +118,3 @@ class WorkerPlacement:
     @property
     def is_routable(self) -> bool:
         return self.state is RuntimeState.READY
-

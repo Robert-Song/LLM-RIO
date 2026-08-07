@@ -168,9 +168,7 @@ def _job_id_from_selector(job_or_model: str) -> str:
 
 def _review_guidance(stage: object) -> str:
     guidance = {
-        "resolve": (
-            "Verify the Hugging Face repository, requested revision, and HF token access."
-        ),
+        "resolve": ("Verify the Hugging Face repository, requested revision, and HF token access."),
         "disk_capacity": "Free enough model-store space, then retry the registration.",
         "inspection": "Confirm the snapshot contains a supported config and model-weight files.",
         "candidate_shapes": (
@@ -243,8 +241,8 @@ def _print_model_records(records: list[dict[str, Any]]) -> None:
 
 
 def _print_key_record(record: dict[str, Any], number: int | None = None) -> None:
-    heading = f"{number}. {record.get('nickname')}" if number is not None else str(
-        record.get("nickname")
+    heading = (
+        f"{number}. {record.get('nickname')}" if number is not None else str(record.get("nickname"))
     )
     typer.echo(heading)
     typer.echo(f"   API key: {record.get('api_key')}")
@@ -257,9 +255,7 @@ def _print_key_record(record: dict[str, Any], number: int | None = None) -> None
         typer.echo(f"   Token limit: {int(record.get('limit_tokens') or 0):,}")
         typer.echo(f"   Used since reset: {int(record.get('used_tokens') or 0):,}")
         typer.echo(f"   Remaining: {int(record.get('balance_tokens') or 0):,}")
-    typer.echo(
-        f"   Lifetime charged: {int(record.get('key_lifetime_charged_tokens') or 0):,}"
-    )
+    typer.echo(f"   Lifetime charged: {int(record.get('key_lifetime_charged_tokens') or 0):,}")
     granted_models = record.get("granted_models") or []
     typer.echo(f"   Models: {', '.join(granted_models) if granted_models else '(none)'}")
     typer.echo(f"   Created: {record.get('created_at')}")
@@ -283,9 +279,7 @@ def serve(
     """Run the machine-local API and scheduler."""
     settings = _settings(config)
     log_config = copy.deepcopy(uvicorn.config.LOGGING_CONFIG)
-    log_config["formatters"]["default"]["fmt"] = (
-        "%(asctime)s | %(levelprefix)s %(message)s"
-    )
+    log_config["formatters"]["default"]["fmt"] = "%(asctime)s | %(levelprefix)s %(message)s"
     uvicorn.run(
         create_app(settings),
         host=settings.api_host,
@@ -385,8 +379,7 @@ def show_key_usage(key: str) -> None:
 def create_key(
     nickname: str,
     role: Role = typer.Option(Role.USER, "--role"),
-    limit_tokens: int = typer.Option(1_000_000, "--limit", "--balance"),
-    unlimited: bool = typer.Option(False, "--unlimited"),
+    limit_tokens: int | None = typer.Option(None, "--limit", "--balance"),
     account_id: str | None = typer.Option(None, "--account-id"),
     grant: list[str] | None = typer.Option(None, "--grant", help="Model nickname to grant."),
     api_key: str | None = typer.Option(
@@ -401,7 +394,6 @@ def create_key(
             "nickname": nickname,
             "role": role.value,
             "limit_tokens": limit_tokens,
-            "unlimited": unlimited,
             "quota_account_id": account_id,
             "models": grant or [],
             "api_key": api_key,
@@ -675,26 +667,33 @@ def _interactive_keys_menu() -> None:
                     continue
                 role_str = _prompt_str("Enter role (user/admin)", default="user")
                 role_val = Role.ADMIN if role_str.lower() == "admin" else Role.USER
-                unlimited_val = _prompt_bool("Unlimited quota?", default=False)
-                limit_val = 1_000_000
+                unlimited_val = _prompt_bool("Unlimited quota?", default=True)
+                limit_val = 0
                 if not unlimited_val:
                     limit_val = _prompt_int("Enter lifetime token limit", default=1_000_000)
-                custom_key = _prompt_str("Enter custom API key (leave blank to auto-generate)", required=False)
+                custom_key = _prompt_str(
+                    "Enter custom API key (leave blank to auto-generate)", required=False
+                )
                 custom_key_opt = custom_key if custom_key else None
-                grants_raw = _prompt_str("Model nicknames to grant (comma-separated, optional)", required=False)
-                grants = [g.strip() for g in grants_raw.split(",") if g.strip()] if grants_raw else None
+                grants_raw = _prompt_str(
+                    "Model nicknames to grant (comma-separated, optional)", required=False
+                )
+                grants = (
+                    [g.strip() for g in grants_raw.split(",") if g.strip()] if grants_raw else None
+                )
                 create_key(
                     nickname=nickname,
                     role=role_val,
-                    limit_tokens=limit_val,
-                    unlimited=unlimited_val,
+                    limit_tokens=None if unlimited_val else limit_val,
                     account_id=None,
                     grant=grants,
                     api_key=custom_key_opt,
                 )
             elif choice == "4":
                 key = _prompt_str("Enter API key nickname or full API key")
-                if key and _prompt_bool(f"Are you sure you want to rotate key '{key}'?", default=False):
+                if key and _prompt_bool(
+                    f"Are you sure you want to rotate key '{key}'?", default=False
+                ):
                     rotate_key(key)
             elif choice == "5":
                 key = _prompt_str("Enter API key nickname or full API key")
@@ -707,7 +706,9 @@ def _interactive_keys_menu() -> None:
                 update_limit(key=key, limit_tokens=limit_val, unlimited=unlimited_val)
             elif choice == "6":
                 key = _prompt_str("Enter API key nickname or full API key")
-                if key and _prompt_bool(f"Are you sure you want to reset usage to 0 for '{key}'?", default=False):
+                if key and _prompt_bool(
+                    f"Are you sure you want to reset usage to 0 for '{key}'?", default=False
+                ):
                     reset_usage(key)
             elif choice == "7":
                 key = _prompt_str("Enter API key nickname or full API key to revoke")
@@ -715,7 +716,9 @@ def _interactive_keys_menu() -> None:
                     revoke_key(key)
             elif choice == "8":
                 key = _prompt_str("Enter API key nickname or full API key to delete")
-                if key and _prompt_bool(f"Are you sure you want to DELETE key '{key}'?", default=False):
+                if key and _prompt_bool(
+                    f"Are you sure you want to DELETE key '{key}'?", default=False
+                ):
                     delete_key(key)
             elif choice == "0":
                 break
@@ -755,11 +758,19 @@ def _interactive_models_menu() -> None:
                 repo = _prompt_str("Enter HuggingFace repository (e.g. meta-llama/Llama-3.2-1B)")
                 if not repo:
                     continue
-                revision = _prompt_str("Enter revision (optional, press Enter to skip)", required=False)
+                revision = _prompt_str(
+                    "Enter revision (optional, press Enter to skip)", required=False
+                )
                 rev_opt = revision if revision else None
-                grants_raw = _prompt_str("API key nicknames to grant access (comma-separated, optional)", required=False)
-                grants = [g.strip() for g in grants_raw.split(",") if g.strip()] if grants_raw else None
-                add_model(nickname=nickname, huggingface_repo=repo, revision=rev_opt, grant_to=grants)
+                grants_raw = _prompt_str(
+                    "API key nicknames to grant access (comma-separated, optional)", required=False
+                )
+                grants = (
+                    [g.strip() for g in grants_raw.split(",") if g.strip()] if grants_raw else None
+                )
+                add_model(
+                    nickname=nickname, huggingface_repo=repo, revision=rev_opt, grant_to=grants
+                )
             elif choice == "3":
                 target = _prompt_str("Enter model nickname or registration job ID")
                 if target:
@@ -770,7 +781,9 @@ def _interactive_models_menu() -> None:
                     retry_model_job(target)
             elif choice == "5":
                 nickname = _prompt_str("Enter model nickname to disable")
-                if nickname and _prompt_bool(f"Are you sure you want to disable model '{nickname}'?", default=False):
+                if nickname and _prompt_bool(
+                    f"Are you sure you want to disable model '{nickname}'?", default=False
+                ):
                     disable_model(nickname)
             elif choice == "6":
                 key = _prompt_str("Enter API key nickname or full API key")
@@ -819,10 +832,15 @@ def _interactive_maintenance_menu() -> None:
             if choice == "1":
                 maintenance_status()
             elif choice == "2":
-                if _prompt_bool("Are you sure you want to drain this machine into maintenance mode?", default=False):
+                if _prompt_bool(
+                    "Are you sure you want to drain this machine into maintenance mode?",
+                    default=False,
+                ):
                     maintenance_drain()
             elif choice == "3":
-                if _prompt_bool("Are you sure you want to resume normal service operations?", default=True):
+                if _prompt_bool(
+                    "Are you sure you want to resume normal service operations?", default=True
+                ):
                     maintenance_resume()
             elif choice == "0":
                 break
@@ -850,7 +868,6 @@ def interactive_menu() -> None:
         typer.echo("6. Service & Configuration Info")
         typer.echo("0. Exit")
         typer.echo("=" * 50)
-
 
         choice = _prompt_str("Select option (0-6)", default="0", required=False)
 
@@ -905,5 +922,3 @@ def interactive_cmd() -> None:
 
 if __name__ == "__main__":
     app()
-
-

@@ -92,8 +92,8 @@ class ProfileRepository:
     async def for_model(self, model_id: str) -> list[PlacementProfile]:
         rows = await self.database.fetchall(
             """
-            SELECT profile_json FROM model_profiles
-             WHERE model_id = ? AND machine_fingerprint = ?
+            SELECT id, profile_json FROM model_profiles
+             WHERE model_id = ? AND machine_fingerprint = ? AND active = 1
              ORDER BY json_extract(profile_json, '$.gpu_count'),
                       json_extract(profile_json, '$.predicted_tokens_per_second') DESC
             """,
@@ -102,6 +102,7 @@ class ProfileRepository:
         profiles: list[PlacementProfile] = []
         for row in rows:
             data = json.loads(row["profile_json"])
+            data["id"] = row["id"]
             data["machine_fingerprint"] = self.machine_fingerprint
             profiles.append(profile_from_dict(data))
         return profiles
@@ -113,7 +114,7 @@ class ProfileRepository:
                 (id, model_id, machine_fingerprint, profile_key, profile_json, verified_at)
             VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(profile_key) DO UPDATE SET
-                profile_json = excluded.profile_json,
+                profile_json = json_set(excluded.profile_json, '$.id', model_profiles.id),
                 verified_at = excluded.verified_at,
                 active = 1
             """,
@@ -126,4 +127,3 @@ class ProfileRepository:
                 _now(),
             ),
         )
-

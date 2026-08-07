@@ -22,9 +22,14 @@ class QueuedRequest:
 
 
 class DeficitRoundRobinQueue:
-    """Bounded per-tenant DRR admission queue for one model."""
+    """Optionally bounded per-tenant DRR admission queue for one model."""
 
-    def __init__(self, total_capacity: int, tenant_capacity: int, quantum: int = 4096) -> None:
+    def __init__(
+        self,
+        total_capacity: int | None,
+        tenant_capacity: int | None,
+        quantum: int = 4096,
+    ) -> None:
         self.total_capacity = total_capacity
         self.tenant_capacity = tenant_capacity
         self.quantum = quantum
@@ -50,7 +55,9 @@ class DeficitRoundRobinQueue:
 
     def put(self, request: QueuedRequest) -> None:
         tenant_queue = self._queues.setdefault(request.tenant_id, deque())
-        if self._size >= self.total_capacity or len(tenant_queue) >= self.tenant_capacity:
+        if (self.total_capacity is not None and self._size >= self.total_capacity) or (
+            self.tenant_capacity is not None and len(tenant_queue) >= self.tenant_capacity
+        ):
             if not tenant_queue:
                 self._queues.pop(request.tenant_id, None)
             raise QueueFullError()
@@ -100,7 +107,7 @@ class DeficitRoundRobinQueue:
 
 
 class ModelQueues:
-    def __init__(self, total_capacity: int, tenant_capacity: int) -> None:
+    def __init__(self, total_capacity: int | None, tenant_capacity: int | None) -> None:
         self.total_capacity = total_capacity
         self.tenant_capacity = tenant_capacity
         self._models: dict[str, DeficitRoundRobinQueue] = {}
@@ -123,4 +130,3 @@ class ModelQueues:
         for queue in self._models.values():
             result.extend(queue.drain())
         return result
-
