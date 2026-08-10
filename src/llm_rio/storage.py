@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
@@ -20,6 +21,8 @@ from llm_rio.security import (
     hash_api_key,
     verify_api_key,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
@@ -194,35 +197,35 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = await aiosqlite.connect(self.path, isolation_level=None)
         self._connection.row_factory = aiosqlite.Row
-        await self._connection.execute("PRAGMA foreign_keys=ON")
-        await self._connection.execute("PRAGMA journal_mode=WAL")
-        await self._connection.execute("PRAGMA synchronous=NORMAL")
-        await self._connection.execute("PRAGMA busy_timeout=5000")
-        await self._connection.executescript(SCHEMA)
+        await self.execute("PRAGMA foreign_keys=ON")
+        await self.execute("PRAGMA journal_mode=WAL")
+        await self.execute("PRAGMA synchronous=NORMAL")
+        await self.execute("PRAGMA busy_timeout=5000")
+        await self.executescript(SCHEMA)
         await self._migrate_schema()
 
     async def _migrate_schema(self) -> None:
         """Add backward-compatible quota metadata to existing lab databases."""
-        cursor = await self.connection.execute("PRAGMA table_info(quota_accounts)")
-        columns = {row["name"] for row in await cursor.fetchall()}
+        rows = await self.fetchall("PRAGMA table_info(quota_accounts)")
+        columns = {row["name"] for row in rows}
         if "limit_tokens" not in columns:
-            await self.connection.execute(
+            await self.execute(
                 "ALTER TABLE quota_accounts ADD COLUMN limit_tokens INTEGER"
             )
         if "usage_baseline_tokens" not in columns:
-            await self.connection.execute(
+            await self.execute(
                 "ALTER TABLE quota_accounts "
                 "ADD COLUMN usage_baseline_tokens INTEGER NOT NULL DEFAULT 0"
             )
         if "usage_reset_at" not in columns:
-            await self.connection.execute(
+            await self.execute(
                 "ALTER TABLE quota_accounts ADD COLUMN usage_reset_at TEXT"
             )
-        await self.connection.execute(
+        await self.execute(
             "UPDATE quota_accounts SET limit_tokens = balance_tokens WHERE limit_tokens IS NULL"
         )
-        cursor = await self.connection.execute("PRAGMA table_info(inference_requests)")
-        request_columns = {row["name"] for row in await cursor.fetchall()}
+        request_rows = await self.fetchall("PRAGMA table_info(inference_requests)")
+        request_columns = {row["name"] for row in request_rows}
         for column, definition in (
             ("test_run_id", "TEXT"),
             ("client_worker", "TEXT"),
@@ -230,10 +233,10 @@ class Database:
             ("completion_count", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if column not in request_columns:
-                await self.connection.execute(
+                await self.execute(
                     f"ALTER TABLE inference_requests ADD COLUMN {column} {definition}"
                 )
-        await self.connection.execute(
+        await self.execute(
             "CREATE INDEX IF NOT EXISTS idx_inference_requests_test_run "
             "ON inference_requests(test_run_id, created_at)"
         )
@@ -247,18 +250,34 @@ class Database:
     async def transaction(self, *, immediate: bool = True) -> AsyncIterator[aiosqlite.Connection]:
         async with self._transaction_lock:
             connection = self.connection
-            await connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+            if connection.in_transaction:
+                logger.error("Rolling back an orphaned SQLite transaction before starting new work")
+                await connection.rollback()
+            try:
+                await connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+            except BaseException:
+                await connection.rollback()
+                raise
             try:
                 yield connection
             except BaseException:
                 await connection.rollback()
                 raise
-            else:
+            try:
                 await connection.commit()
+            except BaseException:
+                await connection.rollback()
+                raise
 
-    async def execute(self, sql: str, parameters: Iterable[Any] = ()) -> None:
+    async def execute(
+        self, sql: str, parameters: Iterable[Any] = ()
+    ) -> aiosqlite.Cursor:
         async with self._transaction_lock:
-            await self.connection.execute(sql, tuple(parameters))
+            return await self.connection.execute(sql, tuple(parameters))
+
+    async def executescript(self, sql: str) -> aiosqlite.Cursor:
+        async with self._transaction_lock:
+            return await self.connection.executescript(sql)
 
     async def fetchone(self, sql: str, parameters: Iterable[Any] = ()) -> aiosqlite.Row | None:
         async with self._transaction_lock:
@@ -436,7 +455,7 @@ class Database:
             return cursor.rowcount > 0
 
     async def replace_key_secret(self, key_id: str, prefix: str, api_key: str) -> bool:
-        cursor = await self.connection.execute(
+        cursor = await self.execute(
             """
             UPDATE api_keys
                SET token_prefix = ?, token_hash = ?, encrypted_api_key = ?, active = 1
@@ -829,7 +848,7 @@ class Database:
             return sorted(desired)
 
     async def disable_model(self, model_id: str) -> bool:
-        cursor = await self.connection.execute(
+        cursor = await self.execute(
             "UPDATE model_catalog SET state = ?, updated_at = ? WHERE id = ?",
             (CatalogState.DISABLED.value, _now(), model_id),
         )
