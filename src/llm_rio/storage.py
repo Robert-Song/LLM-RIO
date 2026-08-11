@@ -964,16 +964,20 @@ class Database:
             ),
         )
 
-    async def mark_request_admitted(self, request_id: str, worker_id: str) -> None:
-        await self.execute(
-            """
-            UPDATE inference_requests
-               SET state = 'ADMITTED', worker_id = ?, admitted_at = ?,
-                   accepted_count = accepted_count + 1
-             WHERE id = ? AND state = 'QUEUED'
-            """,
-            (worker_id, _now(), request_id),
-        )
+    async def mark_request_admitted(self, request_id: str, worker_id: str) -> bool:
+        async with (
+            self._transaction_lock,
+            self.connection.execute(
+                """
+                UPDATE inference_requests
+                   SET state = 'ADMITTED', worker_id = ?, admitted_at = ?,
+                       accepted_count = accepted_count + 1
+                 WHERE id = ? AND state = 'QUEUED'
+                """,
+                (worker_id, _now(), request_id),
+            ) as cursor,
+        ):
+            return cursor.rowcount == 1
 
     async def admitted_request_ids(self) -> set[str]:
         rows = await self.fetchall(

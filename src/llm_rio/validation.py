@@ -52,8 +52,8 @@ def validation_log_path(
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     unique_suffix = uuid.uuid4().hex[:8]
     filename = (
-        f"validation-{safe_nickname}-{safe_engine}-tp{tensor_parallel_size}-"
-        f"gpus{gpu_label}-{timestamp}-{unique_suffix}.log"
+        f"{timestamp}-validation-{safe_nickname}-{safe_engine}-tp{tensor_parallel_size}-"
+        f"gpus{gpu_label}-{unique_suffix}.log"
     )
     return log_dir / filename
 

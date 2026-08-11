@@ -16,4 +16,5 @@ state/
 logs/
 diagnostics/
 config.toml
-
+docs/
+scripts/

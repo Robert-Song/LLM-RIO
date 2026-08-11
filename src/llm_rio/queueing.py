@@ -17,6 +17,7 @@ class QueuedRequest:
     estimated_tokens: int
     payload: dict[str, Any]
     reservation_id: str
+    is_stream: bool = False
     enqueued_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     assignment: asyncio.Future[Any] | None = None
 

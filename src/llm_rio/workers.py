@@ -5,6 +5,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import secrets
 import signal
 import uuid
@@ -30,6 +31,14 @@ class WorkerLaunchError(RuntimeError):
     pass
 
 
+def worker_log_path(*, log_dir: Path, served_model_name: str, worker_id: str) -> Path:
+    """Build a sortable log name that identifies the worker's model."""
+    safe_model_name = re.sub(r"[^a-zA-Z0-9._-]+", "-", served_model_name)
+    safe_model_name = safe_model_name.strip("._-").lower()[:80] or "model"
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return log_dir / f"{timestamp}-worker-{safe_model_name}-{worker_id}.log"
+
+
 class WorkerSupervisor:
     def __init__(self, settings: Settings, database: Database) -> None:
         self.settings = settings
@@ -37,6 +46,7 @@ class WorkerSupervisor:
         self.workers: dict[str, WorkerPlacement] = {}
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._log_handles: dict[str, Any] = {}
+        self._log_paths: dict[str, Path] = {}
         self._lock = asyncio.Lock()
         self._event_callback: WorkerEventCallback | None = None
         self.internal_api_key = f"rio_internal_{secrets.token_urlsafe(32)}"
@@ -88,10 +98,15 @@ class WorkerSupervisor:
             log_handle: Any | None = None
             worker_output: Any = asyncio.subprocess.DEVNULL
             if self.settings.capture_worker_engine_logs:
-                log_path = self.settings.log_dir / f"worker-{worker_id}.log"
+                log_path = worker_log_path(
+                    log_dir=self.settings.log_dir,
+                    served_model_name=served_model_name,
+                    worker_id=worker_id,
+                )
                 log_handle = log_path.open("ab", buffering=0)
                 worker_output = log_handle
                 self._log_handles[worker_id] = log_handle
+                self._log_paths[worker_id] = log_path
             try:
                 process = await asyncio.create_subprocess_exec(
                     *command,
@@ -101,9 +116,7 @@ class WorkerSupervisor:
                     start_new_session=True,
                 )
             except BaseException:
-                if log_handle:
-                    log_handle.close()
-                self._log_handles.pop(worker_id, None)
+                await self._cleanup(worker_id)
                 self.workers.pop(worker_id, None)
                 raise
             worker.process_pid = process.pid
@@ -116,7 +129,6 @@ class WorkerSupervisor:
                     {
                         "gpu_uuids": gpu_uuids,
                         "command": self._redact_command(command),
-                        "log_path": str(log_path) if log_path else None,
                     },
                 )
             except BaseException:
@@ -269,10 +281,17 @@ class WorkerSupervisor:
             process.kill()
             await process.wait()
         await self._persist(worker)
+        log_path = self._log_paths.get(worker.id)
         await self.database.record_event(
-            "WORKER_FAILED", worker.id, {"reason": reason, "request_ids": admitted}
+            "WORKER_FAILED",
+            worker.id,
+            {
+                "reason": reason,
+                "request_ids": admitted,
+                "log_path": str(log_path) if log_path else None,
+            },
         )
-        await self._cleanup(worker.id)
+        await self._cleanup(worker.id, retain_log=True)
         await self._emit(worker.id, f"failed:{reason}")
 
     async def admit(self, worker_id: str, request_id: str, estimated_tokens: int) -> None:
@@ -379,11 +398,15 @@ class WorkerSupervisor:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _cleanup(self, worker_id: str) -> None:
+    async def _cleanup(self, worker_id: str, *, retain_log: bool = False) -> None:
         self._processes.pop(worker_id, None)
         handle = self._log_handles.pop(worker_id, None)
         if handle:
             handle.close()
+        log_path = self._log_paths.pop(worker_id, None)
+        if log_path and not retain_log:
+            with contextlib.suppress(FileNotFoundError):
+                log_path.unlink()
 
     async def _persist(self, worker: WorkerPlacement) -> None:
         await self.database.execute(

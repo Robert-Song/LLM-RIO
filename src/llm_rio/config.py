@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     validation_idle_window_seconds: float = Field(default=0.0, ge=0)
     worker_startup_timeout_seconds: float | None = Field(default=None, gt=0)
     worker_drain_watchdog_seconds: float | None = Field(default=None, gt=0)
+    worker_request_timeout_seconds: float | None = Field(default=None, gt=0)
+    worker_stream_idle_timeout_seconds: float | None = Field(default=None, gt=0)
     worker_port_start: int = Field(default=18000, ge=1, le=65535)
     worker_port_end: int = Field(default=18999, ge=1, le=65535)
     scheduler_tick_seconds: float = Field(default=1.0, gt=0)

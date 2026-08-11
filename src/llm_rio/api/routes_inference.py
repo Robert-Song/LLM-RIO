@@ -4,12 +4,14 @@ import asyncio
 import json
 import logging
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask
 
 from llm_rio.api.dependencies import CurrentPrincipal
 from llm_rio.api.schemas import ChatCompletionRequest
@@ -262,6 +264,7 @@ async def chat_completions(
         estimated_tokens=reservation_estimate,
         payload=payload,
         reservation_id=reservation_id,
+        is_stream=body.stream,
     )
     try:
         lease = await request.app.state.scheduler.enqueue(queued)
@@ -283,6 +286,13 @@ async def chat_completions(
             lease=lease,
             reservation_id=reservation_id,
         )
+        finalizer = _StreamLeaseFinalizer(
+            request=request,
+            payload=payload,
+            lease=lease,
+            reservation_id=reservation_id,
+            response=backend_response,
+        )
         return StreamingResponse(
             _stream_backend(
                 request=request,
@@ -291,6 +301,7 @@ async def chat_completions(
                 reservation_id=reservation_id,
                 prompt_estimate=prompt_estimate,
                 response=backend_response,
+                finalizer=finalizer,
             ),
             media_type="text/event-stream",
             headers={
@@ -299,6 +310,7 @@ async def chat_completions(
                 "X-Queue-Wait-Ms": str(queue_wait_milliseconds),
                 "Cache-Control": "no-cache",
             },
+            background=BackgroundTask(finalizer.abandon),
         )
     return await _nonstream_backend(
         request=request,
@@ -345,6 +357,127 @@ def _log_request_completion(
     )
 
 
+async def _finish_lease(
+    *,
+    request: Request,
+    payload: dict[str, Any],
+    lease: Any,
+    reservation_id: str,
+    actual_tokens: int,
+    prompt_tokens: int,
+    completion_tokens: int,
+    error_code: str | None,
+) -> None:
+    """Persist a terminal request state before freeing the worker admission."""
+    try:
+        await request.app.state.database.settle_quota(
+            reservation_id=reservation_id,
+            actual_tokens=actual_tokens,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            error_code=error_code,
+        )
+    except Exception:
+        request_logger.exception("Could not settle inference request %s", lease.request_id)
+    finally:
+        try:
+            await request.app.state.scheduler.release(lease)
+        except Exception:
+            request_logger.exception("Could not release worker admission for %s", lease.request_id)
+    _log_request_completion(
+        request=request,
+        payload=payload,
+        lease=lease,
+        completion_status="FAILED" if error_code else "COMPLETED",
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        error_code=error_code,
+    )
+
+
+async def _complete_lease(**kwargs: Any) -> None:
+    """Run terminal state transfer in its own task so disconnects cannot strand a lease."""
+    cleanup = asyncio.create_task(_finish_lease(**kwargs), name="inference-lease-cleanup")
+    try:
+        await asyncio.shield(cleanup)
+    except asyncio.CancelledError:
+        cleanup.add_done_callback(_consume_cleanup_result)
+        raise
+
+
+def _consume_cleanup_result(task: asyncio.Task[None]) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        request_logger.exception("Inference lease cleanup task failed")
+
+
+async def _close_worker_response(response: httpx.Response) -> None:
+    try:
+        await asyncio.wait_for(response.aclose(), timeout=5.0)
+    except TimeoutError:
+        request_logger.warning("Timed out closing worker response")
+    except Exception:
+        request_logger.warning("Could not close worker response", exc_info=True)
+
+
+class _StreamLeaseFinalizer:
+    """Finalize an opened worker stream exactly once, even if its body never starts."""
+
+    def __init__(
+        self,
+        *,
+        request: Request,
+        payload: dict[str, Any],
+        lease: Any,
+        reservation_id: str,
+        response: httpx.Response,
+    ) -> None:
+        self.request = request
+        self.payload = payload
+        self.lease = lease
+        self.reservation_id = reservation_id
+        self.response = response
+        self._finished = False
+        self._lock = asyncio.Lock()
+
+    async def finish(
+        self,
+        *,
+        actual_tokens: int,
+        prompt_tokens: int,
+        completion_tokens: int,
+        error_code: str | None,
+    ) -> None:
+        async with self._lock:
+            if self._finished:
+                return
+            self._finished = True
+        try:
+            await _complete_lease(
+                request=self.request,
+                payload=self.payload,
+                lease=self.lease,
+                reservation_id=self.reservation_id,
+                actual_tokens=actual_tokens,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                error_code=error_code,
+            )
+        finally:
+            await _close_worker_response(self.response)
+
+    async def abandon(self) -> None:
+        await self.finish(
+            actual_tokens=0,
+            prompt_tokens=0,
+            completion_tokens=0,
+            error_code="client_disconnected",
+        )
+
+
 async def _nonstream_backend(
     *,
     request: Request,
@@ -357,10 +490,16 @@ async def _nonstream_backend(
     error_code: str | None = None
     actual = prompt = completion = 0
     try:
-        response = await request.app.state.worker_client.post(
+        request_timeout = request.app.state.settings.worker_request_timeout_seconds
+        worker_request = request.app.state.worker_client.post(
             f"{lease.base_url}/v1/chat/completions",
             headers={"Authorization": f"Bearer {lease.internal_api_key}"},
             json=payload,
+        )
+        response = (
+            await asyncio.wait_for(worker_request, timeout=request_timeout)
+            if request_timeout is not None
+            else await worker_request
         )
         if not response.is_success:
             error_code = "worker_rejected"
@@ -402,6 +541,13 @@ async def _nonstream_backend(
     except asyncio.CancelledError:
         error_code = "client_disconnected"
         raise
+    except TimeoutError as exc:
+        error_code = "worker_request_timeout"
+        raise RioError(
+            "worker_request_timeout",
+            "The selected inference worker did not respond before the request timeout",
+            status_code=504,
+        ) from exc
     except httpx.HTTPError as exc:
         error_code = "worker_transport_error"
         raise RioError(
@@ -412,23 +558,16 @@ async def _nonstream_backend(
     finally:
         if request.app.state.settings.quota_charge_requested_maximum and error_code is None:
             actual = lease.estimated_tokens
-        await request.app.state.database.settle_quota(
+        await _complete_lease(
+            request=request,
+            payload=payload,
+            lease=lease,
             reservation_id=reservation_id,
             actual_tokens=actual,
             prompt_tokens=prompt,
             completion_tokens=completion,
             error_code=error_code,
         )
-        _log_request_completion(
-            request=request,
-            payload=payload,
-            lease=lease,
-            completion_status="FAILED" if error_code else "COMPLETED",
-            prompt_tokens=prompt,
-            completion_tokens=completion,
-            error_code=error_code,
-        )
-        await request.app.state.scheduler.release(lease)
 
 
 async def _open_worker_stream(
@@ -444,60 +583,74 @@ async def _open_worker_stream(
         headers={"Authorization": f"Bearer {lease.internal_api_key}"},
         json=payload,
     )
-    error_code: str
     try:
-        response = await request.app.state.worker_client.send(worker_request, stream=True)
+        request_timeout = request.app.state.settings.worker_request_timeout_seconds
+        pending_response = request.app.state.worker_client.send(worker_request, stream=True)
+        response = (
+            await asyncio.wait_for(pending_response, timeout=request_timeout)
+            if request_timeout is not None
+            else await pending_response
+        )
     except asyncio.CancelledError:
         error_code = "client_disconnected"
-        await request.app.state.database.settle_quota(
+        await _complete_lease(
+            request=request,
+            payload=payload,
+            lease=lease,
             reservation_id=reservation_id,
             actual_tokens=0,
             prompt_tokens=0,
             completion_tokens=0,
             error_code=error_code,
         )
-        _log_request_completion(
+        raise
+    except TimeoutError as exc:
+        error_code = "worker_request_timeout"
+        status_code = 504
+        cause: Exception | None = exc
+    except httpx.HTTPError as exc:
+        error_code = "worker_transport_error"
+        status_code = 503
+        cause = exc
+    else:
+        if response.is_success:
+            return cast(httpx.Response, response)
+        error_code = "worker_rejected"
+        status_code = 502
+        cause = None
+        await _complete_lease(
             request=request,
             payload=payload,
             lease=lease,
-            completion_status="FAILED",
+            reservation_id=reservation_id,
+            actual_tokens=0,
             prompt_tokens=0,
             completion_tokens=0,
             error_code=error_code,
         )
-        await request.app.state.scheduler.release(lease)
-        raise
-    except httpx.HTTPError as exc:
-        error_code = "worker_transport_error"
-        status_code = 503
-        cause: Exception | None = exc
-    else:
-        if response.is_success:
-            return response
-        await response.aclose()
-        error_code = "worker_rejected"
-        status_code = 502
-        cause = None
-    await request.app.state.database.settle_quota(
+        await _close_worker_response(response)
+        raise RioError(
+            "worker_unavailable",
+            "The selected inference worker could not start the request",
+            status_code=status_code,
+        )
+    await _complete_lease(
+        request=request,
+        payload=payload,
+        lease=lease,
         reservation_id=reservation_id,
         actual_tokens=0,
         prompt_tokens=0,
         completion_tokens=0,
         error_code=error_code,
     )
-    _log_request_completion(
-        request=request,
-        payload=payload,
-        lease=lease,
-        completion_status="FAILED",
-        prompt_tokens=0,
-        completion_tokens=0,
-        error_code=error_code,
-    )
-    await request.app.state.scheduler.release(lease)
     error = RioError(
-        "worker_unavailable",
-        "The selected inference worker could not start the request",
+        "worker_request_timeout"
+        if error_code == "worker_request_timeout"
+        else "worker_unavailable",
+        "The selected inference worker did not respond before the request timeout"
+        if error_code == "worker_request_timeout"
+        else "The selected inference worker could not start the request",
         status_code=status_code,
     )
     if cause is not None:
@@ -513,14 +666,34 @@ async def _stream_backend(
     reservation_id: str,
     prompt_estimate: int,
     response: httpx.Response,
-):
+    finalizer: _StreamLeaseFinalizer | None = None,
+) -> AsyncIterator[bytes]:
     prompt = completion = 0
     observed_completion = 0
     error_code: str | None = None
     pending_text = ""
     saw_done = False
+    finalizer = finalizer or _StreamLeaseFinalizer(
+        request=request,
+        payload=payload,
+        lease=lease,
+        reservation_id=reservation_id,
+        response=response,
+    )
     try:
-        async for chunk in response.aiter_bytes():
+        chunks = response.aiter_bytes()
+        stream_idle_timeout = request.app.state.settings.worker_stream_idle_timeout_seconds
+        while True:
+            try:
+                next_chunk = anext(chunks)
+                chunk = (
+                    await asyncio.wait_for(next_chunk, timeout=stream_idle_timeout)
+                    if stream_idle_timeout is not None
+                    else await next_chunk
+                )
+            except StopAsyncIteration:
+                break
+            await request.app.state.scheduler.touch(lease)
             text = pending_text + chunk.decode("utf-8", errors="ignore")
             lines = text.split("\n")
             pending_text = lines.pop()
@@ -557,6 +730,16 @@ async def _stream_backend(
     except asyncio.CancelledError:
         error_code = "client_disconnected"
         raise
+    except TimeoutError:
+        error_code = "worker_stream_idle_timeout"
+        event = {
+            "error": {
+                "message": "The inference worker stream was idle for too long",
+                "type": "worker_stream_error",
+                "code": error_code,
+            }
+        }
+        yield f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n".encode()
     except httpx.HTTPError:
         error_code = "worker_transport_error"
         event = {
@@ -568,7 +751,6 @@ async def _stream_backend(
         }
         yield f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n".encode()
     finally:
-        await response.aclose()
         actual = (
             prompt + completion if prompt or completion else prompt_estimate + observed_completion
         )
@@ -576,20 +758,9 @@ async def _stream_backend(
             actual = lease.estimated_tokens
         settled_prompt = prompt or prompt_estimate
         settled_completion = completion or observed_completion
-        await request.app.state.database.settle_quota(
-            reservation_id=reservation_id,
+        await finalizer.finish(
             actual_tokens=actual,
             prompt_tokens=settled_prompt,
             completion_tokens=settled_completion,
             error_code=error_code,
         )
-        _log_request_completion(
-            request=request,
-            payload=payload,
-            lease=lease,
-            completion_status="FAILED" if error_code else "COMPLETED",
-            prompt_tokens=settled_prompt,
-            completion_tokens=settled_completion,
-            error_code=error_code,
-        )
-        await request.app.state.scheduler.release(lease)

@@ -63,6 +63,14 @@ validation_idle_window_seconds = 0
 # healthy long generation is never killed solely because of elapsed time.
 # worker_drain_watchdog_seconds = 600
 
+# Maximum total duration for a non-stream request and for receiving initial
+# stream headers. Omitted by default; uncomment to fail an unresponsive worker.
+# worker_request_timeout_seconds = 1800
+
+# Maximum silent interval between worker stream chunks. Omitted by default;
+# uncomment to reclaim an admitted stream that no longer makes progress.
+# worker_stream_idle_timeout_seconds = 600
+
 # Inclusive private TCP port range allocated to inference workers.
 worker_port_start = 18000
 worker_port_end = 18999
@@ -83,7 +91,8 @@ scheduler_tick_seconds = 1
 # Set true only to charge the complete requested maximum.
 quota_charge_requested_maximum = false
 
-# Preserve raw inference-engine stdout/stderr in log_dir.
+# Capture raw inference-engine stdout/stderr while workers run. The log is kept
+# only if a worker fails; cleanly stopped workers discard it.
 capture_worker_engine_logs = true
 
 # Application log verbosity: DEBUG, INFO, WARNING, or ERROR.

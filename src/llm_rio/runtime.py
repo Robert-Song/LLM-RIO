@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from llm_rio.config import Settings
@@ -27,6 +27,8 @@ class WorkerLease:
     internal_api_key: str
     estimated_tokens: int
     admitted_at: datetime
+    is_stream: bool = False
+    last_activity_at: datetime | None = None
 
 
 class ResidencyScheduler:
@@ -99,6 +101,14 @@ class ResidencyScheduler:
             return
         await self.supervisor.release(lease.worker_id, lease.request_id, lease.estimated_tokens)
         self._event.set()
+
+    async def touch(self, lease: WorkerLease) -> None:
+        async with self._state_lock:
+            current = self._request_leases.get(lease.request_id)
+            if current is not None:
+                self._request_leases[lease.request_id] = replace(
+                    current, last_activity_at=datetime.now(UTC)
+                )
 
     async def worker_event(self, worker_id: str, event: str) -> None:
         if event.startswith("failed:"):
@@ -179,6 +189,7 @@ class ResidencyScheduler:
                 logger.exception("scheduler reconciliation failed")
 
     async def _reconcile(self) -> None:
+        await self._expire_inactive_streams()
         await self._release_settled_leases()
         overdue = await self.supervisor.enforce_drain_watchdogs()
         for _, request_ids in overdue:
@@ -216,6 +227,30 @@ class ResidencyScheduler:
                 await self.supervisor.drain(action.worker_id)
             elif isinstance(action, StartPlacement):
                 await self._launch_if_active(action)
+
+    async def _expire_inactive_streams(self) -> None:
+        timeout = self.settings.worker_stream_idle_timeout_seconds
+        if timeout is None:
+            return
+        now = datetime.now(UTC)
+        async with self._state_lock:
+            expired = [
+                lease
+                for lease in self._request_leases.values()
+                if lease.is_stream
+                and lease.last_activity_at is not None
+                and (now - lease.last_activity_at).total_seconds() >= timeout
+            ]
+        for lease in expired:
+            await self.database.release_reservation(
+                lease.reservation_id, "worker_stream_idle_timeout"
+            )
+            await self.release(lease)
+            await self.database.record_event(
+                "WORKER_STREAM_IDLE_TIMEOUT",
+                lease.worker_id,
+                {"request_id": lease.request_id, "timeout_seconds": timeout},
+            )
 
     async def _release_settled_leases(self) -> None:
         admitted_request_ids = await self.database.admitted_request_ids()
@@ -268,13 +303,26 @@ class ResidencyScheduler:
                     request = queue.pop()
                     if request is None:
                         break
+                    admitted = False
                     try:
                         await self.supervisor.admit(worker.id, request.id, request.estimated_tokens)
-                        await self.database.mark_request_admitted(request.id, worker.id)
+                        admitted = True
+                        if not await self.database.mark_request_admitted(request.id, worker.id):
+                            raise RuntimeError("request is no longer queued")
                     except Exception as exc:
+                        if admitted:
+                            with contextlib.suppress(Exception):
+                                await self.supervisor.release(
+                                    worker.id, request.id, request.estimated_tokens
+                                )
+                        with contextlib.suppress(Exception):
+                            await self.database.release_reservation(
+                                request.reservation_id, "admission_failed"
+                            )
                         if request.assignment and not request.assignment.done():
                             request.assignment.set_exception(exc)
                         continue
+                    admitted_at = datetime.now(UTC)
                     lease = WorkerLease(
                         worker_id=worker.id,
                         request_id=request.id,
@@ -282,11 +330,18 @@ class ResidencyScheduler:
                         base_url=f"http://127.0.0.1:{worker.port}",
                         internal_api_key=self.supervisor.internal_api_key,
                         estimated_tokens=request.estimated_tokens,
-                        admitted_at=datetime.now(UTC),
+                        admitted_at=admitted_at,
+                        is_stream=request.is_stream,
+                        last_activity_at=admitted_at if request.is_stream else None,
                     )
                     self._request_leases[request.id] = lease
                     if request.assignment and not request.assignment.done():
                         request.assignment.set_result(lease)
+                    else:
+                        await self.database.release_reservation(
+                            request.reservation_id, "client_cancelled"
+                        )
+                        await self.release(lease)
 
     def _pressures(self) -> list[QueuePressure]:
         pressures: list[QueuePressure] = []
