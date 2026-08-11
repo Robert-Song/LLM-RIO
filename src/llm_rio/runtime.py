@@ -73,11 +73,20 @@ class ResidencyScheduler:
     async def close(self) -> None:
         self._closed = True
         self._event.set()
-        if self._task:
-            await self._task
-        for lease in list(self._request_leases.values()):
-            await self.database.release_reservation(lease.reservation_id, "service_shutdown")
-        await self.supervisor.stop_all(force=True)
+        try:
+            if self._task:
+                self._task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._task
+        finally:
+            try:
+                for lease in list(self._request_leases.values()):
+                    await self.database.release_reservation(
+                        lease.reservation_id, "service_shutdown"
+                    )
+            finally:
+                # Worker teardown cannot depend on scheduler or quota cleanup completing.
+                await self.supervisor.stop_all(force=True)
 
     async def enqueue(self, request: QueuedRequest) -> WorkerLease:
         request.assignment = asyncio.get_running_loop().create_future()

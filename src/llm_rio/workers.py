@@ -27,6 +27,30 @@ logger = logging.getLogger(__name__)
 WorkerEventCallback = Callable[[str, str], Awaitable[None]]
 
 
+async def _terminate_worker_process_tree(
+    process: asyncio.subprocess.Process, *, force: bool
+) -> None:
+    """Request termination of a worker and every engine process it owns."""
+    if process.returncode is not None:
+        return
+
+    if os.name == "posix":
+        try:
+            killpg = getattr(os, "killpg", None)
+            getpgid = getattr(os, "getpgid", None)
+            if killpg is not None and getpgid is not None:
+                termination_signal = (
+                    getattr(signal, "SIGKILL", signal.SIGTERM) if force else signal.SIGTERM
+                )
+                killpg(getpgid(process.pid), termination_signal)
+                return
+        except (AttributeError, ProcessLookupError, OSError):
+            # Preserve the direct-child fallback for platforms or launchers without a group.
+            pass
+    with contextlib.suppress(ProcessLookupError, OSError):
+        process.kill() if force else process.terminate()
+
+
 class WorkerLaunchError(RuntimeError):
     pass
 
@@ -113,6 +137,8 @@ class WorkerSupervisor:
                     stdout=worker_output,
                     stderr=asyncio.subprocess.STDOUT,
                     env=environment,
+                    # Make the engine its own group so a forced shutdown cannot signal
+                    # the API server, while killpg still reaches all engine descendants.
                     start_new_session=True,
                 )
             except BaseException:
@@ -132,8 +158,8 @@ class WorkerSupervisor:
                     },
                 )
             except BaseException:
-                with contextlib.suppress(ProcessLookupError, OSError):
-                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                with contextlib.suppress(Exception):
+                    await _terminate_worker_process_tree(process, force=True)
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(process.wait(), timeout=10)
                 await self._cleanup(worker_id)
@@ -278,7 +304,7 @@ class WorkerSupervisor:
             worker.state = RuntimeState.COLD
             process = self._processes.get(worker.id)
         if process and process.returncode is None:
-            process.kill()
+            await _terminate_worker_process_tree(process, force=True)
             await process.wait()
         await self._persist(worker)
         log_path = self._log_paths.get(worker.id)
@@ -360,34 +386,33 @@ class WorkerSupervisor:
                 return
             worker.state = RuntimeState.STOPPING
             process = self._processes.get(worker_id)
-        await self._persist(worker)
-        if process and process.returncode is None:
-            try:
-                os.killpg(
-                    os.getpgid(process.pid),
-                    signal.SIGKILL if force else signal.SIGTERM,
-                )
-            except (ProcessLookupError, OSError):
-                with contextlib.suppress(ProcessLookupError):
-                    process.kill() if force else process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5.0 if force else 30.0)
-            except TimeoutError:
+        try:
+            await self._persist(worker)
+        except Exception:
+            # A shutdown must never leave a running engine behind because a best-effort
+            # STOPPING record could not be written.  The final COLD persistence follows
+            # after the process is gone.
+            logger.exception("could not persist worker %s before stopping it", worker_id)
+        try:
+            if process and process.returncode is None:
+                await _terminate_worker_process_tree(process, force=force)
                 try:
-                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                except (ProcessLookupError, OSError):
-                    with contextlib.suppress(ProcessLookupError):
-                        process.kill()
-                await process.wait()
-        async with self._lock:
-            worker.state = RuntimeState.COLD
-            worker.process_pid = None
-            worker.admitted_request_ids.clear()
-            worker.outstanding_token_work = 0
-        await self._persist(worker)
-        await self.database.record_event("WORKER_COLD", worker_id, {"forced": force})
-        await self._cleanup(worker_id)
-        await self._emit(worker_id, "cold")
+                    await asyncio.wait_for(process.wait(), timeout=5.0 if force else 30.0)
+                except TimeoutError:
+                    await _terminate_worker_process_tree(process, force=True)
+                    await process.wait()
+        finally:
+            async with self._lock:
+                worker.state = RuntimeState.COLD
+                worker.process_pid = None
+                worker.admitted_request_ids.clear()
+                worker.outstanding_token_work = 0
+            try:
+                await self._persist(worker)
+                await self.database.record_event("WORKER_COLD", worker_id, {"forced": force})
+                await self._emit(worker_id, "cold")
+            finally:
+                await self._cleanup(worker_id)
 
     async def stop_all(self, *, force: bool = False) -> None:
         worker_ids = list(self.workers)
@@ -396,7 +421,10 @@ class WorkerSupervisor:
                 await self.drain(worker_id)
         tasks = [self.stop(worker_id, force=force) for worker_id in worker_ids]
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for worker_id, result in zip(worker_ids, results, strict=True):
+                if isinstance(result, BaseException):
+                    logger.error("could not stop worker %s during shutdown: %r", worker_id, result)
 
     async def _cleanup(self, worker_id: str, *, retain_log: bool = False) -> None:
         self._processes.pop(worker_id, None)

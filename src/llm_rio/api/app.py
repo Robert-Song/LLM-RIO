@@ -122,10 +122,19 @@ def create_app(
         try:
             yield
         finally:
-            await registration.close()
-            await scheduler.close()
-            await worker_client.aclose()
-            await database.close()
+            # Stop production engines first, and make every later cleanup independent of
+            # errors in an earlier one.  In particular, a cancelled registration job must
+            # never keep the scheduler from unloading a live worker.
+            try:
+                await scheduler.close()
+            finally:
+                try:
+                    await registration.close()
+                finally:
+                    try:
+                        await worker_client.aclose()
+                    finally:
+                        await database.close()
 
     app = FastAPI(
         title="LLM-RIO",
