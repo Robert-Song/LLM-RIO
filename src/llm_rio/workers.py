@@ -20,7 +20,7 @@ from llm_rio.config import Settings
 from llm_rio.domain import Engine, PlacementProfile, RuntimeState, WorkerPlacement
 from llm_rio.inventory import gpu_environment
 from llm_rio.storage import Database, _now
-from llm_rio.tool_support import detect_vllm_tool_parser
+from llm_rio.tool_support import detect_vllm_parser_configuration
 
 logger = logging.getLogger(__name__)
 
@@ -212,9 +212,13 @@ class WorkerSupervisor:
                 command.extend(["--max-num-batched-tokens", str(profile.max_num_batched_tokens)])
             if profile.quantization:
                 command.extend(["--quantization", profile.quantization])
-            tool_parser = detect_vllm_tool_parser(model_path)
-            if tool_parser is not None:
-                command.extend(["--enable-auto-tool-choice", "--tool-call-parser", tool_parser])
+            parsers = detect_vllm_parser_configuration(model_path)
+            if parsers.tool_parser is not None:
+                command.extend(
+                    ["--enable-auto-tool-choice", "--tool-call-parser", parsers.tool_parser]
+                )
+            if parsers.reasoning_parser is not None:
+                command.extend(["--reasoning-parser", parsers.reasoning_parser])
         elif profile.engine is Engine.LLAMA_CPP and self.settings.engines.enable_llama_cpp:
             command = [
                 self.settings.engines.llama_cpp_executable,

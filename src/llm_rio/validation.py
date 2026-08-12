@@ -20,7 +20,7 @@ from llm_rio.config import Settings
 from llm_rio.domain import Engine, MachineInventory, PlacementProfile
 from llm_rio.inventory import candidate_gpu_sets, gpu_environment
 from llm_rio.runtime import ResidencyScheduler
-from llm_rio.tool_support import detect_vllm_tool_parser
+from llm_rio.tool_support import detect_vllm_parser_configuration
 
 
 class ValidationError(RuntimeError):
@@ -214,9 +214,13 @@ class ProfileValidator:
             command.extend(["--max-num-batched-tokens", str(candidate.max_num_batched_tokens)])
         if candidate.quantization:
             command.extend(["--quantization", candidate.quantization])
-        tool_parser = detect_vllm_tool_parser(model_path)
-        if tool_parser is not None:
-            command.extend(["--enable-auto-tool-choice", "--tool-call-parser", tool_parser])
+        parsers = detect_vllm_parser_configuration(model_path)
+        if parsers.tool_parser is not None:
+            command.extend(
+                ["--enable-auto-tool-choice", "--tool-call-parser", parsers.tool_parser]
+            )
+        if parsers.reasoning_parser is not None:
+            command.extend(["--reasoning-parser", parsers.reasoning_parser])
         gpu_indices = tuple(
             device.index for device in self.inventory.gpus if device.uuid in gpu_set
         )
@@ -289,7 +293,9 @@ class ProfileValidator:
             peak_vram_mib_per_gpu=peak_memory,
             gpu_headroom_mib_per_gpu=tuple(self.settings.reserved_vram_mib for _ in gpu_set),
             capabilities=frozenset(
-                {"chat", "streaming", "tools"} if tool_parser is not None else {"chat", "streaming"}
+                {"chat", "streaming", "tools"}
+                if parsers.tool_parser is not None
+                else {"chat", "streaming"}
             ),
             launch_args={},
             gpu_memory_utilization=candidate.gpu_memory_utilization,
