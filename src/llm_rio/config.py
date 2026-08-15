@@ -15,6 +15,8 @@ from pydantic_settings import (
 class EngineSettings(BaseModel):
     vllm_executable: str = "vllm"
     llama_cpp_executable: str = "llama-server"
+    # Allows an administrator to select llama.cpp for an existing profile.
+    # It never enables automatic vLLM-to-llama.cpp fallback.
     enable_llama_cpp: bool = False
     environment: dict[str, str] = Field(default_factory=dict)
     gpu_memory_utilization: float | None = Field(default=None, gt=0, le=1)

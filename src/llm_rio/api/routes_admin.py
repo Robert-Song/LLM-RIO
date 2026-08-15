@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
 import uuid
+from dataclasses import replace
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 
@@ -9,10 +12,13 @@ from llm_rio.api.schemas import (
     CreateKeyRequest,
     KeySecretResponse,
     MaintenanceRequest,
+    ProfileEditRequest,
     QuotaUpdate,
 )
-from llm_rio.domain import RuntimeState, ServiceMode
+from llm_rio.domain import Engine, PlacementProfile, RuntimeState, ServiceMode
 from llm_rio.errors import RioError
+from llm_rio.inventory import candidate_gpu_sets
+from llm_rio.profiles import StoredProfile, profile_to_dict
 from llm_rio.security import issue_api_key, token_prefix
 
 router = APIRouter()
@@ -125,6 +131,268 @@ async def reset_usage(key_id: str, request: Request, _: AdminPrincipal) -> dict[
     if result is None:
         raise HTTPException(status_code=404, detail="Key not found")
     return result
+
+
+def _profile_payload(record: StoredProfile) -> dict[str, object]:
+    payload: dict[str, object] = profile_to_dict(record.profile)
+    payload["active"] = record.active
+    return payload
+
+
+def _gguf_files(model: dict[str, object]) -> list[str]:
+    artifact_path = model.get("artifact_path")
+    if not artifact_path:
+        return []
+    root = Path(str(artifact_path))
+    if not root.is_dir():
+        return []
+    return sorted(
+        str(path.relative_to(root))
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix.lower() == ".gguf"
+    )
+
+
+def _resolve_gguf_file(model: dict[str, object], relative_path: str) -> Path:
+    artifact_path = model.get("artifact_path")
+    if not artifact_path:
+        raise RioError(
+            "model_artifact_missing",
+            "The model artifact is not available on this machine",
+            status_code=409,
+        )
+    root = Path(str(artifact_path)).resolve()
+    candidate = (root / relative_path).resolve()
+    if candidate.suffix.lower() != ".gguf" or not candidate.is_relative_to(root):
+        raise RioError(
+            "invalid_gguf_file",
+            "GGUF files must be paths inside this model's downloaded artifact",
+            status_code=422,
+        )
+    if not candidate.is_file():
+        raise RioError(
+            "gguf_file_not_found",
+            f"GGUF file '{relative_path}' was not found in this model artifact",
+            status_code=404,
+            details={"available_gguf_files": _gguf_files(model)},
+        )
+    return candidate
+
+
+def _resize_per_gpu_measurement(values: tuple[int, ...], gpu_count: int) -> tuple[int, ...]:
+    """Keep stored per-GPU diagnostics structurally valid after an admin TP override."""
+    if not values:
+        return (0,) * gpu_count
+    return tuple(values[min(index, len(values) - 1)] for index in range(gpu_count))
+
+
+def _apply_profile_edit(
+    *,
+    profile: PlacementProfile,
+    model: dict[str, object],
+    request: ProfileEditRequest,
+    managed_gpu_count: int,
+    eligible_gpu_sets: tuple[tuple[str, ...], ...],
+    llama_cpp_enabled: bool,
+) -> PlacementProfile:
+    fields = request.model_fields_set
+    updated = profile
+    if "tensor_parallel_size" in fields:
+        target_gpu_count = request.tensor_parallel_size
+        if (
+            target_gpu_count is None
+            or target_gpu_count > managed_gpu_count
+            or not eligible_gpu_sets
+        ):
+            raise RioError(
+                "invalid_tensor_parallel_size",
+                f"Tensor parallelism must be between 1 and {managed_gpu_count} on this machine",
+                status_code=422,
+            )
+        updated = replace(
+            updated,
+            gpu_count=target_gpu_count,
+            tensor_parallel_size=target_gpu_count,
+            eligible_gpu_sets=eligible_gpu_sets,
+            idle_vram_mib_per_gpu=_resize_per_gpu_measurement(
+                updated.idle_vram_mib_per_gpu, target_gpu_count
+            ),
+            peak_vram_mib_per_gpu=_resize_per_gpu_measurement(
+                updated.peak_vram_mib_per_gpu, target_gpu_count
+            ),
+            gpu_headroom_mib_per_gpu=_resize_per_gpu_measurement(
+                updated.gpu_headroom_mib_per_gpu, target_gpu_count
+            ),
+        )
+    if "max_model_len" in fields:
+        if request.max_model_len is None:
+            raise RioError("invalid_max_model_len", "max_model_len cannot be null", status_code=422)
+        updated = replace(updated, max_model_len=request.max_model_len)
+    if "max_num_seqs" in fields:
+        updated = replace(updated, max_num_seqs=request.max_num_seqs)
+    if "max_num_batched_tokens" in fields:
+        updated = replace(updated, max_num_batched_tokens=request.max_num_batched_tokens)
+    if "gpu_memory_utilization" in fields:
+        if request.gpu_memory_utilization is None:
+            raise RioError(
+                "invalid_gpu_memory_utilization",
+                "gpu_memory_utilization cannot be null",
+                status_code=422,
+            )
+        updated = replace(
+            updated, gpu_memory_utilization=request.gpu_memory_utilization
+        )
+    if "engine" in fields:
+        updated = replace(updated, engine=request.engine or updated.engine)
+
+    launch_args = dict(updated.launch_args)
+    if "gguf_file" in fields:
+        if updated.engine is not Engine.LLAMA_CPP:
+            raise RioError(
+                "gguf_requires_llama_cpp",
+                "Select llama.cpp before choosing a GGUF model file",
+                status_code=422,
+            )
+        if request.gguf_file is None:
+            raise RioError("invalid_gguf_file", "gguf_file cannot be null", status_code=422)
+        launch_args["model"] = str(_resolve_gguf_file(model, request.gguf_file))
+    if updated.engine is Engine.LLAMA_CPP:
+        if not llama_cpp_enabled:
+            raise RioError(
+                "llama_cpp_disabled",
+                "Set engines.enable_llama_cpp = true before selecting llama.cpp manually",
+                status_code=409,
+            )
+        if "model" not in launch_args:
+            raise RioError(
+                "gguf_file_required",
+                "Choose a GGUF file when switching this profile to llama.cpp",
+                status_code=422,
+                details={"available_gguf_files": _gguf_files(model)},
+            )
+        if "n_gpu_layers" in fields:
+            if request.n_gpu_layers is None:
+                raise RioError(
+                    "invalid_n_gpu_layers", "n_gpu_layers cannot be null", status_code=422
+                )
+            launch_args["n_gpu_layers"] = request.n_gpu_layers
+        else:
+            launch_args.setdefault("n_gpu_layers", 99)
+        updated = replace(
+            updated,
+            dtype="gguf",
+            quantization=updated.quantization or "gguf",
+            launch_args=launch_args,
+        )
+    else:
+        if "gguf_file" in fields or "n_gpu_layers" in fields:
+            raise RioError(
+                "llama_cpp_option_requires_llama_cpp",
+                "GGUF and n_gpu_layers are llama.cpp-only settings",
+                status_code=422,
+            )
+        for key in ("model", "n_gpu_layers", "tensor_split", "split_mode"):
+            launch_args.pop(key, None)
+        updated = replace(
+            updated,
+            dtype="auto",
+            quantization=None,
+            launch_args=launch_args,
+        )
+    return updated
+
+
+@router.get("/admin/models/{model_id}/profiles")
+async def list_model_profiles(
+    model_id: str, request: Request, _: AdminPrincipal
+) -> dict[str, object]:
+    model = await request.app.state.database.model_by_id(model_id)
+    if model is None:
+        raise HTTPException(status_code=404, detail="Model not found")
+    records = await request.app.state.profiles.records_for_model(model_id)
+    return {
+        "data": [_profile_payload(record) for record in records],
+        "available_gguf_files": _gguf_files(model),
+    }
+
+
+@router.patch("/admin/models/{model_id}/profiles/{profile_id}")
+async def update_model_profile(
+    model_id: str,
+    profile_id: str,
+    body: ProfileEditRequest,
+    request: Request,
+    _: AdminPrincipal,
+) -> dict[str, object]:
+    editable_fields = body.model_fields_set - {"make_default", "restart_workers"}
+    if not editable_fields:
+        raise RioError(
+            "profile_update_empty",
+            "Provide at least one profile setting to change",
+            status_code=422,
+        )
+    database = request.app.state.database
+    model = await database.model_by_id(model_id)
+    if model is None:
+        raise HTTPException(status_code=404, detail="Model not found")
+    records = await request.app.state.profiles.records_for_model(model_id)
+    selected = next((record for record in records if record.profile.id == profile_id), None)
+    if selected is None:
+        raise HTTPException(status_code=404, detail="Placement profile not found")
+    target_tp = selected.profile.tensor_parallel_size
+    if "tensor_parallel_size" in body.model_fields_set:
+        if body.tensor_parallel_size is None:
+            raise RioError(
+                "invalid_tensor_parallel_size",
+                "tensor_parallel_size cannot be null",
+                status_code=422,
+            )
+        target_tp = body.tensor_parallel_size
+    gpu_sets = candidate_gpu_sets(request.app.state.inventory, target_tp)
+    updated = _apply_profile_edit(
+        profile=selected.profile,
+        model=model,
+        request=body,
+        managed_gpu_count=len(request.app.state.inventory.gpus),
+        eligible_gpu_sets=gpu_sets,
+        llama_cpp_enabled=request.app.state.settings.engines.enable_llama_cpp,
+    )
+    try:
+        saved = await request.app.state.profiles.update(
+            updated, make_default=body.make_default
+        )
+    except sqlite3.IntegrityError as exc:
+        raise RioError(
+            "duplicate_profile",
+            "Another placement profile already has these identifying settings",
+            status_code=409,
+        ) from exc
+    if not saved:
+        raise HTTPException(status_code=404, detail="Placement profile not found")
+    await database.record_event(
+        "MODEL_PROFILE_OVERRIDDEN",
+        updated.id,
+        {
+            "model_id": model_id,
+            "engine": updated.engine.value,
+            "tensor_parallel_size": updated.tensor_parallel_size,
+            "max_model_len": updated.max_model_len,
+            "make_default": body.make_default,
+        },
+    )
+    drained_worker_ids: list[str] = []
+    if body.restart_workers:
+        for worker in list(request.app.state.supervisor.workers.values()):
+            if worker.model_id == model_id:
+                drained_worker_ids.append(worker.id)
+                await request.app.state.supervisor.drain(worker.id)
+    return {
+        "profile": _profile_payload(
+            StoredProfile(profile=updated, active=body.make_default or selected.active)
+        ),
+        "drained_worker_ids": drained_worker_ids,
+        "restart_required": not body.restart_workers,
+    }
 
 
 async def _scheduler_status(request: Request) -> dict[str, object]:

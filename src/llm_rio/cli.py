@@ -150,6 +150,57 @@ def _model_record(nickname: str) -> dict[str, Any]:
     return matches[0]
 
 
+def _model_profiles(nickname: str) -> dict[str, Any]:
+    model = _model_record(nickname)
+    payload = _request("GET", f"/admin/models/{model['id']}/profiles")
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        raise click.ClickException("The server returned an invalid placement-profile list.")
+    return payload
+
+
+def _profile_record(nickname: str, selector: str) -> dict[str, Any]:
+    records = _model_profiles(nickname).get("data")
+    if not isinstance(records, list):
+        raise click.ClickException("The server returned an invalid placement-profile list.")
+    profiles = [record for record in records if isinstance(record, dict)]
+    if selector.isdecimal():
+        position = int(selector) - 1
+        if 0 <= position < len(profiles):
+            return profiles[position]
+    matches = [record for record in profiles if selector == record.get("id")]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise click.ClickException(
+            "Placement profile was not found. Use its full ID or its number from `models profiles`."
+        )
+    raise click.ClickException("Placement profile selector is ambiguous.")
+
+
+def _print_profile_records(records: list[dict[str, Any]]) -> None:
+    if not records:
+        typer.echo("No placement profiles are recorded for this model on this machine.")
+        return
+    typer.echo("Placement profiles\n")
+    for index, profile in enumerate(records, 1):
+        active = "active/default" if profile.get("active") else "inactive"
+        typer.echo(f"{index}. {profile.get('id')} ({active})")
+        typer.echo(
+            f"   Engine: {profile.get('engine')} | GPUs / TP: "
+            f"{profile.get('gpu_count')} / {profile.get('tensor_parallel_size')}"
+        )
+        typer.echo(
+            f"   Context: {int(profile.get('max_model_len') or 0):,} | "
+            f"Max sequences: {profile.get('max_num_seqs') or 'engine default'} | "
+            f"Max batched tokens: {profile.get('max_num_batched_tokens') or 'engine default'}"
+        )
+        typer.echo(f"   GPU memory utilization: {profile.get('gpu_memory_utilization')}")
+        launch_args = profile.get("launch_args")
+        if isinstance(launch_args, dict) and launch_args:
+            typer.echo(f"   Launch overrides: {json.dumps(launch_args, sort_keys=True)}")
+        typer.echo()
+
+
 def _job_id_for_model(nickname: str) -> str:
     model = _model_record(nickname)
     job = model.get("registration_job")
@@ -499,6 +550,83 @@ def add_model(
     typer.echo(f"Check progress: ./llmctl models review {nickname}")
 
 
+@models_app.command("profiles")
+def list_model_profiles(
+    nickname: str,
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """List active and inactive placement profiles for one model (admin only)."""
+    payload = _model_profiles(nickname)
+    if json_output:
+        _print(payload)
+        return
+    records = [record for record in payload["data"] if isinstance(record, dict)]
+    _print_profile_records(records)
+    gguf_files = payload.get("available_gguf_files")
+    if isinstance(gguf_files, list) and gguf_files:
+        typer.echo("Available GGUF files:")
+        for filename in gguf_files:
+            typer.echo(f"  {filename}")
+
+
+@models_app.command("profile-edit")
+def edit_model_profile(
+    nickname: str,
+    profile: str,
+    engine: str | None = typer.Option(None, "--engine", help="vllm or llama.cpp"),
+    tensor_parallel_size: int | None = typer.Option(None, "--tp"),
+    max_model_len: int | None = typer.Option(None, "--max-model-len"),
+    max_num_seqs: int | None = typer.Option(None, "--max-num-seqs"),
+    max_num_batched_tokens: int | None = typer.Option(None, "--max-num-batched-tokens"),
+    gpu_memory_utilization: float | None = typer.Option(None, "--gpu-memory-utilization"),
+    gguf_file: str | None = typer.Option(None, "--gguf-file"),
+    n_gpu_layers: int | None = typer.Option(None, "--n-gpu-layers"),
+    make_default: bool = typer.Option(False, "--make-default"),
+    restart_workers: bool = typer.Option(False, "--restart-workers"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Override one stored placement profile (admin only)."""
+    model = _model_record(nickname)
+    payload: dict[str, Any] = {
+        key: value
+        for key, value in {
+            "engine": engine,
+            "tensor_parallel_size": tensor_parallel_size,
+            "max_model_len": max_model_len,
+            "max_num_seqs": max_num_seqs,
+            "max_num_batched_tokens": max_num_batched_tokens,
+            "gpu_memory_utilization": gpu_memory_utilization,
+            "gguf_file": gguf_file,
+            "n_gpu_layers": n_gpu_layers,
+        }.items()
+        if value is not None
+    }
+    if make_default:
+        payload["make_default"] = True
+    if restart_workers:
+        payload["restart_workers"] = True
+    if not payload or set(payload) <= {"make_default", "restart_workers"}:
+        raise click.ClickException("Specify at least one profile setting to change.")
+    result = _request(
+        "PATCH",
+        f"/admin/models/{model['id']}/profiles/{profile}",
+        json_body=payload,
+    )
+    if json_output:
+        _print(result)
+        return
+    updated = result.get("profile") if isinstance(result, dict) else None
+    if isinstance(updated, dict):
+        _print_profile_records([updated])
+    if isinstance(result, dict) and result.get("drained_worker_ids"):
+        typer.echo("Draining workers: " + ", ".join(result["drained_worker_ids"]))
+    elif isinstance(result, dict) and result.get("restart_required"):
+        typer.echo(
+            "The profile will be used on the next worker launch; existing workers "
+            "were not changed."
+        )
+
+
 @models_app.command("list")
 def list_models(json_output: bool = typer.Option(False, "--json")) -> None:
     """List models with registration jobs and next steps for failed registrations."""
@@ -636,6 +764,38 @@ def _prompt_int(prompt_text: str, default: int | None = None) -> int:
             typer.echo("Error: Invalid integer. Please try again.")
 
 
+def _prompt_float(prompt_text: str, default: float) -> float:
+    while True:
+        raw = _prompt_str(prompt_text, default=str(default), required=False)
+        try:
+            value = float(raw)
+        except ValueError:
+            typer.echo("Error: Invalid number. Please try again.")
+            continue
+        if value <= 0 or value > 1:
+            typer.echo("Error: Value must be greater than 0 and no more than 1.")
+            continue
+        return value
+
+
+def _prompt_profile_limit(label: str, current: object) -> int | None:
+    default = "" if current is None else str(current)
+    raw = _prompt_str(
+        f"{label} (blank retains engine default)", default=default, required=False
+    )
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        typer.echo("Error: Invalid integer; keeping the current value.")
+        return None
+    if value <= 0:
+        typer.echo("Error: Value must be positive; keeping the current value.")
+        return None
+    return value
+
+
 def _interactive_keys_menu() -> None:
     while True:
         typer.echo("\n" + "=" * 50)
@@ -730,6 +890,97 @@ def _interactive_keys_menu() -> None:
             typer.echo(f"Error executing command: {exc}")
 
 
+def _interactive_edit_model_profile() -> None:
+    nickname = _prompt_str("Enter model nickname")
+    if not nickname:
+        return
+    payload = _model_profiles(nickname)
+    records = [record for record in payload["data"] if isinstance(record, dict)]
+    _print_profile_records(records)
+    if not records:
+        return
+    selector = _prompt_str("Choose profile number or full profile ID")
+    if not selector:
+        return
+    profile = _profile_record(nickname, selector)
+    current_engine = str(profile.get("engine") or "vllm")
+    engine = _prompt_str("Engine (vllm or llama.cpp)", default=current_engine)
+    if engine not in {"vllm", "llama.cpp"}:
+        typer.echo("Error: Engine must be vllm or llama.cpp.")
+        return
+    tp = _prompt_int(
+        "Tensor-parallel GPU count",
+        default=int(profile.get("tensor_parallel_size") or 1),
+    )
+    max_model_len = _prompt_int(
+        "Maximum context tokens",
+        default=int(profile.get("max_model_len") or 4096),
+    )
+    max_num_seqs = _prompt_profile_limit(
+        "Maximum concurrent sequences", profile.get("max_num_seqs")
+    )
+    max_num_batched_tokens = _prompt_profile_limit(
+        "Maximum batched tokens", profile.get("max_num_batched_tokens")
+    )
+    gpu_memory_utilization = _prompt_float(
+        "GPU memory utilization", float(profile.get("gpu_memory_utilization") or 0.9)
+    )
+    request: dict[str, Any] = {
+        "engine": engine,
+        "tensor_parallel_size": tp,
+        "max_model_len": max_model_len,
+        "gpu_memory_utilization": gpu_memory_utilization,
+    }
+    if max_num_seqs is not None:
+        request["max_num_seqs"] = max_num_seqs
+    if max_num_batched_tokens is not None:
+        request["max_num_batched_tokens"] = max_num_batched_tokens
+    if engine == "llama.cpp":
+        gguf_files = payload.get("available_gguf_files")
+        if isinstance(gguf_files, list) and gguf_files:
+            typer.echo("Available GGUF files:")
+            for filename in gguf_files:
+                typer.echo(f"  {filename}")
+        current_launch = profile.get("launch_args")
+        has_existing_gguf = isinstance(current_launch, dict) and bool(current_launch.get("model"))
+        gguf_file = _prompt_str(
+            "GGUF file relative to the model artifact (blank keeps the current GGUF file)",
+            required=False,
+        )
+        if gguf_file:
+            request["gguf_file"] = gguf_file
+        elif not has_existing_gguf:
+            typer.echo("Error: A GGUF file is required when switching a vLLM profile to llama.cpp.")
+            return
+        default_layers = (
+            int(current_launch.get("n_gpu_layers") or 99)
+            if isinstance(current_launch, dict)
+            else 99
+        )
+        request["n_gpu_layers"] = _prompt_int("GPU layers to offload", default=default_layers)
+    request["make_default"] = _prompt_bool(
+        "Make this the model's only active/default placement profile?", default=False
+    )
+    request["restart_workers"] = _prompt_bool(
+        "Drain this model's current workers so the new profile is used immediately?", default=True
+    )
+    typer.echo("\nThis overrides measured profile settings; no capacity validation will be rerun.")
+    if not _prompt_bool("Apply this profile override?", default=False):
+        return
+    model = _model_record(nickname)
+    result = _request(
+        "PATCH",
+        f"/admin/models/{model['id']}/profiles/{profile['id']}",
+        json_body=request,
+    )
+    updated = result.get("profile") if isinstance(result, dict) else None
+    if isinstance(updated, dict):
+        typer.echo("Profile updated.")
+        _print_profile_records([updated])
+    if isinstance(result, dict) and result.get("drained_worker_ids"):
+        typer.echo("Draining workers: " + ", ".join(result["drained_worker_ids"]))
+
+
 def _interactive_models_menu() -> None:
     while True:
         typer.echo("\n" + "=" * 50)
@@ -743,6 +994,8 @@ def _interactive_models_menu() -> None:
         typer.echo("6. Show model access for key")
         typer.echo("7. Grant model access to key")
         typer.echo("8. Revoke model access from key")
+        typer.echo("9. List placement profiles (admin)")
+        typer.echo("10. Edit placement profile (admin)")
         typer.echo("0. Back to Main Menu")
         typer.echo("=" * 50)
 
@@ -805,6 +1058,15 @@ def _interactive_models_menu() -> None:
                 models_list = [m.strip() for m in models_raw.split(",") if m.strip()]
                 if models_list:
                     revoke_models(key=key, model=models_list)
+            elif choice == "9":
+                nickname = _prompt_str("Enter model nickname")
+                if nickname:
+                    profiles = _model_profiles(nickname)
+                    _print_profile_records(
+                        [record for record in profiles["data"] if isinstance(record, dict)]
+                    )
+            elif choice == "10":
+                _interactive_edit_model_profile()
             elif choice == "0":
                 break
             else:

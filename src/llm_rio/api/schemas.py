@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, Field, field_validator
 
-from llm_rio.domain import Role
+from llm_rio.domain import Engine, Role
 
 
 class CreateKeyRequest(BaseModel):
@@ -68,6 +68,21 @@ class RegisterModelRequest(BaseModel):
 
 class MaintenanceRequest(BaseModel):
     mode: Literal["drain", "active"]
+
+
+class ProfileEditRequest(BaseModel):
+    """Administrator override for a validated placement profile."""
+
+    engine: Engine | None = None
+    tensor_parallel_size: int | None = Field(default=None, gt=0)
+    max_model_len: int | None = Field(default=None, gt=0)
+    max_num_seqs: int | None = Field(default=None, gt=0)
+    max_num_batched_tokens: int | None = Field(default=None, gt=0)
+    gpu_memory_utilization: float | None = Field(default=None, gt=0, le=1)
+    gguf_file: str | None = Field(default=None, min_length=1)
+    n_gpu_layers: int | None = Field(default=None, ge=0)
+    make_default: bool = False
+    restart_workers: bool = False
 
 
 class ChatCompletionRequest(BaseModel):

@@ -109,8 +109,8 @@ vllm_executable = "vllm"
 # llama.cpp server executable name or absolute path.
 llama_cpp_executable = "llama-server"
 
-# Permit validated GGUF fallback through llama.cpp. Set false to restrict the
-# deployment to vLLM even when a model includes GGUF weights.
+# Permit an administrator to manually select llama.cpp/GGUF for a placement
+# profile. This never creates an automatic vLLM-to-llama.cpp fallback.
 enable_llama_cpp = false
 
 # Per-worker GPU allocation fraction. Omitted by default so LLM-RIO derives it

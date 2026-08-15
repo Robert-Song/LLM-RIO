@@ -51,10 +51,10 @@ active admin credential from the protected host database, so they do not require
   `POST /staff/model-jobs/{job_id}/retry`. `GET /staff/models` includes each
   model's registration job so failed registrations can be reviewed by model nickname.
 - `POST /staff/model-access` using API-key selectors and model nicknames
-- admin key, quota, and atomic maintenance routes
+- admin key, quota, atomic maintenance routes, and admin-only placement-profile overrides
 
 The admin CLI uses the authenticated management routes but automatically recovers a local admin
-credential from the protected database/vault. Key and model access commands accept human-readable
+credential from the protected database/vault. Use `./llmctl models profiles MODEL` to inspect placement profiles and `./llmctl models profile-edit MODEL PROFILE_ID` to override a stored profile. An override is not revalidated; use `--make-default` to make it the only active profile and `--restart-workers` to drain current workers. Key and model access commands accept human-readable
 nicknames (or a complete API key for key selection), so internal database IDs are not required.
 
 ### Image inputs

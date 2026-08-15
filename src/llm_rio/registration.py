@@ -12,7 +12,6 @@ from huggingface_hub import HfApi, snapshot_download
 
 from llm_rio.config import Settings
 from llm_rio.domain import CatalogState, MachineInventory
-from llm_rio.llama_validation import validate_llama_cpp
 from llm_rio.profiles import ProfileRepository, profile_key, profile_to_dict
 from llm_rio.storage import Database, _now
 from llm_rio.validation import (
@@ -343,37 +342,6 @@ class RegistrationManager:
             # Smallest viable placement is mandatory. Larger shapes are useful only when measured.
             if accepted and candidate.gpu_count >= min(item.gpu_count for item in accepted) + 1:
                 break
-        gguf_files = [
-            artifact_path / name
-            for name in inspection["weight_files"]
-            if name.lower().endswith(".gguf")
-        ]
-        while not accepted and self.settings.engines.enable_llama_cpp and gguf_files:
-            try:
-                async with self._validation_lock:
-                    accepted.extend(
-                        await validate_llama_cpp(
-                            settings=self.settings,
-                            inventory=self.inventory,
-                            scheduler=self.validator.scheduler,
-                            probes=self.validator,
-                            model_id=job["model_id"],
-                            model_revision=resolved_revision,
-                            gguf_path=gguf_files[0],
-                            nickname=job["nickname"],
-                            candidate=candidates[0],
-                        )
-                    )
-            except ValidationPreempted:
-                await self.database.update_model_job(
-                    job_id,
-                    job_state="QUEUED",
-                    stage="validation_requeued",
-                    catalog_state=CatalogState.VALIDATION_PENDING,
-                )
-                await asyncio.sleep(5.0)
-                continue
-            break
         if not accepted and last_validation_error is not None:
             raise last_validation_error
         return accepted
