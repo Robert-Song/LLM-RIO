@@ -25,6 +25,17 @@ def _optional_int(value: Any) -> int | None:
     return None if value is None else int(value)
 
 
+def _gpu_memory_utilization(raw: dict[str, Any]) -> float:
+    """Read the utilization limit used by current and legacy profiles.
+
+    Profiles saved before this setting was introduced do not have the key.
+    Keep those profiles usable with the conservative engine default rather
+    than failing the entire model-profile listing.
+    """
+    value = raw.get("gpu_memory_utilization")
+    return 0.9 if value is None else float(value)
+
+
 def profile_from_dict(raw: dict[str, Any]) -> PlacementProfile:
     return PlacementProfile(
         id=raw["id"],
@@ -49,7 +60,7 @@ def profile_from_dict(raw: dict[str, Any]) -> PlacementProfile:
         gpu_headroom_mib_per_gpu=tuple(raw["gpu_headroom_mib_per_gpu"]),
         capabilities=frozenset(raw["capabilities"]),
         launch_args=dict(raw["launch_args"]),
-        gpu_memory_utilization=float(raw["gpu_memory_utilization"]),
+        gpu_memory_utilization=_gpu_memory_utilization(raw),
         kv_cache_capacity_tokens=_optional_int(raw["kv_cache_capacity_tokens"]),
         max_full_length_concurrency=(
             None

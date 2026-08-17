@@ -360,7 +360,7 @@ class RioTui(App[Path | None]):
             with Vertical(id="sidebar"):
                 yield Static("LLM-RIO", id="brand")
                 yield Button("Dashboard", id="nav-dashboard", variant="primary")
-                yield Button("API Keys", id="nav-keys")
+                yield Button("Users", id="nav-keys")
                 yield Button("Models", id="nav-models")
                 yield Button("Maintenance", id="nav-maintenance")
                 yield Button("Diagnostics", id="nav-system")
@@ -379,7 +379,7 @@ class RioTui(App[Path | None]):
                         yield Button("Start service", id="dashboard-start-service")
                     yield Static("Connecting to the local control plane…", id="dashboard-summary")
                 with VerticalScroll(id="keys", classes="page"):
-                    yield Static("API Keys", classes="page-title")
+                    yield Static("Users", classes="page-title")
                     yield Static(
                         "Create credentials, inspect usage, and manage quotas and access.",
                         classes="page-description",
@@ -388,6 +388,7 @@ class RioTui(App[Path | None]):
                         yield Button("Refresh", id="keys-refresh", variant="primary")
                         yield Button("Create", id="keys-create")
                         yield Button("Rotate", id="keys-rotate")
+                        yield Button("Copy API key", id="keys-copy")
                         yield Button("Set quota", id="keys-limit")
                         yield Button("Reset usage", id="keys-reset")
                         yield Button("Revoke", id="keys-revoke", variant="warning")
@@ -674,7 +675,7 @@ class RioTui(App[Path | None]):
         active_keys = sum(1 for key in self.key_records if key.get("active"))
         summary = {
             "API URL": _safe_base_url(),
-            "API keys": f"{len(self.key_records)} total / {active_keys} active",
+            "Users": f"{len(self.key_records)} total / {active_keys} active",
             "Models": f"{len(self.model_records)} total / {available} available",
             "Needs administrator review": review,
             "Keyboard": "R refreshes the current page; Q exits",
@@ -721,6 +722,14 @@ class RioTui(App[Path | None]):
             return self.key_records[index]
         self.notify("Select an API key first.", severity="warning")
         return None
+
+    def _copy_key_to_clipboard(self, record: dict[str, Any]) -> None:
+        api_key = record.get("api_key")
+        if not isinstance(api_key, str) or not api_key:
+            self.notify("The selected user's API key is unavailable.", severity="warning")
+            return
+        self.copy_to_clipboard(api_key)
+        self.notify(f"Copied API key for {record.get('nickname')} to the clipboard.")
 
     def _selected_model(self) -> dict[str, Any] | None:
         index = self.query_one("#models-table", DataTable).cursor_row
@@ -1463,6 +1472,9 @@ class RioTui(App[Path | None]):
             self.run_worker(self.refresh_keys(), exit_on_error=False)
         elif button_id == "keys-create":
             self._open_create_key()
+        elif button_id == "keys-copy":
+            if (record := self._selected_key()) is not None:
+                self._copy_key_to_clipboard(record)
         elif button_id == "keys-rotate":
             if (key_record := self._selected_key()) is not None:
                 self._confirm(

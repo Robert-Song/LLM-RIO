@@ -95,7 +95,8 @@ async def list_keys(request: Request, _: AdminPrincipal) -> dict[str, object]:
 @router.post("/admin/keys/{key_id}/rotate", response_model=KeySecretResponse)
 async def rotate_key(key_id: str, request: Request, _: AdminPrincipal) -> KeySecretResponse:
     row = await request.app.state.database.fetchone(
-        "SELECT nickname FROM api_keys WHERE id = ?", (key_id,)
+        "SELECT nickname FROM api_keys WHERE id = ? AND token_prefix NOT LIKE 'deleted-%'",
+        (key_id,),
     )
     if row is None:
         raise HTTPException(status_code=404, detail="Key not found")

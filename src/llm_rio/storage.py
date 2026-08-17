@@ -406,6 +406,7 @@ class Database:
                         WHERE r.account_id = a.id AND r.state = 'SETTLED'
                    ), 0) AS settled_requests
               FROM api_keys k JOIN quota_accounts a ON a.id = k.quota_account_id
+             WHERE k.token_prefix NOT LIKE 'deleted-%'
              ORDER BY k.nickname
             """
         )
@@ -436,10 +437,12 @@ class Database:
         async with self.transaction() as connection:
             row = await (
                 await connection.execute(
-                    "SELECT role, active FROM api_keys WHERE id = ?", (key_id,)
+                    "SELECT role, active, token_prefix FROM api_keys WHERE id = ?", (key_id,)
                 )
             ).fetchone()
             if row is None:
+                return False
+            if active and str(row["token_prefix"]).startswith("deleted-"):
                 return False
             if not active and row["role"] == Role.ADMIN.value and bool(row["active"]):
                 count = await (
@@ -464,7 +467,7 @@ class Database:
             """
             UPDATE api_keys
                SET token_prefix = ?, token_hash = ?, encrypted_api_key = ?, active = 1
-             WHERE id = ?
+             WHERE id = ? AND token_prefix NOT LIKE 'deleted-%'
             """,
             (prefix, hash_api_key(api_key), self.key_vault.encrypt(api_key), key_id),
         )
