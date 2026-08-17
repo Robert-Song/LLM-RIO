@@ -12,6 +12,8 @@ from llm_rio.api.schemas import (
     CreateKeyRequest,
     KeySecretResponse,
     MaintenanceRequest,
+    ModelProfileCloneRequest,
+    ModelRequestDefaultsUpdate,
     ProfileEditRequest,
     QuotaUpdate,
 )
@@ -105,6 +107,13 @@ async def rotate_key(key_id: str, request: Request, _: AdminPrincipal) -> KeySec
 @router.post("/admin/keys/{key_id}/revoke", status_code=status.HTTP_204_NO_CONTENT)
 async def revoke_key(key_id: str, request: Request, _: AdminPrincipal) -> Response:
     if not await request.app.state.database.set_key_active(key_id, False):
+        raise HTTPException(status_code=404, detail="Key not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/admin/keys/{key_id}/restore", status_code=status.HTTP_204_NO_CONTENT)
+async def restore_key(key_id: str, request: Request, _: AdminPrincipal) -> Response:
+    if not await request.app.state.database.set_key_active(key_id, True):
         raise HTTPException(status_code=404, detail="Key not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -239,9 +248,7 @@ def _apply_profile_edit(
                 "gpu_memory_utilization cannot be null",
                 status_code=422,
             )
-        updated = replace(
-            updated, gpu_memory_utilization=request.gpu_memory_utilization
-        )
+        updated = replace(updated, gpu_memory_utilization=request.gpu_memory_utilization)
     if "engine" in fields:
         updated = replace(updated, engine=request.engine or updated.engine)
 
@@ -316,6 +323,78 @@ async def list_model_profiles(
     }
 
 
+@router.patch("/admin/models/{model_id}")
+async def update_model_request_defaults(
+    model_id: str,
+    body: ModelRequestDefaultsUpdate,
+    request: Request,
+    _: AdminPrincipal,
+) -> dict[str, object]:
+    if not body.model_fields_set:
+        raise RioError(
+            "model_default_update_empty",
+            "Provide at least one request default to change.",
+            status_code=422,
+        )
+    updates = {field: getattr(body, field) for field in body.model_fields_set}
+    database = request.app.state.database
+    model = await database.update_model_request_defaults(model_id, updates)
+    if model is None:
+        raise HTTPException(status_code=404, detail="Model not found")
+    await database.record_event(
+        "MODEL_REQUEST_DEFAULTS_UPDATED",
+        model_id,
+        {"request_defaults": model["request_defaults"]},
+    )
+    return {"model": model}
+
+
+@router.post(
+    "/admin/models/{model_id}/clone",
+    status_code=status.HTTP_201_CREATED,
+)
+async def clone_model_profile(
+    model_id: str,
+    body: ModelProfileCloneRequest,
+    request: Request,
+    principal: AdminPrincipal,
+) -> dict[str, object]:
+    database = request.app.state.database
+    source_model = await database.model_by_id(model_id)
+    if source_model is None:
+        raise HTTPException(status_code=404, detail="Model not found")
+    cloned_model, profiles = await request.app.state.profiles.clone_model(
+        source_model=source_model,
+        nickname=body.nickname,
+        creator_key_id=principal.key_id,
+        request_defaults=body.request_defaults,
+        max_model_len=body.max_model_len,
+        yarn_factor=body.yarn_factor,
+        yarn_original_max_model_len=body.yarn_original_max_model_len,
+        inherit_grants=body.inherit_grants,
+    )
+    await database.record_event(
+        "MODEL_PROFILE_CLONED",
+        str(cloned_model["id"]),
+        {
+            "source_model_id": model_id,
+            "nickname": body.nickname,
+            "profile_count": len(profiles),
+            "request_defaults": cloned_model["request_defaults"],
+            "max_context_tokens": cloned_model["request_limits"]["max_context_tokens"],
+            "yarn_factor": body.yarn_factor,
+            "shared_artifact_path": cloned_model["artifact_path"],
+        },
+    )
+    return {
+        "model": cloned_model,
+        "profiles": [
+            _profile_payload(StoredProfile(profile=profile, active=True)) for profile in profiles
+        ],
+        "shared_artifact": True,
+    }
+
+
 @router.patch("/admin/models/{model_id}/profiles/{profile_id}")
 async def update_model_profile(
     model_id: str,
@@ -358,9 +437,7 @@ async def update_model_profile(
         llama_cpp_enabled=request.app.state.settings.engines.enable_llama_cpp,
     )
     try:
-        saved = await request.app.state.profiles.update(
-            updated, make_default=body.make_default
-        )
+        saved = await request.app.state.profiles.update(updated, make_default=body.make_default)
     except sqlite3.IntegrityError as exc:
         raise RioError(
             "duplicate_profile",
@@ -392,6 +469,44 @@ async def update_model_profile(
         ),
         "drained_worker_ids": drained_worker_ids,
         "restart_required": not body.restart_workers,
+    }
+
+
+@router.post("/admin/models/{model_id}/profiles/{profile_id}/{action}")
+async def set_model_profile_active(
+    model_id: str,
+    profile_id: str,
+    action: str,
+    request: Request,
+    _: AdminPrincipal,
+) -> dict[str, object]:
+    if action not in {"enable", "disable"}:
+        raise HTTPException(status_code=404, detail="Profile action not found")
+    active = action == "enable"
+    database = request.app.state.database
+    model = await database.model_by_id(model_id)
+    if model is None:
+        raise HTTPException(status_code=404, detail="Model not found")
+    saved = await request.app.state.profiles.set_active(
+        model_id=model_id, profile_id=profile_id, active=active
+    )
+    if not saved:
+        raise HTTPException(status_code=404, detail="Placement profile not found")
+    drained_worker_ids: list[str] = []
+    if not active:
+        for worker in list(request.app.state.supervisor.workers.values()):
+            if worker.profile.id == profile_id:
+                drained_worker_ids.append(worker.id)
+                await request.app.state.supervisor.drain(worker.id)
+    await database.record_event(
+        f"MODEL_PROFILE_{action.upper()}D",
+        profile_id,
+        {"model_id": model_id, "active": active},
+    )
+    return {
+        "profile_id": profile_id,
+        "active": active,
+        "drained_worker_ids": drained_worker_ids,
     }
 
 

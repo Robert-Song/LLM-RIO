@@ -98,11 +98,9 @@ def _request(
             timeout=60.0,
         )
     except httpx.HTTPError as exc:
-        typer.echo(f"Request failed: {exc}", err=True)
-        raise typer.Exit(1) from exc
+        raise click.ClickException(f"Request failed: {exc}") from exc
     if not response.is_success:
-        typer.echo(f"HTTP {response.status_code}: {response.text}", err=True)
-        raise typer.Exit(1)
+        raise click.ClickException(f"HTTP {response.status_code}: {response.text}")
     if response.status_code == 204 or not response.content:
         return None
     return response.json()
@@ -279,6 +277,11 @@ def _print_model_records(records: list[dict[str, Any]]) -> None:
         typer.echo(str(model.get("nickname")))
         typer.echo(f"   State: {model.get('state')}")
         typer.echo(f"   Repository: {model.get('huggingface_repo')}")
+        if model.get("source_model_id"):
+            typer.echo(f"   Shared weights from model ID: {model.get('source_model_id')}")
+        defaults = model.get("request_defaults")
+        if isinstance(defaults, dict) and defaults:
+            typer.echo(f"   Request defaults: {json.dumps(defaults, sort_keys=True)}")
         job = model.get("registration_job")
         if isinstance(job, dict):
             typer.echo(f"   Registration job: {job.get('id')}")
@@ -471,6 +474,14 @@ def revoke_key(key: str) -> None:
     typer.echo(f"API key '{record['nickname']}' revoked.")
 
 
+@keys_app.command("restore")
+def restore_key(key: str) -> None:
+    """Reactivate a revoked API key selected by nickname or full key."""
+    record = _key_record(key)
+    _request("POST", f"/admin/keys/{record['id']}/restore")
+    typer.echo(f"API key '{record['nickname']}' restored.")
+
+
 @keys_app.command("delete")
 def delete_key(key: str) -> None:
     """Remove credential utility while retaining audit history."""
@@ -550,6 +561,67 @@ def add_model(
     typer.echo(f"Check progress: ./llmctl models review {nickname}")
 
 
+@models_app.command("profile-clone")
+@models_app.command("clone-profile")
+def clone_model_profile(
+    source_nickname: str,
+    nickname: str,
+    temperature: float | None = typer.Option(None, "--temperature"),
+    top_p: float | None = typer.Option(None, "--top-p"),
+    top_k: int | None = typer.Option(None, "--top-k"),
+    min_p: float | None = typer.Option(None, "--min-p"),
+    presence_penalty: float | None = typer.Option(None, "--presence-penalty"),
+    repetition_penalty: float | None = typer.Option(None, "--repetition-penalty"),
+    reasoning_effort: str | None = typer.Option(None, "--reasoning-effort"),
+    max_model_len: int | None = typer.Option(None, "--max-model-len"),
+    yarn_factor: float | None = typer.Option(None, "--yarn-factor"),
+    yarn_original_max_model_len: int | None = typer.Option(None, "--yarn-original-max-model-len"),
+    inherit_grants: bool = typer.Option(True, "--inherit-grants/--no-inherit-grants"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Clone active profiles into a new logical model that shares the source weights."""
+    source = _model_record(source_nickname)
+    payload: dict[str, Any] = {
+        key: value
+        for key, value in {
+            "nickname": nickname,
+            "temperature": temperature,
+            "top_p": top_p,
+            "top_k": top_k,
+            "min_p": min_p,
+            "presence_penalty": presence_penalty,
+            "repetition_penalty": repetition_penalty,
+            "reasoning_effort": reasoning_effort,
+            "max_model_len": max_model_len,
+            "yarn_factor": yarn_factor,
+            "yarn_original_max_model_len": yarn_original_max_model_len,
+            "inherit_grants": inherit_grants,
+        }.items()
+        if value is not None
+    }
+    result = _request(
+        "POST",
+        f"/admin/models/{source['id']}/clone",
+        json_body=payload,
+    )
+    if json_output:
+        _print(result)
+        return
+    model = result.get("model") if isinstance(result, dict) else None
+    profiles = result.get("profiles") if isinstance(result, dict) else None
+    if not isinstance(model, dict):
+        raise click.ClickException("The server returned an invalid cloned-model record.")
+    profile_count = len(profiles) if isinstance(profiles, list) else 0
+    typer.echo(
+        f"Created logical model '{model.get('nickname')}' with {profile_count} cloned "
+        "placement profile(s)."
+    )
+    typer.echo(f"Shared artifact: {model.get('artifact_path')}")
+    defaults = model.get("request_defaults")
+    if isinstance(defaults, dict) and defaults:
+        typer.echo(f"Request defaults: {json.dumps(defaults, sort_keys=True)}")
+
+
 @models_app.command("profiles")
 def list_model_profiles(
     nickname: str,
@@ -622,8 +694,7 @@ def edit_model_profile(
         typer.echo("Draining workers: " + ", ".join(result["drained_worker_ids"]))
     elif isinstance(result, dict) and result.get("restart_required"):
         typer.echo(
-            "The profile will be used on the next worker launch; existing workers "
-            "were not changed."
+            "The profile will be used on the next worker launch; existing workers were not changed."
         )
 
 
@@ -714,460 +785,14 @@ def maintenance_resume() -> None:
     _print(_request("POST", "/admin/maintenance", json_body={"mode": "active"}))
 
 
-def _prompt_str(prompt_text: str, default: str | None = None, required: bool = True) -> str:
-    prompt_msg = f"{prompt_text} [{default}]: " if default is not None else f"{prompt_text}: "
-    while True:
-        try:
-            val = input(prompt_msg).strip()
-        except (EOFError, KeyboardInterrupt):
-            typer.echo()
-            return default if default is not None else ""
-        if not val:
-            if default is not None:
-                return default
-            if not required:
-                return ""
-            typer.echo("Error: Input cannot be empty. Please try again.")
-            continue
-        return val
-
-
-def _prompt_bool(prompt_text: str, default: bool = False) -> bool:
-    default_str = "Y/n" if default else "y/N"
-    try:
-        val = input(f"{prompt_text} ({default_str}): ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        typer.echo()
-        return default
-    if not val:
-        return default
-    return val in {"y", "yes", "true", "1"}
-
-
-def _prompt_int(prompt_text: str, default: int | None = None) -> int:
-    prompt_msg = f"{prompt_text} [{default:,}]: " if default is not None else f"{prompt_text}: "
-    while True:
-        try:
-            val = input(prompt_msg).strip()
-        except (EOFError, KeyboardInterrupt):
-            typer.echo()
-            return default or 0
-        if not val and default is not None:
-            return default
-        try:
-            num = int(val)
-            if num < 0:
-                typer.echo("Error: Value must be non-negative.")
-                continue
-            return num
-        except ValueError:
-            typer.echo("Error: Invalid integer. Please try again.")
-
-
-def _prompt_float(prompt_text: str, default: float) -> float:
-    while True:
-        raw = _prompt_str(prompt_text, default=str(default), required=False)
-        try:
-            value = float(raw)
-        except ValueError:
-            typer.echo("Error: Invalid number. Please try again.")
-            continue
-        if value <= 0 or value > 1:
-            typer.echo("Error: Value must be greater than 0 and no more than 1.")
-            continue
-        return value
-
-
-def _prompt_profile_limit(label: str, current: object) -> int | None:
-    default = "" if current is None else str(current)
-    raw = _prompt_str(
-        f"{label} (blank retains engine default)", default=default, required=False
-    )
-    if not raw:
-        return None
-    try:
-        value = int(raw)
-    except ValueError:
-        typer.echo("Error: Invalid integer; keeping the current value.")
-        return None
-    if value <= 0:
-        typer.echo("Error: Value must be positive; keeping the current value.")
-        return None
-    return value
-
-
-def _interactive_keys_menu() -> None:
-    while True:
-        typer.echo("\n" + "=" * 50)
-        typer.echo("Key Management")
-        typer.echo("=" * 50)
-        typer.echo("1. List all API keys")
-        typer.echo("2. Show API key / usage details")
-        typer.echo("3. Create new API key")
-        typer.echo("4. Rotate API key")
-        typer.echo("5. Update token limit / quota")
-        typer.echo("6. Reset key usage")
-        typer.echo("7. Revoke (deactivate) API key")
-        typer.echo("8. Delete API key")
-        typer.echo("0. Back to Main Menu")
-        typer.echo("=" * 50)
-
-        choice = _prompt_str("Select option", default="0", required=False)
-
-        try:
-            if choice == "1":
-                list_keys(json_output=False)
-            elif choice == "2":
-                key = _prompt_str("Enter API key nickname or full API key")
-                if key:
-                    show_key(key)
-            elif choice == "3":
-                nickname = _prompt_str("Enter key nickname")
-                if not nickname:
-                    continue
-                role_str = _prompt_str("Enter role (user/admin)", default="user")
-                role_val = Role.ADMIN if role_str.lower() == "admin" else Role.USER
-                unlimited_val = _prompt_bool("Unlimited quota?", default=True)
-                limit_val = 0
-                if not unlimited_val:
-                    limit_val = _prompt_int("Enter lifetime token limit", default=1_000_000)
-                custom_key = _prompt_str(
-                    "Enter custom API key (leave blank to auto-generate)", required=False
-                )
-                custom_key_opt = custom_key if custom_key else None
-                grants_raw = _prompt_str(
-                    "Model nicknames to grant (comma-separated, optional)", required=False
-                )
-                grants = (
-                    [g.strip() for g in grants_raw.split(",") if g.strip()] if grants_raw else None
-                )
-                create_key(
-                    nickname=nickname,
-                    role=role_val,
-                    limit_tokens=None if unlimited_val else limit_val,
-                    account_id=None,
-                    grant=grants,
-                    api_key=custom_key_opt,
-                )
-            elif choice == "4":
-                key = _prompt_str("Enter API key nickname or full API key")
-                if key and _prompt_bool(
-                    f"Are you sure you want to rotate key '{key}'?", default=False
-                ):
-                    rotate_key(key)
-            elif choice == "5":
-                key = _prompt_str("Enter API key nickname or full API key")
-                if not key:
-                    continue
-                unlimited_val = _prompt_bool("Unlimited token quota?", default=False)
-                limit_val = 1_000_000
-                if not unlimited_val:
-                    limit_val = _prompt_int("Enter new token limit", default=1_000_000)
-                update_limit(key=key, limit_tokens=limit_val, unlimited=unlimited_val)
-            elif choice == "6":
-                key = _prompt_str("Enter API key nickname or full API key")
-                if key and _prompt_bool(
-                    f"Are you sure you want to reset usage to 0 for '{key}'?", default=False
-                ):
-                    reset_usage(key)
-            elif choice == "7":
-                key = _prompt_str("Enter API key nickname or full API key to revoke")
-                if key and _prompt_bool(f"Are you sure you want to revoke '{key}'?", default=False):
-                    revoke_key(key)
-            elif choice == "8":
-                key = _prompt_str("Enter API key nickname or full API key to delete")
-                if key and _prompt_bool(
-                    f"Are you sure you want to DELETE key '{key}'?", default=False
-                ):
-                    delete_key(key)
-            elif choice == "0":
-                break
-            else:
-                typer.echo("Invalid option. Please try again.")
-        except click.ClickException as exc:
-            typer.echo(f"Error: {exc}")
-        except Exception as exc:
-            typer.echo(f"Error executing command: {exc}")
-
-
-def _interactive_edit_model_profile() -> None:
-    nickname = _prompt_str("Enter model nickname")
-    if not nickname:
-        return
-    payload = _model_profiles(nickname)
-    records = [record for record in payload["data"] if isinstance(record, dict)]
-    _print_profile_records(records)
-    if not records:
-        return
-    selector = _prompt_str("Choose profile number or full profile ID")
-    if not selector:
-        return
-    profile = _profile_record(nickname, selector)
-    current_engine = str(profile.get("engine") or "vllm")
-    engine = _prompt_str("Engine (vllm or llama.cpp)", default=current_engine)
-    if engine not in {"vllm", "llama.cpp"}:
-        typer.echo("Error: Engine must be vllm or llama.cpp.")
-        return
-    tp = _prompt_int(
-        "Tensor-parallel GPU count",
-        default=int(profile.get("tensor_parallel_size") or 1),
-    )
-    max_model_len = _prompt_int(
-        "Maximum context tokens",
-        default=int(profile.get("max_model_len") or 4096),
-    )
-    max_num_seqs = _prompt_profile_limit(
-        "Maximum concurrent sequences", profile.get("max_num_seqs")
-    )
-    max_num_batched_tokens = _prompt_profile_limit(
-        "Maximum batched tokens", profile.get("max_num_batched_tokens")
-    )
-    gpu_memory_utilization = _prompt_float(
-        "GPU memory utilization", float(profile.get("gpu_memory_utilization") or 0.9)
-    )
-    request: dict[str, Any] = {
-        "engine": engine,
-        "tensor_parallel_size": tp,
-        "max_model_len": max_model_len,
-        "gpu_memory_utilization": gpu_memory_utilization,
-    }
-    if max_num_seqs is not None:
-        request["max_num_seqs"] = max_num_seqs
-    if max_num_batched_tokens is not None:
-        request["max_num_batched_tokens"] = max_num_batched_tokens
-    if engine == "llama.cpp":
-        gguf_files = payload.get("available_gguf_files")
-        if isinstance(gguf_files, list) and gguf_files:
-            typer.echo("Available GGUF files:")
-            for filename in gguf_files:
-                typer.echo(f"  {filename}")
-        current_launch = profile.get("launch_args")
-        has_existing_gguf = isinstance(current_launch, dict) and bool(current_launch.get("model"))
-        gguf_file = _prompt_str(
-            "GGUF file relative to the model artifact (blank keeps the current GGUF file)",
-            required=False,
-        )
-        if gguf_file:
-            request["gguf_file"] = gguf_file
-        elif not has_existing_gguf:
-            typer.echo("Error: A GGUF file is required when switching a vLLM profile to llama.cpp.")
-            return
-        default_layers = (
-            int(current_launch.get("n_gpu_layers") or 99)
-            if isinstance(current_launch, dict)
-            else 99
-        )
-        request["n_gpu_layers"] = _prompt_int("GPU layers to offload", default=default_layers)
-    request["make_default"] = _prompt_bool(
-        "Make this the model's only active/default placement profile?", default=False
-    )
-    request["restart_workers"] = _prompt_bool(
-        "Drain this model's current workers so the new profile is used immediately?", default=True
-    )
-    typer.echo("\nThis overrides measured profile settings; no capacity validation will be rerun.")
-    if not _prompt_bool("Apply this profile override?", default=False):
-        return
-    model = _model_record(nickname)
-    result = _request(
-        "PATCH",
-        f"/admin/models/{model['id']}/profiles/{profile['id']}",
-        json_body=request,
-    )
-    updated = result.get("profile") if isinstance(result, dict) else None
-    if isinstance(updated, dict):
-        typer.echo("Profile updated.")
-        _print_profile_records([updated])
-    if isinstance(result, dict) and result.get("drained_worker_ids"):
-        typer.echo("Draining workers: " + ", ".join(result["drained_worker_ids"]))
-
-
-def _interactive_models_menu() -> None:
-    while True:
-        typer.echo("\n" + "=" * 50)
-        typer.echo("Model Management")
-        typer.echo("=" * 50)
-        typer.echo("1. List all models")
-        typer.echo("2. Add / Register new model")
-        typer.echo("3. Review registration job / failure details")
-        typer.echo("4. Retry failed registration job")
-        typer.echo("5. Disable model")
-        typer.echo("6. Show model access for key")
-        typer.echo("7. Grant model access to key")
-        typer.echo("8. Revoke model access from key")
-        typer.echo("9. List placement profiles (admin)")
-        typer.echo("10. Edit placement profile (admin)")
-        typer.echo("0. Back to Main Menu")
-        typer.echo("=" * 50)
-
-        choice = _prompt_str("Select option", default="0", required=False)
-
-        try:
-            if choice == "1":
-                list_models(json_output=False)
-            elif choice == "2":
-                nickname = _prompt_str("Enter model nickname")
-                if not nickname:
-                    continue
-                repo = _prompt_str("Enter HuggingFace repository (e.g. meta-llama/Llama-3.2-1B)")
-                if not repo:
-                    continue
-                revision = _prompt_str(
-                    "Enter revision (optional, press Enter to skip)", required=False
-                )
-                rev_opt = revision if revision else None
-                grants_raw = _prompt_str(
-                    "API key nicknames to grant access (comma-separated, optional)", required=False
-                )
-                grants = (
-                    [g.strip() for g in grants_raw.split(",") if g.strip()] if grants_raw else None
-                )
-                add_model(
-                    nickname=nickname, huggingface_repo=repo, revision=rev_opt, grant_to=grants
-                )
-            elif choice == "3":
-                target = _prompt_str("Enter model nickname or registration job ID")
-                if target:
-                    model_job(target, json_output=False)
-            elif choice == "4":
-                target = _prompt_str("Enter model nickname or registration job ID to retry")
-                if target:
-                    retry_model_job(target)
-            elif choice == "5":
-                nickname = _prompt_str("Enter model nickname to disable")
-                if nickname and _prompt_bool(
-                    f"Are you sure you want to disable model '{nickname}'?", default=False
-                ):
-                    disable_model(nickname)
-            elif choice == "6":
-                key = _prompt_str("Enter API key nickname or full API key")
-                if key:
-                    model_access(key)
-            elif choice == "7":
-                key = _prompt_str("Enter API key nickname or full API key")
-                if not key:
-                    continue
-                models_raw = _prompt_str("Enter model nicknames to grant (comma-separated)")
-                models_list = [m.strip() for m in models_raw.split(",") if m.strip()]
-                if models_list:
-                    grant_models(key=key, model=models_list)
-            elif choice == "8":
-                key = _prompt_str("Enter API key nickname or full API key")
-                if not key:
-                    continue
-                models_raw = _prompt_str("Enter model nicknames to revoke (comma-separated)")
-                models_list = [m.strip() for m in models_raw.split(",") if m.strip()]
-                if models_list:
-                    revoke_models(key=key, model=models_list)
-            elif choice == "9":
-                nickname = _prompt_str("Enter model nickname")
-                if nickname:
-                    profiles = _model_profiles(nickname)
-                    _print_profile_records(
-                        [record for record in profiles["data"] if isinstance(record, dict)]
-                    )
-            elif choice == "10":
-                _interactive_edit_model_profile()
-            elif choice == "0":
-                break
-            else:
-                typer.echo("Invalid option. Please try again.")
-        except click.ClickException as exc:
-            typer.echo(f"Error: {exc}")
-        except Exception as exc:
-            typer.echo(f"Error executing command: {exc}")
-
-
-def _interactive_maintenance_menu() -> None:
-    while True:
-        typer.echo("\n" + "=" * 50)
-        typer.echo("Maintenance Operations")
-        typer.echo("=" * 50)
-        typer.echo("1. View maintenance status & active workers")
-        typer.echo("2. Enter maintenance mode (Drain)")
-        typer.echo("3. Resume normal operations (Active)")
-        typer.echo("0. Back to Main Menu")
-        typer.echo("=" * 50)
-
-        choice = _prompt_str("Select option", default="0", required=False)
-
-        try:
-            if choice == "1":
-                maintenance_status()
-            elif choice == "2":
-                if _prompt_bool(
-                    "Are you sure you want to drain this machine into maintenance mode?",
-                    default=False,
-                ):
-                    maintenance_drain()
-            elif choice == "3":
-                if _prompt_bool(
-                    "Are you sure you want to resume normal service operations?", default=True
-                ):
-                    maintenance_resume()
-            elif choice == "0":
-                break
-            else:
-                typer.echo("Invalid option. Please try again.")
-        except click.ClickException as exc:
-            typer.echo(f"Error: {exc}")
-        except Exception as exc:
-            typer.echo(f"Error executing command: {exc}")
-
-
 def interactive_menu() -> None:
-    """Interactive administration console for LLM-RIO."""
-    typer.echo("Welcome to LLM-RIO Administration Console!")
+    """Launch the full-screen administration console for LLM-RIO."""
+    # Import lazily so scriptable subcommands don't pay the TUI import/startup cost.
+    from llm_rio.tui import run_tui
 
-    while True:
-        typer.echo("\n" + "=" * 50)
-        typer.echo("        LLM-RIO Interactive Console")
-        typer.echo("=" * 50)
-        typer.echo("1. Key Management")
-        typer.echo("2. Model Management")
-        typer.echo("3. Maintenance Operations")
-        typer.echo("4. Host Diagnostics (doctor)")
-        typer.echo("5. Start Service (serve)")
-        typer.echo("6. Service & Configuration Info")
-        typer.echo("0. Exit")
-        typer.echo("=" * 50)
-
-        choice = _prompt_str("Select option (0-6)", default="0", required=False)
-
-        if choice == "1":
-            _interactive_keys_menu()
-        elif choice == "2":
-            _interactive_models_menu()
-        elif choice == "3":
-            _interactive_maintenance_menu()
-        elif choice == "4":
-            try:
-                config_path = Path(os.environ.get("LLMRIO_CONFIG", "config.toml"))
-                doctor(config=config_path, json_output=False)
-            except (click.ClickException, typer.Exit):
-                pass
-            except Exception as exc:
-                typer.echo(f"Doctor failed: {exc}")
-        elif choice == "5":
-            config_input = _prompt_str("Config file path", default="config.toml", required=False)
-            try:
-                serve(config=Path(config_input))
-            except Exception as exc:
-                typer.echo(f"Serve terminated: {exc}")
-        elif choice == "6":
-            base_url = _base_url()
-            config_path = Path(os.environ.get("LLMRIO_CONFIG", "config.toml"))
-            typer.echo(f"API Base URL: {base_url}")
-            typer.echo(f"Config File: {config_path.resolve()}")
-            try:
-                admin_key = _api_key()
-                typer.echo("Local Administrator Key: Recovered from local database")
-            except Exception as exc:
-                typer.echo(f"Local Administrator Key: {exc}")
-        elif choice in {"0", "exit", "quit", "q"}:
-            typer.echo("\nGoodbye!")
-            break
-        else:
-            typer.echo("Invalid option. Please try again.")
+    service_config = run_tui()
+    if service_config is not None:
+        serve(config=service_config)
 
 
 @app.callback(invoke_without_command=True)
@@ -1178,7 +803,7 @@ def main(ctx: typer.Context) -> None:
 
 @app.command("interactive")
 def interactive_cmd() -> None:
-    """Launch the interactive administration console."""
+    """Launch the full-screen terminal administration interface."""
     interactive_menu()
 
 

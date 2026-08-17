@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS model_catalog (
     artifact_hashes_json TEXT NOT NULL DEFAULT '[]',
     capabilities_json TEXT NOT NULL DEFAULT '[]',
     request_limits_json TEXT NOT NULL DEFAULT '{}',
+    request_defaults_json TEXT NOT NULL DEFAULT '{}',
+    source_model_id TEXT REFERENCES model_catalog(id),
     created_by_key_id TEXT NOT NULL REFERENCES api_keys(id),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -205,22 +207,18 @@ class Database:
         await self._migrate_schema()
 
     async def _migrate_schema(self) -> None:
-        """Add backward-compatible quota metadata to existing lab databases."""
+        """Add backward-compatible metadata to existing lab databases."""
         rows = await self.fetchall("PRAGMA table_info(quota_accounts)")
         columns = {row["name"] for row in rows}
         if "limit_tokens" not in columns:
-            await self.execute(
-                "ALTER TABLE quota_accounts ADD COLUMN limit_tokens INTEGER"
-            )
+            await self.execute("ALTER TABLE quota_accounts ADD COLUMN limit_tokens INTEGER")
         if "usage_baseline_tokens" not in columns:
             await self.execute(
                 "ALTER TABLE quota_accounts "
                 "ADD COLUMN usage_baseline_tokens INTEGER NOT NULL DEFAULT 0"
             )
         if "usage_reset_at" not in columns:
-            await self.execute(
-                "ALTER TABLE quota_accounts ADD COLUMN usage_reset_at TEXT"
-            )
+            await self.execute("ALTER TABLE quota_accounts ADD COLUMN usage_reset_at TEXT")
         await self.execute(
             "UPDATE quota_accounts SET limit_tokens = balance_tokens WHERE limit_tokens IS NULL"
         )
@@ -240,6 +238,15 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_inference_requests_test_run "
             "ON inference_requests(test_run_id, created_at)"
         )
+        model_rows = await self.fetchall("PRAGMA table_info(model_catalog)")
+        model_columns = {row["name"] for row in model_rows}
+        if "request_defaults_json" not in model_columns:
+            await self.execute(
+                "ALTER TABLE model_catalog "
+                "ADD COLUMN request_defaults_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "source_model_id" not in model_columns:
+            await self.execute("ALTER TABLE model_catalog ADD COLUMN source_model_id TEXT")
 
     async def close(self) -> None:
         if self._connection is not None:
@@ -269,9 +276,7 @@ class Database:
                 await connection.rollback()
                 raise
 
-    async def execute(
-        self, sql: str, parameters: Iterable[Any] = ()
-    ) -> aiosqlite.Cursor:
+    async def execute(self, sql: str, parameters: Iterable[Any] = ()) -> aiosqlite.Cursor:
         async with self._transaction_lock:
             return await self.connection.execute(sql, tuple(parameters))
 
@@ -716,10 +721,43 @@ class Database:
         row = await self.fetchone("SELECT * FROM model_catalog WHERE id = ?", (model_id,))
         return self._decode_model(row) if row else None
 
+    async def update_model_request_defaults(
+        self, model_id: str, updates: dict[str, Any | None]
+    ) -> dict[str, Any] | None:
+        """Apply request-default changes, removing values explicitly set to null."""
+        async with self.transaction() as connection:
+            row = await (
+                await connection.execute(
+                    "SELECT request_defaults_json FROM model_catalog WHERE id = ?", (model_id,)
+                )
+            ).fetchone()
+            if row is None:
+                return None
+            defaults = json.loads(row["request_defaults_json"] or "{}")
+            for key, value in updates.items():
+                if value is None:
+                    defaults.pop(key, None)
+                else:
+                    defaults[key] = value
+            await connection.execute(
+                """
+                UPDATE model_catalog
+                   SET request_defaults_json = ?, updated_at = ?
+                 WHERE id = ?
+                """,
+                (json.dumps(defaults), _now(), model_id),
+            )
+        return await self.model_by_id(model_id)
+
     @staticmethod
     def _decode_model(row: aiosqlite.Row) -> dict[str, Any]:
         result = dict(row)
-        for key in ("artifact_hashes_json", "capabilities_json", "request_limits_json"):
+        for key in (
+            "artifact_hashes_json",
+            "capabilities_json",
+            "request_limits_json",
+            "request_defaults_json",
+        ):
             result[key.removesuffix("_json")] = json.loads(result.pop(key))
         return result
 
@@ -980,9 +1018,7 @@ class Database:
             return cursor.rowcount == 1
 
     async def admitted_request_ids(self) -> set[str]:
-        rows = await self.fetchall(
-            "SELECT id FROM inference_requests WHERE state = 'ADMITTED'"
-        )
+        rows = await self.fetchall("SELECT id FROM inference_requests WHERE state = 'ADMITTED'")
         return {str(row["id"]) for row in rows}
 
     async def settle_quota(

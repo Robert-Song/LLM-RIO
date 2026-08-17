@@ -116,6 +116,31 @@ async def _resolve_model(request: Request, principal: Principal, nickname: str) 
     return model
 
 
+_MODEL_DEFAULT_FIELDS = (
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "presence_penalty",
+    "repetition_penalty",
+    "reasoning_effort",
+)
+
+
+def _apply_model_defaults(
+    body: ChatCompletionRequest, model: dict[str, Any]
+) -> ChatCompletionRequest:
+    defaults = model.get("request_defaults")
+    if not isinstance(defaults, dict):
+        return body
+    updates = {
+        field: defaults[field]
+        for field in _MODEL_DEFAULT_FIELDS
+        if field in defaults and getattr(body, field) is None
+    }
+    return body.model_copy(update=updates) if updates else body
+
+
 def _validate_request(
     request: Request, body: ChatCompletionRequest, model: dict[str, Any]
 ) -> tuple[int, int, int | None]:
@@ -203,6 +228,8 @@ async def list_models(request: Request, principal: CurrentPrincipal) -> dict[str
                     for profile in profiles
                 ],
                 "capabilities": model["capabilities"],
+                "request_defaults": model.get("request_defaults", {}),
+                "source_model_id": model.get("source_model_id"),
             }
         )
     return {
@@ -224,6 +251,7 @@ async def chat_completions(
     if await request.app.state.database.service_mode() is not ServiceMode.ACTIVE:
         raise MaintenanceError()
     model = await _resolve_model(request, principal, body.model)
+    body = _apply_model_defaults(body, model)
     prompt_estimate, reservation_estimate, enforced_output_limit = _validate_request(
         request, body, model
     )

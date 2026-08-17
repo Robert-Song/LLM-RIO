@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 from llm_rio.domain import Engine, Role
 
@@ -85,6 +85,60 @@ class ProfileEditRequest(BaseModel):
     restart_workers: bool = False
 
 
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+
+class ModelRequestDefaultsUpdate(BaseModel):
+    """Validated request defaults for an existing logical model."""
+
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    top_p: float | None = Field(default=None, gt=0, le=1)
+    top_k: int | None = Field(default=None, ge=0)
+    min_p: float | None = Field(default=None, ge=0, le=1)
+    presence_penalty: float | None = Field(default=None, ge=-2, le=2)
+    repetition_penalty: float | None = Field(default=None, gt=0)
+    reasoning_effort: ReasoningEffort | None = None
+
+
+class ModelProfileCloneRequest(BaseModel):
+    """Create a separately routable logical model from existing weights and profiles."""
+
+    nickname: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    top_p: float | None = Field(default=None, gt=0, le=1)
+    top_k: int | None = Field(default=None, ge=0)
+    min_p: float | None = Field(default=None, ge=0, le=1)
+    presence_penalty: float | None = Field(default=None, ge=-2, le=2)
+    repetition_penalty: float | None = Field(default=None, gt=0)
+    reasoning_effort: ReasoningEffort | None = None
+    max_model_len: int | None = Field(default=None, gt=0)
+    yarn_factor: float | None = Field(default=None, gt=1)
+    yarn_original_max_model_len: int | None = Field(default=None, gt=0)
+    inherit_grants: bool = True
+
+    @model_validator(mode="after")
+    def yarn_fields_are_consistent(self) -> ModelProfileCloneRequest:
+        if self.yarn_original_max_model_len is not None and self.yarn_factor is None:
+            raise ValueError("yarn_original_max_model_len requires yarn_factor")
+        return self
+
+    @property
+    def request_defaults(self) -> dict[str, float | int | str]:
+        return {
+            key: value
+            for key, value in {
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+                "top_k": self.top_k,
+                "min_p": self.min_p,
+                "presence_penalty": self.presence_penalty,
+                "repetition_penalty": self.repetition_penalty,
+                "reasoning_effort": self.reasoning_effort,
+            }.items()
+            if value is not None
+        }
+
+
 class ChatCompletionRequest(BaseModel):
     model_config = {"extra": "allow"}
 
@@ -98,6 +152,10 @@ class ChatCompletionRequest(BaseModel):
     temperature: float | None = None
     top_p: float | None = None
     top_k: int | None = None
+    reasoning_effort: ReasoningEffort | None = None
+    min_p: float | None = Field(default=None, ge=0, le=1)
+    presence_penalty: float | None = Field(default=None, ge=-2, le=2)
+    repetition_penalty: float | None = Field(default=None, gt=0)
     seed: int | None = None
     stop: str | list[str] | None = None
     tools: list[dict[str, Any]] | None = None

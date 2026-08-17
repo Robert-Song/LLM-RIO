@@ -42,6 +42,24 @@ active admin credential from the protected host database, so they do not require
 `LLMRIO_API_KEY`. Remote management still requires an explicitly supplied admin key.
 
 
+## Terminal administration
+
+Run `llmctl` without arguments to open the full-screen administration interface:
+
+```bash
+./llmctl
+```
+
+The TUI provides dashboards and forms for API keys, quotas, model registration and access,
+registration jobs, placement profiles, maintenance mode, host diagnostics, and service startup.
+Use the mouse or keyboard to navigate; `R` refreshes the current page and `Q` exits. Destructive
+operations require confirmation.
+
+All command-oriented workflows remain available for scripts and runbooks. For example,
+`./llmctl keys list`, `./llmctl models review MODEL`, `./llmctl maintenance drain`,
+`./llmctl doctor`, and `./llmctl serve` behave as before. `./llmctl interactive` is an explicit
+alias for opening the TUI.
+
 ## API surface
 
 - `POST /v1/chat/completions`
@@ -51,11 +69,44 @@ active admin credential from the protected host database, so they do not require
   `POST /staff/model-jobs/{job_id}/retry`. `GET /staff/models` includes each
   model's registration job so failed registrations can be reviewed by model nickname.
 - `POST /staff/model-access` using API-key selectors and model nicknames
-- admin key, quota, atomic maintenance routes, and admin-only placement-profile overrides
+- admin key, quota, atomic maintenance routes, admin-only placement-profile overrides, and
+  `POST /admin/models/{model_id}/clone` for shared-weight logical model profiles
 
 The admin CLI uses the authenticated management routes but automatically recovers a local admin
-credential from the protected database/vault. Use `./llmctl models profiles MODEL` to inspect placement profiles and `./llmctl models profile-edit MODEL PROFILE_ID` to override a stored profile. An override is not revalidated; use `--make-default` to make it the only active profile and `--restart-workers` to drain current workers. Key and model access commands accept human-readable
+credential from the protected database/vault. Use `./llmctl models profiles MODEL` to inspect
+placement profiles and `./llmctl models profile-edit MODEL PROFILE_ID` to override a stored profile.
+An override is not revalidated; use `--make-default` to make it the only active profile and
+`--restart-workers` to drain current workers. Key and model access commands accept human-readable
 nicknames (or a complete API key for key selection), so internal database IDs are not required.
+
+### Shared-weight model profiles and request defaults
+
+A cloned model profile receives its own catalog model ID and copies the source model's active
+placement profiles, but references the same downloaded artifact directory and hashes. Consequently,
+it is independently routable and may be resident alongside the source model without downloading or
+copying the weights. Access grants are inherited by default; pass `--no-inherit-grants` to start
+without them.
+
+A profile can store defaults for `temperature`, `top_p`, `top_k`, and `reasoning_effort`. The gateway
+fills only omitted request fields, so any value explicitly supplied in a chat-completions request
+wins. Blank clone options inherit any defaults already stored on the source model.
+
+For example, this creates the extended Qwen profile described above. The YaRN factor and context
+length are stored in the cloned vLLM placement profiles as Hugging Face config overrides:
+
+```bash
+./llmctl models profile-clone \
+  qwen3.8-27b-nvfp4 \
+  qwen3.8-27b-nvfp4-ext \
+  --reasoning-effort medium \
+  --max-model-len 1048576 \
+  --yarn-factor 4 \
+  --yarn-original-max-model-len 262144
+```
+
+The same operation is available through the TUI's Models page with **Clone profile**. Cloned
+placement profiles are administrator overrides and are not benchmark-revalidated; their context
+size must fit the selected GPU placement at worker startup.
 
 ### Image inputs
 

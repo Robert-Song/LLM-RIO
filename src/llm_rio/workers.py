@@ -245,6 +245,8 @@ class WorkerSupervisor:
             elif isinstance(value, list):
                 for item in value:
                     command.extend([flag, str(item)])
+            elif isinstance(value, dict):
+                command.extend([flag, json.dumps(value, separators=(",", ":"), sort_keys=True)])
             elif value is not None:
                 command.extend([flag, str(value)])
         return command

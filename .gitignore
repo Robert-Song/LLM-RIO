@@ -18,3 +18,4 @@ diagnostics/
 config.toml
 docs/
 scripts/
+tests/
