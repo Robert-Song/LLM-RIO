@@ -91,6 +91,21 @@ class FormModal(ModalScreen[FormResult | None]):
         margin: 0 0 0 1;
     }
 
+    FormModal Input {
+        color: #f5f5f5;
+        background: #171717;
+        height: 3;
+        min-height: 3;
+        padding: 0 1;
+        border: tall #767676;
+    }
+
+    FormModal Input:focus {
+        color: #ffffff;
+        background: #252525;
+        border: tall #8ab4f8;
+    }
+
     FormModal .modal-actions {
         height: 3;
         align-horizontal: right;
@@ -140,6 +155,17 @@ class FormModal(ModalScreen[FormResult | None]):
             with Horizontal(classes="modal-actions"):
                 yield Button("Cancel", id="form-cancel")
                 yield Button(self.submit_label, id="form-submit", variant="primary")
+
+    def on_mount(self) -> None:
+        for field in self.fields:
+            selector = f"#field-{field.key}"
+            if field.options:
+                self.query_one(selector, Select).focus()
+            elif isinstance(field.value, bool):
+                self.query_one(selector, Checkbox).focus()
+            else:
+                self.query_one(selector, Input).focus()
+            return
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -389,6 +415,7 @@ class RioTui(App[Path | None]):
                         yield Button("Create", id="keys-create")
                         yield Button("Rotate", id="keys-rotate")
                         yield Button("Copy API key", id="keys-copy")
+                        yield Button("Change model access", id="keys-access-update")
                         yield Button("Set quota", id="keys-limit")
                         yield Button("Reset usage", id="keys-reset")
                         yield Button("Revoke", id="keys-revoke", variant="warning")
@@ -408,13 +435,12 @@ class RioTui(App[Path | None]):
                     with Grid(classes="toolbar"):
                         yield Button("Refresh", id="models-refresh", variant="primary")
                         yield Button("Add model", id="models-add")
-                        yield Button("Clone profile", id="models-clone")
+                        yield Button("Clone model", id="models-clone")
                         yield Button("Edit model", id="models-edit")
                         yield Button("Review job", id="models-review")
                         yield Button("Retry job", id="models-retry")
                         yield Button("Disable", id="models-disable", variant="warning")
-                        yield Button("Show key access", id="models-key-access")
-                        yield Button("Change access", id="models-access-update")
+                        yield Button("Change user access", id="models-user-access")
                         yield Button("Profiles", id="models-profiles")
                     yield DataTable(zebra_stripes=True, cursor_type="row", id="models-table")
                     yield Static(
@@ -897,6 +923,58 @@ class RioTui(App[Path | None]):
             self.notify(f"{success} for {record.get('nickname')}.")
             await self.refresh_keys()
 
+    def _open_user_model_access(self, record: dict[str, Any]) -> None:
+        models = sorted(self.model_records, key=lambda model: str(model.get("nickname") or ""))
+        if not models:
+            self.notify("No models are available.", severity="warning")
+            return
+        granted_models = {str(name) for name in record.get("granted_models") or []}
+        fields = tuple(
+            FieldSpec(
+                f"model-{model['id']}",
+                f"{model.get('nickname')} ({model.get('state') or 'unknown'})",
+                value=str(model.get("nickname") or "") in granted_models,
+            )
+            for model in models
+        )
+
+        def finished(values: FormResult | None) -> None:
+            if values is None:
+                return
+            selected_model_ids = [
+                str(model["id"]) for model in models if _bool_value(values, f"model-{model['id']}")
+            ]
+            self.run_worker(
+                self._replace_user_model_access(record, selected_model_ids),
+                exit_on_error=False,
+            )
+
+        self.push_screen(
+            FormModal(f"Change model access for {record.get('nickname')}", fields, "Save"),
+            finished,
+        )
+
+    async def _replace_user_model_access(
+        self, record: dict[str, Any], model_ids: list[str]
+    ) -> None:
+        ok, _ = await self._call(
+            "Saving model access",
+            lambda: cli_api._request(
+                "PUT",
+                f"/staff/keys/{record['id']}/model-grants",
+                json_body={"model_ids": model_ids},
+            ),
+        )
+        if ok:
+            selected = set(model_ids)
+            record["granted_models"] = [
+                str(model.get("nickname") or "")
+                for model in self.model_records
+                if str(model.get("id") or "") in selected
+            ]
+            self.notify(f"Model access updated for {record.get('nickname')}.")
+            await self.refresh_keys()
+
     def _open_add_model(self) -> None:
         fields = (
             FieldSpec("nickname", "Nickname", required=True),
@@ -1065,7 +1143,7 @@ class RioTui(App[Path | None]):
             if values is not None:
                 self.run_worker(self._clone_model_profile(record, values), exit_on_error=False)
 
-        self.push_screen(FormModal("Clone model profile", fields, "Clone"), finished)
+        self.push_screen(FormModal("Clone model", fields, "Clone"), finished)
 
     async def _clone_model_profile(self, source: dict[str, Any], values: FormResult) -> None:
         try:
@@ -1107,7 +1185,7 @@ class RioTui(App[Path | None]):
             self.notify(str(exc), severity="error")
             return
         ok, result = await self._call(
-            "Cloning model profile",
+            "Cloning model",
             lambda: cli_api._request(
                 "POST", f"/admin/models/{source['id']}/clone", json_body=payload
             ),
@@ -1197,6 +1275,88 @@ class RioTui(App[Path | None]):
         if ok:
             self.notify(f"Disabled {record.get('nickname')}.")
             await self.refresh_models()
+
+    def _open_model_user_access(self, model: dict[str, Any]) -> None:
+        users = sorted(self.key_records, key=lambda user: str(user.get("nickname") or ""))
+        if not users:
+            self.notify("No users are available.", severity="warning")
+            return
+        model_nickname = str(model.get("nickname") or "")
+        fields = tuple(
+            FieldSpec(
+                f"user-{user['id']}",
+                f"{user.get('nickname')} ({user.get('role') or 'user'}, "
+                f"{'active' if user.get('active') else 'revoked'})",
+                value=model_nickname in {str(name) for name in user.get("granted_models") or []},
+            )
+            for user in users
+        )
+
+        def finished(values: FormResult | None) -> None:
+            if values is None:
+                return
+            selected_user_ids = [
+                str(user["id"]) for user in users if _bool_value(values, f"user-{user['id']}")
+            ]
+            self.run_worker(
+                self._replace_model_user_access(model, selected_user_ids),
+                exit_on_error=False,
+            )
+
+        self.push_screen(
+            FormModal(f"Change user access for {model.get('nickname')}", fields, "Save"),
+            finished,
+        )
+
+    async def _replace_model_user_access(
+        self, model: dict[str, Any], selected_user_ids: list[str]
+    ) -> None:
+        model_nickname = str(model.get("nickname") or "")
+        model_ids_by_name = {
+            str(candidate.get("nickname") or ""): str(candidate.get("id") or "")
+            for candidate in self.model_records
+            if candidate.get("nickname") and candidate.get("id")
+        }
+        selected_users = set(selected_user_ids)
+        updates: list[tuple[str, list[str]]] = []
+        for user in self.key_records:
+            user_id = str(user.get("id") or "")
+            grants = {str(name) for name in user.get("granted_models") or []}
+            has_access = model_nickname in grants
+            should_have_access = user_id in selected_users
+            if has_access == should_have_access:
+                continue
+            if should_have_access:
+                grants.add(model_nickname)
+            else:
+                grants.discard(model_nickname)
+            missing_models = sorted(grants - model_ids_by_name.keys())
+            if missing_models:
+                self.notify("Refresh models before changing user access.", severity="warning")
+                return
+            updates.append(
+                (
+                    user_id,
+                    [model_ids_by_name[nickname] for nickname in sorted(grants)],
+                )
+            )
+        if not updates:
+            self.notify("User access already matches the selection.")
+            return
+
+        def persist() -> int:
+            for user_id, model_ids in updates:
+                cli_api._request(
+                    "PUT",
+                    f"/staff/keys/{user_id}/model-grants",
+                    json_body={"model_ids": model_ids},
+                )
+            return len(updates)
+
+        ok, updated_count = await self._call("Saving user access", persist)
+        if ok:
+            self.notify(f"Updated user access for {updated_count or 0} users.")
+            await self.refresh_keys()
 
     def _open_key_access(self) -> None:
         fields = (FieldSpec("key", "API key nickname or full API key", required=True),)
@@ -1475,6 +1635,9 @@ class RioTui(App[Path | None]):
         elif button_id == "keys-copy":
             if (record := self._selected_key()) is not None:
                 self._copy_key_to_clipboard(record)
+        elif button_id == "keys-access-update":
+            if (record := self._selected_key()) is not None:
+                self._open_user_model_access(record)
         elif button_id == "keys-rotate":
             if (key_record := self._selected_key()) is not None:
                 self._confirm(
@@ -1531,10 +1694,9 @@ class RioTui(App[Path | None]):
                     "Disable",
                     lambda: self._disable_model(disable_model_record),
                 )
-        elif button_id == "models-key-access":
-            self._open_key_access()
-        elif button_id == "models-access-update":
-            self._open_access_update(self._selected_model())
+        elif button_id == "models-user-access":
+            if (record := self._selected_model()) is not None:
+                self._open_model_user_access(record)
         elif button_id == "models-profiles":
             if (record := self._selected_model()) is not None:
                 self.profile_model = record
