@@ -52,6 +52,8 @@ Run `llmctl` without arguments to open the full-screen administration interface:
 
 The TUI provides dashboards and forms for API keys, quotas, model registration and access,
 registration jobs, placement profiles, maintenance mode, host diagnostics, and service startup.
+Its dashboard refreshes every two seconds while visible and shows current/total token throughput,
+non-empty output throughput, model popularity, and live NVIDIA GPU and worker-placement status.
 Use the mouse or keyboard to navigate; `R` refreshes the current page and `Q` exits. Destructive
 operations require confirmation.
 
@@ -59,6 +61,23 @@ All command-oriented workflows remain available for scripts and runbooks. For ex
 `./llmctl keys list`, `./llmctl models review MODEL`, `./llmctl maintenance drain`,
 `./llmctl doctor`, and `./llmctl serve` behave as before. `./llmctl interactive` is an explicit
 alias for opening the TUI.
+
+Settled per-call usage can be compacted from the TUI Maintenance page or with:
+
+```bash
+./llmctl summarize
+```
+
+The same admin-only operation is available as `POST /admin/usage/summarize`; an optional JSON
+body such as `{"through":"2026-08-21T00:00:00Z"}` sets an exact timezone-aware cutoff. Each run
+adds the completed current window to `total`, resets `current` to begin at the cutoff, and deletes
+the settled raw request, reservation, and ledger rows included in that summary. Active or queued
+requests are left untouched. A weekly cron job can therefore invoke `./llmctl summarize`; use
+`LLMRIO_API_URL` and `LLMRIO_API_KEY` when the command runs away from the service host.
+
+The admin-only `GET /admin/dashboard` endpoint exposes the same live data used by the TUI:
+current and total usage/throughput, output tokens per active generation second, ranked per-model
+token usage, NVML-backed GPU health, loaded model placements, and continuous-batching slot use.
 
 ## API surface
 

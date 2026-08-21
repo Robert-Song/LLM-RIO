@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
@@ -44,6 +45,10 @@ class QuotaUpdate(BaseModel):
         validation_alias=AliasChoices("limit_tokens", "balance_tokens"),
     )
     unlimited: bool = False
+
+
+class UsageSummarizeRequest(BaseModel):
+    through: datetime | None = None
 
 
 class GrantUpdate(BaseModel):

@@ -402,6 +402,30 @@ def doctor(
         raise typer.Exit(1)
 
 
+@app.command("summarize")
+def summarize_usage(
+    through: str | None = typer.Option(None, "--through", help="Timezone-aware ISO cutoff."),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Compact settled per-call usage into current-period and lifetime summaries."""
+    body = {"through": through} if through is not None else None
+    result = _request("POST", "/admin/usage/summarize", json_body=body)
+    if json_output:
+        _print(result)
+        return
+    deleted = result.get("deleted", {}) if isinstance(result, dict) else {}
+    typer.echo(
+        f"Summarized {int(result.get('summarized_requests', 0)):,} settled request(s) "
+        f"through {result.get('period_end')}."
+    )
+    typer.echo(
+        f"Deleted {int(deleted.get('inference_requests', 0)):,} request row(s), "
+        f"{int(deleted.get('quota_reservations', 0)):,} reservation row(s), and "
+        f"{int(deleted.get('quota_ledger', 0)):,} ledger row(s)."
+    )
+    typer.echo(f"Raw request rows remaining: {int(result.get('raw_requests_remaining', 0)):,}")
+
+
 @keys_app.command("list")
 def list_keys(json_output: bool = typer.Option(False, "--json")) -> None:
     """List every API key, including full recoverable key values."""

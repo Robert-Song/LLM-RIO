@@ -5,8 +5,10 @@ import json
 import os
 import platform
 import subprocess
+from collections.abc import Callable
 from dataclasses import asdict
 from itertools import combinations
+from typing import Any
 
 from llm_rio.domain import GpuDevice, MachineInventory
 
@@ -114,11 +116,7 @@ def discover_inventory(machine_id: str, managed_gpu_uuids: list[str]) -> Machine
                     raise InventoryError(
                         "MIG CUDA_VISIBLE_DEVICES entries are not supported by this release"
                     )
-                matches = [
-                    uuid
-                    for uuid in by_uuid
-                    if uuid == token or uuid.startswith(token)
-                ]
+                matches = [uuid for uuid in by_uuid if uuid == token or uuid.startswith(token)]
                 if len(matches) != 1:
                     raise InventoryError(
                         f"CUDA_VISIBLE_DEVICES entry {token!r} did not resolve to one GPU UUID"
@@ -128,9 +126,7 @@ def discover_inventory(machine_id: str, managed_gpu_uuids: list[str]) -> Machine
         configured = set(managed_gpu_uuids)
         missing = configured - set(by_uuid)
         if missing:
-            raise InventoryError(
-                f"Configured managed GPU UUIDs were not found: {sorted(missing)}"
-            )
+            raise InventoryError(f"Configured managed GPU UUIDs were not found: {sorted(missing)}")
         outside_allocation = configured - scheduler_visible
         if visible_value is not None and outside_allocation:
             raise InventoryError(
@@ -187,8 +183,18 @@ def candidate_gpu_sets(inventory: MachineInventory, gpu_count: int) -> tuple[tup
             candidates.append(tuple(device.uuid for device in group))
     device_by_uuid = {device.uuid: device for device in inventory.gpus}
     link_cost = {
-        "X": 0, "NV18": 1, "NV12": 2, "NV8": 3, "NV4": 4, "NV2": 5,
-        "NV1": 6, "PIX": 10, "PXB": 20, "PHB": 30, "NODE": 40, "SYS": 50,
+        "X": 0,
+        "NV18": 1,
+        "NV12": 2,
+        "NV8": 3,
+        "NV4": 4,
+        "NV2": 5,
+        "NV1": 6,
+        "PIX": 10,
+        "PXB": 20,
+        "PHB": 30,
+        "NODE": 40,
+        "SYS": 50,
     }
 
     def topology_cost(group: tuple[str, ...]) -> tuple[int, tuple[str, ...]]:
@@ -205,3 +211,100 @@ def candidate_gpu_sets(inventory: MachineInventory, gpu_count: int) -> tuple[tup
     candidates.sort(key=topology_cost)
     return tuple(candidates)
 
+
+def read_live_gpu_status(inventory: MachineInventory) -> list[dict[str, object]]:
+    """Sample nvidia-smi/NVML-style health metrics for the managed GPUs."""
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+    except Exception as exc:
+        return [
+            {
+                "index": device.index,
+                "uuid": device.uuid,
+                "name": device.name,
+                "total_vram_mib": device.total_vram_mib,
+                "available": False,
+                "error": str(exc),
+            }
+            for device in inventory.gpus
+        ]
+
+    def optional(call: Callable[..., Any], *args: object) -> Any:
+        try:
+            return call(*args)
+        except Exception:
+            return None
+
+    samples: list[dict[str, object]] = []
+    try:
+        for device in inventory.gpus:
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByUUID(device.uuid)
+                memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                temperature = optional(
+                    pynvml.nvmlDeviceGetTemperature,
+                    handle,
+                    pynvml.NVML_TEMPERATURE_GPU,
+                )
+                power_draw = optional(pynvml.nvmlDeviceGetPowerUsage, handle)
+                power_limit = optional(pynvml.nvmlDeviceGetEnforcedPowerLimit, handle)
+                fan_speed = optional(pynvml.nvmlDeviceGetFanSpeed, handle)
+                graphics_clock = optional(
+                    pynvml.nvmlDeviceGetClockInfo,
+                    handle,
+                    pynvml.NVML_CLOCK_GRAPHICS,
+                )
+                memory_clock = optional(
+                    pynvml.nvmlDeviceGetClockInfo,
+                    handle,
+                    pynvml.NVML_CLOCK_MEM,
+                )
+                compute_processes = optional(
+                    pynvml.nvmlDeviceGetComputeRunningProcesses,
+                    handle,
+                )
+                samples.append(
+                    {
+                        "index": device.index,
+                        "uuid": device.uuid,
+                        "name": device.name,
+                        "available": True,
+                        "gpu_utilization_percent": int(utilization.gpu),
+                        "memory_utilization_percent": int(utilization.memory),
+                        "used_vram_mib": int(memory.used // (1024 * 1024)),
+                        "free_vram_mib": int(memory.free // (1024 * 1024)),
+                        "total_vram_mib": int(memory.total // (1024 * 1024)),
+                        "temperature_c": int(temperature) if temperature is not None else None,
+                        "power_draw_w": round(float(power_draw) / 1000.0, 1)
+                        if power_draw is not None
+                        else None,
+                        "power_limit_w": round(float(power_limit) / 1000.0, 1)
+                        if power_limit is not None
+                        else None,
+                        "fan_speed_percent": int(fan_speed) if fan_speed is not None else None,
+                        "graphics_clock_mhz": int(graphics_clock)
+                        if graphics_clock is not None
+                        else None,
+                        "memory_clock_mhz": int(memory_clock) if memory_clock is not None else None,
+                        "compute_process_count": len(compute_processes)
+                        if isinstance(compute_processes, list)
+                        else None,
+                    }
+                )
+            except Exception as exc:
+                samples.append(
+                    {
+                        "index": device.index,
+                        "uuid": device.uuid,
+                        "name": device.name,
+                        "total_vram_mib": device.total_vram_mib,
+                        "available": False,
+                        "error": str(exc),
+                    }
+                )
+    finally:
+        pynvml.nvmlShutdown()
+    return samples

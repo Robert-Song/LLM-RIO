@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import uuid
 from dataclasses import replace
@@ -16,10 +17,11 @@ from llm_rio.api.schemas import (
     ModelRequestDefaultsUpdate,
     ProfileEditRequest,
     QuotaUpdate,
+    UsageSummarizeRequest,
 )
 from llm_rio.domain import Engine, PlacementProfile, RuntimeState, ServiceMode
 from llm_rio.errors import RioError
-from llm_rio.inventory import candidate_gpu_sets
+from llm_rio.inventory import candidate_gpu_sets, read_live_gpu_status
 from llm_rio.profiles import StoredProfile, profile_to_dict
 from llm_rio.security import issue_api_key, token_prefix
 
@@ -137,9 +139,24 @@ async def update_quota(
 
 @router.post("/admin/keys/{key_id}/usage/reset")
 async def reset_usage(key_id: str, request: Request, _: AdminPrincipal) -> dict[str, object]:
-    result = await request.app.state.database.reset_usage(key_id)
+    result: dict[str, object] | None = await request.app.state.database.reset_usage(key_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Key not found")
+    return result
+
+
+@router.post("/admin/usage/summarize")
+async def summarize_usage(
+    request: Request,
+    _: AdminPrincipal,
+    body: UsageSummarizeRequest | None = None,
+) -> dict[str, object]:
+    database = request.app.state.database
+    result: dict[str, object] = await database.summarize_usage(body.through if body else None)
+    await database.record_event(
+        "USAGE_SUMMARIZED",
+        payload={key: result[key] for key in ("period_start", "period_end", "deleted")},
+    )
     return result
 
 
@@ -539,6 +556,53 @@ async def _scheduler_status(request: Request) -> dict[str, object]:
             models.get(model_id, model_id): len(scheduler.queues.for_model(model_id))
             for model_id in scheduler.queues.pending_models()
         },
+    }
+
+
+@router.get("/admin/dashboard")
+async def dashboard(request: Request, _: AdminPrincipal) -> dict[str, object]:
+    database = request.app.state.database
+    usage, gpu_samples = await asyncio.gather(
+        database.dashboard_usage(),
+        asyncio.to_thread(read_live_gpu_status, request.app.state.inventory),
+    )
+    models = {str(model["id"]): str(model["nickname"]) for model in await database.list_models()}
+    scheduler = request.app.state.scheduler
+    placements_by_gpu: dict[str, list[dict[str, object]]] = {}
+    for worker in request.app.state.supervisor.workers.values():
+        if worker.state is RuntimeState.COLD:
+            continue
+        active_slots = len(worker.admitted_request_ids)
+        capacity = worker.profile.max_num_seqs
+        placement: dict[str, object] = {
+            "worker_id": worker.id,
+            "model_id": worker.model_id,
+            "model": models.get(worker.model_id, worker.model_id),
+            "engine": worker.profile.engine.value,
+            "state": worker.state.value,
+            "continuous_batching_slots": {
+                "active": active_slots,
+                "capacity": capacity,
+                "available": max(0, capacity - active_slots) if capacity is not None else None,
+            },
+            "max_batched_tokens": worker.profile.max_num_batched_tokens,
+            "outstanding_token_work": worker.outstanding_token_work,
+            "queued_requests": len(scheduler.queues.for_model(worker.model_id)),
+        }
+        for gpu_uuid in worker.gpu_uuids:
+            placements_by_gpu.setdefault(gpu_uuid, []).append(placement)
+
+    gpus: list[dict[str, object]] = []
+    for sample in gpu_samples:
+        item = dict(sample)
+        item["placements"] = placements_by_gpu.get(str(sample["uuid"]), [])
+        gpus.append(item)
+
+    return {
+        "generated_at": usage["generated_at"],
+        "mode": (await database.service_mode()).value,
+        "usage": usage,
+        "gpus": gpus,
     }
 
 

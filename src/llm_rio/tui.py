@@ -338,12 +338,17 @@ class RioTui(App[Path | None]):
         background: $surface;
     }
 
-    #dashboard-summary {
+    #dashboard-summary, #dashboard-usage {
         height: auto;
-        min-height: 12;
+        min-height: 8;
         padding: 1 2;
         border: round $accent;
         background: $surface;
+    }
+
+    #dashboard-models-table, #dashboard-gpus-table {
+        height: 12;
+        margin-bottom: 1;
     }
 
     #maintenance-output, #diagnostics-output, #service-output {
@@ -374,6 +379,8 @@ class RioTui(App[Path | None]):
 
     def __init__(self) -> None:
         super().__init__()
+        self.dashboard_payload: dict[str, Any] = {}
+        self._dashboard_refreshing = False
         self.key_records: list[dict[str, Any]] = []
         self.model_records: list[dict[str, Any]] = []
         self.profile_records: list[dict[str, Any]] = []
@@ -403,7 +410,16 @@ class RioTui(App[Path | None]):
                             "Refresh everything", id="dashboard-refresh", variant="primary"
                         )
                         yield Button("Start service", id="dashboard-start-service")
-                    yield Static("Connecting to the local control plane…", id="dashboard-summary")
+                    yield Static("Loading usage analytics…", id="dashboard-usage")
+                    yield Static("Model popularity", classes="page-title")
+                    yield DataTable(
+                        zebra_stripes=True, cursor_type="row", id="dashboard-models-table"
+                    )
+                    yield Static("Live GPU status", classes="page-title")
+                    yield DataTable(
+                        zebra_stripes=True, cursor_type="row", id="dashboard-gpus-table"
+                    )
+                    yield Static("Connecting to the control plane…", id="dashboard-summary")
                 with VerticalScroll(id="keys", classes="page"):
                     yield Static("Users", classes="page-title")
                     yield Static(
@@ -475,6 +491,9 @@ class RioTui(App[Path | None]):
                         yield Button("Refresh status", id="maintenance-refresh", variant="primary")
                         yield Button("Drain", id="maintenance-drain", variant="warning")
                         yield Button("Resume", id="maintenance-resume")
+                        yield Button(
+                            "Summarize usage", id="maintenance-summarize", variant="warning"
+                        )
                     yield Static("Status has not been loaded.", id="maintenance-output")
                 with VerticalScroll(id="system", classes="page"):
                     yield Static("Diagnostics & Service", classes="page-title")
@@ -502,7 +521,14 @@ class RioTui(App[Path | None]):
         self.query_one("#profiles-table", DataTable).add_columns(
             "#", "Active", "Engine", "GPUs / TP", "Context", "Max sequences"
         )
+        self.query_one("#dashboard-models-table", DataTable).add_columns(
+            "Model", "Current rank", "Current tokens", "Total rank", "Total tokens", "Share"
+        )
+        self.query_one("#dashboard-gpus-table", DataTable).add_columns(
+            "GPU", "Util", "VRAM", "Temp", "Power", "Model", "State", "Slots"
+        )
         self.run_worker(self.refresh_all(initial=True), name="initial-refresh", exit_on_error=False)
+        self.set_interval(2.0, self._refresh_dashboard_if_visible)
 
     def _set_status(self, message: str) -> None:
         self.query_one("#status-bar", Static).update(message)
@@ -552,14 +578,151 @@ class RioTui(App[Path | None]):
         elif page == "system":
             self.run_worker(self.refresh_service_info(), exit_on_error=False)
         else:
-            self.run_worker(self.refresh_all(), exit_on_error=False)
+            self.run_worker(self.refresh_dashboard(), exit_on_error=False)
 
     async def refresh_all(self, *, initial: bool = False) -> None:
         await self.refresh_keys(notify_error=not initial)
         await self.refresh_models(notify_error=not initial)
         await self.refresh_maintenance(notify_error=not initial)
+        await self.refresh_dashboard(notify_error=not initial)
         await self.refresh_service_info(notify_error=not initial)
         self._update_dashboard()
+
+    async def _refresh_dashboard_if_visible(self) -> None:
+        if self.query_one("#content", ContentSwitcher).current == "dashboard":
+            await self.refresh_dashboard(notify_error=False)
+
+    async def refresh_dashboard(self, *, notify_error: bool = True) -> None:
+        if self._dashboard_refreshing:
+            return
+        self._dashboard_refreshing = True
+        try:
+            ok, payload = await self._call(
+                "Refreshing live dashboard",
+                lambda: cli_api._request("GET", "/admin/dashboard"),
+                notify_error=notify_error,
+            )
+            if ok and isinstance(payload, dict):
+                self.dashboard_payload = payload
+                self._render_dashboard(payload)
+        finally:
+            self._dashboard_refreshing = False
+
+    def _render_dashboard(self, payload: dict[str, Any]) -> None:
+        usage = payload.get("usage")
+        usage_payload = usage if isinstance(usage, dict) else {}
+        current = usage_payload.get("current")
+        current_window = current if isinstance(current, dict) else {}
+        total = usage_payload.get("total")
+        total_window = total if isinstance(total, dict) else {}
+
+        def rate(window: dict[str, Any], key: str) -> str:
+            value = window.get(key)
+            return "-" if value is None else f"{float(value):,.2f}"
+
+        usage_summary = {
+            "Current window": (
+                f"{current_window.get('period_start', '-')} -> "
+                f"{current_window.get('period_end', '-')}"
+            ),
+            "Current tokens": f"{int(current_window.get('token_usage') or 0):,}",
+            "Current throughput": (f"{rate(current_window, 'tokens_per_minute')} tokens/min"),
+            "Current avg output": (
+                f"{rate(current_window, 'average_output_tokens_per_second')} tokens/s"
+            ),
+            "Current requests": f"{int(current_window.get('request_count') or 0):,}",
+            "Total tokens": f"{int(total_window.get('token_usage') or 0):,}",
+            "Total throughput": f"{rate(total_window, 'tokens_per_minute')} tokens/min",
+            "Total avg output": (
+                f"{rate(total_window, 'average_output_tokens_per_second')} tokens/s"
+            ),
+            "Total requests": f"{int(total_window.get('request_count') or 0):,}",
+        }
+        self.query_one("#dashboard-usage", Static).update(
+            Panel(Pretty(usage_summary, expand_all=True), title="Token usage")
+        )
+
+        popularity = usage_payload.get("model_popularity")
+        popularity_payload = popularity if isinstance(popularity, dict) else {}
+        current_models = popularity_payload.get("current")
+        total_models = popularity_payload.get("total")
+        current_records = (
+            [item for item in current_models if isinstance(item, dict)]
+            if isinstance(current_models, list)
+            else []
+        )
+        total_records = (
+            [item for item in total_models if isinstance(item, dict)]
+            if isinstance(total_models, list)
+            else []
+        )
+        current_by_id = {str(item.get("model_id")): item for item in current_records}
+        total_by_id = {str(item.get("model_id")): item for item in total_records}
+        model_ids = list(total_by_id)
+        model_ids.extend(model_id for model_id in current_by_id if model_id not in total_by_id)
+        model_ids.sort(
+            key=lambda model_id: (
+                int(total_by_id.get(model_id, {}).get("rank") or 10**9),
+                int(current_by_id.get(model_id, {}).get("rank") or 10**9),
+            )
+        )
+        model_table = self.query_one("#dashboard-models-table", DataTable)
+        model_table.clear(columns=False)
+        for model_id in model_ids:
+            current_item = current_by_id.get(model_id, {})
+            total_item = total_by_id.get(model_id, {})
+            model_table.add_row(
+                str(total_item.get("model") or current_item.get("model") or model_id),
+                str(current_item.get("rank") or "-"),
+                f"{int(current_item.get('token_usage') or 0):,}",
+                str(total_item.get("rank") or "-"),
+                f"{int(total_item.get('token_usage') or 0):,}",
+                f"{float(total_item.get('share') or 0) * 100:.1f}%",
+                key=model_id,
+            )
+
+        raw_gpus = payload.get("gpus")
+        gpus = (
+            [item for item in raw_gpus if isinstance(item, dict)]
+            if isinstance(raw_gpus, list)
+            else []
+        )
+        gpu_table = self.query_one("#dashboard-gpus-table", DataTable)
+        gpu_table.clear(columns=False)
+        for gpu in gpus:
+            raw_placements = gpu.get("placements")
+            placements = (
+                [item for item in raw_placements if isinstance(item, dict)]
+                if isinstance(raw_placements, list)
+                else []
+            )
+            models = ", ".join(str(item.get("model") or "-") for item in placements) or "idle"
+            states = ", ".join(str(item.get("state") or "-") for item in placements) or "idle"
+            slot_values: list[str] = []
+            for placement in placements:
+                raw_slots = placement.get("continuous_batching_slots")
+                slots = raw_slots if isinstance(raw_slots, dict) else {}
+                capacity = slots.get("capacity")
+                slot_values.append(
+                    f"{int(slots.get('active') or 0)}/{capacity if capacity is not None else '?'}"
+                )
+            used_vram = int(gpu.get("used_vram_mib") or 0)
+            total_vram = int(gpu.get("total_vram_mib") or 0)
+            temperature = gpu.get("temperature_c")
+            power = gpu.get("power_draw_w")
+            gpu_table.add_row(
+                f"{gpu.get('index', '?')}: {gpu.get('name', 'GPU')}",
+                f"{int(gpu.get('gpu_utilization_percent') or 0)}%"
+                if gpu.get("available")
+                else "N/A",
+                f"{used_vram:,}/{total_vram:,} MiB",
+                f"{temperature} degrees C" if temperature is not None else "-",
+                f"{float(power):.1f} W" if power is not None else "-",
+                models,
+                states,
+                ", ".join(slot_values) or "0/?",
+                key=str(gpu.get("uuid") or gpu.get("index")),
+            )
 
     async def refresh_keys(self, *, notify_error: bool = True) -> None:
         ok, records = await self._call(
@@ -1562,6 +1725,17 @@ class RioTui(App[Path | None]):
                 )
             await self.refresh_profiles()
 
+    async def _summarize_usage(self) -> None:
+        ok, payload = await self._call(
+            "Summarizing usage",
+            lambda: cli_api._request("POST", "/admin/usage/summarize"),
+        )
+        if ok and payload is not None:
+            self.query_one("#maintenance-output", Static).update(
+                Panel(Pretty(payload, expand_all=True), title="Usage summary")
+            )
+            self.notify("Settled usage records summarized.", timeout=8)
+
     async def _set_maintenance(self, mode: str) -> None:
         ok, payload = await self._call(
             "Updating maintenance mode",
@@ -1625,7 +1799,7 @@ class RioTui(App[Path | None]):
                 self._navigate(page)
             return
         if button_id == "dashboard-refresh":
-            self.run_worker(self.refresh_all(), exit_on_error=False)
+            self.run_worker(self.refresh_dashboard(), exit_on_error=False)
         elif button_id in {"dashboard-start-service", "system-start-service"}:
             self._open_start_service()
         elif button_id == "keys-refresh":
@@ -1728,6 +1902,14 @@ class RioTui(App[Path | None]):
 
         elif button_id == "maintenance-refresh":
             self.run_worker(self.refresh_maintenance(), exit_on_error=False)
+        elif button_id == "maintenance-summarize":
+            self._confirm(
+                "Summarize settled usage",
+                "Replace the current summary, extend lifetime totals, and delete settled "
+                "per-call rows through now?",
+                "Summarize",
+                self._summarize_usage,
+            )
         elif button_id == "maintenance-drain":
             self._confirm(
                 "Enter maintenance mode",

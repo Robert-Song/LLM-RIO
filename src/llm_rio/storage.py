@@ -21,6 +21,12 @@ from llm_rio.security import (
     hash_api_key,
     verify_api_key,
 )
+from llm_rio.usage_summary import (
+    summarize_usage_records,
+)
+from llm_rio.usage_summary import (
+    usage_dashboard as build_usage_dashboard,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +155,69 @@ CREATE TABLE IF NOT EXISTS inference_requests (
     admitted_at TEXT,
     completed_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS usage_summary_periods (
+    window TEXT PRIMARY KEY CHECK (window IN ('current', 'total')),
+    period_start TEXT NOT NULL,
+    period_end TEXT NOT NULL,
+    summarized_at TEXT NOT NULL,
+    request_count INTEGER NOT NULL CHECK (request_count >= 0),
+    successful_requests INTEGER NOT NULL CHECK (successful_requests >= 0),
+    failed_requests INTEGER NOT NULL CHECK (failed_requests >= 0),
+    reserved_tokens INTEGER NOT NULL CHECK (reserved_tokens >= 0),
+    charged_tokens INTEGER NOT NULL CHECK (charged_tokens >= 0),
+    prompt_tokens INTEGER NOT NULL CHECK (prompt_tokens >= 0),
+    completion_tokens INTEGER NOT NULL CHECK (completion_tokens >= 0),
+    output_tokens_for_rate INTEGER NOT NULL CHECK (output_tokens_for_rate >= 0),
+    active_output_seconds REAL NOT NULL CHECK (active_output_seconds >= 0),
+    timed_requests INTEGER NOT NULL CHECK (timed_requests >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS usage_summaries (
+    window TEXT NOT NULL CHECK (window IN ('current', 'total')),
+    account_id TEXT NOT NULL REFERENCES quota_accounts(id),
+    key_id TEXT NOT NULL REFERENCES api_keys(id),
+    model_id TEXT NOT NULL REFERENCES model_catalog(id),
+    request_count INTEGER NOT NULL CHECK (request_count >= 0),
+    successful_requests INTEGER NOT NULL CHECK (successful_requests >= 0),
+    failed_requests INTEGER NOT NULL CHECK (failed_requests >= 0),
+    reserved_tokens INTEGER NOT NULL CHECK (reserved_tokens >= 0),
+    charged_tokens INTEGER NOT NULL CHECK (charged_tokens >= 0),
+    prompt_tokens INTEGER NOT NULL CHECK (prompt_tokens >= 0),
+    completion_tokens INTEGER NOT NULL CHECK (completion_tokens >= 0),
+    output_tokens_for_rate INTEGER NOT NULL CHECK (output_tokens_for_rate >= 0),
+    active_output_seconds REAL NOT NULL CHECK (active_output_seconds >= 0),
+    timed_requests INTEGER NOT NULL CHECK (timed_requests >= 0),
+    first_completed_at TEXT,
+    last_completed_at TEXT,
+    PRIMARY KEY (window, account_id, key_id, model_id)
+);
+CREATE INDEX IF NOT EXISTS idx_usage_summaries_window_model
+ON usage_summaries(window, model_id);
+CREATE VIEW IF NOT EXISTS account_lifetime_usage AS
+SELECT account_id, SUM(charged_tokens) AS charged_tokens,
+       SUM(request_count) AS settled_requests
+  FROM (
+        SELECT account_id, COALESCE(actual_tokens, 0) AS charged_tokens,
+               1 AS request_count
+          FROM quota_reservations WHERE state = 'SETTLED'
+        UNION ALL
+        SELECT account_id, charged_tokens, request_count
+          FROM usage_summaries WHERE window = 'total'
+       )
+ GROUP BY account_id;
+CREATE VIEW IF NOT EXISTS key_lifetime_usage AS
+SELECT key_id, SUM(charged_tokens) AS charged_tokens,
+       SUM(request_count) AS settled_requests
+  FROM (
+        SELECT key_id, COALESCE(actual_tokens, 0) AS charged_tokens,
+               1 AS request_count
+          FROM quota_reservations WHERE state = 'SETTLED'
+        UNION ALL
+        SELECT key_id, charged_tokens, request_count
+          FROM usage_summaries WHERE window = 'total'
+       )
+ GROUP BY key_id;
 
 CREATE TABLE IF NOT EXISTS workers (
     id TEXT PRIMARY KEY,
@@ -394,16 +463,14 @@ class Database:
                    a.balance_tokens, a.limit_tokens, a.usage_baseline_tokens,
                    a.usage_reset_at, a.unlimited,
                    COALESCE((
-                       SELECT SUM(r.actual_tokens) FROM quota_reservations r
-                        WHERE r.account_id = a.id AND r.state = 'SETTLED'
+                       SELECT charged_tokens FROM account_lifetime_usage
+                        WHERE account_id = a.id
                    ), 0) AS lifetime_charged_tokens,
                    COALESCE((
-                       SELECT SUM(r.actual_tokens) FROM quota_reservations r
-                        WHERE r.key_id = k.id AND r.state = 'SETTLED'
+                       SELECT charged_tokens FROM key_lifetime_usage WHERE key_id = k.id
                    ), 0) AS key_lifetime_charged_tokens,
                    COALESCE((
-                       SELECT COUNT(*) FROM quota_reservations r
-                        WHERE r.account_id = a.id AND r.state = 'SETTLED'
+                       SELECT settled_requests FROM account_lifetime_usage WHERE account_id = a.id
                    ), 0) AS settled_requests
               FROM api_keys k JOIN quota_accounts a ON a.id = k.quota_account_id
              WHERE k.token_prefix NOT LIKE 'deleted-%'
@@ -529,8 +596,7 @@ class Database:
             totals = await (
                 await connection.execute(
                     """
-                SELECT COALESCE(SUM(actual_tokens), 0) AS charged_tokens
-                  FROM quota_reservations WHERE account_id = ? AND state = 'SETTLED'
+                SELECT charged_tokens FROM account_lifetime_usage WHERE account_id = ?
                 """,
                     (row["quota_account_id"],),
                 )
@@ -566,8 +632,7 @@ class Database:
             totals = await (
                 await connection.execute(
                     """
-                SELECT COALESCE(SUM(actual_tokens), 0) AS charged_tokens
-                  FROM quota_reservations WHERE account_id = ? AND state = 'SETTLED'
+                SELECT charged_tokens FROM account_lifetime_usage WHERE account_id = ?
                 """,
                     (row["quota_account_id"],),
                 )
@@ -974,6 +1039,15 @@ class Database:
                 )
         return reservation_id
 
+    async def summarize_usage(self, through: datetime | None = None) -> dict[str, Any]:
+        cutoff = through or datetime.now(UTC)
+        async with self.transaction() as connection:
+            return await summarize_usage_records(connection, through=cutoff)
+
+    async def dashboard_usage(self) -> dict[str, Any]:
+        async with self._transaction_lock:
+            return await build_usage_dashboard(self.connection, now=datetime.now(UTC))
+
     async def create_inference_request(
         self,
         *,
@@ -1133,9 +1207,8 @@ class Database:
         )
         totals = await self.fetchone(
             """
-            SELECT COALESCE(SUM(actual_tokens), 0) AS charged_tokens,
-                   COUNT(*) AS settled_requests
-              FROM quota_reservations WHERE account_id = ? AND state = 'SETTLED'
+            SELECT charged_tokens, settled_requests
+              FROM account_lifetime_usage WHERE account_id = ?
             """,
             (principal.quota_account_id,),
         )
