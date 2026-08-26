@@ -19,3 +19,4 @@ config.toml
 docs/
 scripts/
 tests/
+uv.lock
