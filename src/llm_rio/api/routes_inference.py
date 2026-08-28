@@ -15,7 +15,7 @@ from starlette.background import BackgroundTask
 
 from llm_rio.api.dependencies import CurrentPrincipal
 from llm_rio.api.schemas import ChatCompletionRequest
-from llm_rio.domain import CatalogState, Role, ServiceMode
+from llm_rio.domain import CatalogState, Engine, PlacementProfile, Role, ServiceMode
 from llm_rio.errors import MaintenanceError, RioError
 from llm_rio.queueing import QueuedRequest
 from llm_rio.security import Principal, hash_idempotency_key
@@ -71,11 +71,24 @@ def _conservative_prompt_tokens(value: Any) -> int:
 async def _available_models(request: Request, principal: Principal) -> list[dict[str, Any]]:
     database = request.app.state.database
     if principal.role is Role.USER:
-        return await database.list_models(principal.key_id)
+        return cast(list[dict[str, Any]], await database.list_models(principal.key_id))
     return [
         model
         for model in await database.list_models()
         if model["state"] == CatalogState.AVAILABLE.value
+    ]
+
+
+def _routable_profiles(
+    request: Request, profiles: list[PlacementProfile]
+) -> list[PlacementProfile]:
+    runtime = getattr(getattr(request.app.state, "scheduler", None), "kvcached", None)
+    if not getattr(runtime, "enabled", False):
+        return profiles
+    return [
+        profile
+        for profile in profiles
+        if profile.engine is Engine.VLLM and profile.memory_backend == "kvcached"
     ]
 
 
@@ -113,7 +126,14 @@ async def _resolve_model(request: Request, principal: Principal, nickname: str) 
             "This model needs verification on the current machine fingerprint",
             status_code=503,
         )
-    return model
+    if not _routable_profiles(request, profiles):
+        raise RioError(
+            "prism_profile_revalidation_required",
+            "This model needs a vLLM placement profile validated with kvcached",
+            status_code=503,
+            details={"required_memory_backend": "kvcached"},
+        )
+    return cast(dict[str, Any], model)
 
 
 _MODEL_DEFAULT_FIELDS = (
@@ -209,18 +229,28 @@ async def list_models(request: Request, principal: CurrentPrincipal) -> dict[str
     data: list[dict[str, Any]] = []
     for model in models:
         profiles = await request.app.state.profiles.for_model(model["id"])
+        routable_profiles = _routable_profiles(request, profiles)
+        state = (
+            "available"
+            if routable_profiles
+            else "prism_profile_revalidation_required"
+            if profiles
+            else "verification_required"
+        )
         data.append(
             {
                 "id": model["nickname"],
                 "object": "model",
                 "owned_by": "llm-rio",
-                "state": "available" if profiles else "verification_required",
-                "callable": bool(profiles),
+                "state": state,
+                "callable": bool(routable_profiles),
                 "revision": model["resolved_revision"],
                 "profile_ids": [profile.id for profile in profiles],
                 "placement_profiles": [
                     {
                         "id": profile.id,
+                        "engine": profile.engine.value,
+                        "memory_backend": profile.memory_backend,
                         "gpu_count": profile.gpu_count,
                         "tensor_parallel_size": profile.tensor_parallel_size,
                         "eligible_gpu_sets": profile.eligible_gpu_sets,
@@ -240,7 +270,7 @@ async def list_models(request: Request, principal: CurrentPrincipal) -> dict[str
 
 @router.get("/v1/me/usage")
 async def usage(request: Request, principal: CurrentPrincipal) -> dict[str, Any]:
-    return await request.app.state.database.usage(principal)
+    return cast(dict[str, Any], await request.app.state.database.usage(principal))
 
 
 @router.post("/v1/chat/completions", response_model=None)

@@ -7,9 +7,10 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from llm_rio.config import Settings
-from llm_rio.domain import MachineInventory, RuntimeState, ServiceMode
+from llm_rio.domain import CatalogState, MachineInventory, RuntimeState, ServiceMode
 from llm_rio.errors import MaintenanceError, RioError
 from llm_rio.planner import DrainPlacement, GreedyPlacementPlanner, QueuePressure, StartPlacement
+from llm_rio.prism import detect_kvcached
 from llm_rio.profiles import ProfileRepository
 from llm_rio.queueing import ModelQueues, QueuedRequest
 from llm_rio.storage import Database
@@ -48,6 +49,7 @@ class ResidencyScheduler:
         self.inventory = inventory
         self.profiles = profiles
         self.supervisor = supervisor
+        self.kvcached = detect_kvcached(settings.engines.kvcached_mode)
         self.queues = ModelQueues(
             settings.queue_capacity_per_model, settings.queue_capacity_per_tenant
         )
@@ -55,6 +57,10 @@ class ResidencyScheduler:
             wait_duration_seconds=settings.wait_duration_seconds,
             minimum_residency_seconds=settings.minimum_residency_seconds,
             fair_share_seconds=settings.fair_share_seconds,
+            prism_enabled=self.kvcached.enabled,
+            gpu_vram_mib={device.uuid: device.total_vram_mib for device in inventory.gpus},
+            reserved_vram_mib=settings.reserved_vram_mib,
+            prism_max_workers_per_gpu=settings.prism_max_workers_per_gpu,
         )
         self._state_lock = asyncio.Lock()
         self._event = asyncio.Event()
@@ -64,11 +70,67 @@ class ResidencyScheduler:
         self._validation_gpu_uuids: set[str] = set()
         self._last_arrival_at = datetime.now(UTC)
         self._maintenance_requested = False
+        self._prism_preload_model_ids: set[str] = set()
+        self._reported_incompatible_profiles: set[str] = set()
+        self._prism_configured = False
         supervisor.set_event_callback(self.worker_event)
 
     async def start(self) -> None:
         if self._task is None:
+            await self._configure_prism()
             self._task = asyncio.create_task(self._run(), name="residency-scheduler")
+
+    async def _configure_prism(self) -> None:
+        if self._prism_configured:
+            return
+        self._prism_configured = True
+        runtime = self.kvcached
+        if not runtime.enabled:
+            if self.settings.engines.kvcached_mode != "disabled":
+                await self.database.record_event(
+                    "PRISM_UNAVAILABLE",
+                    payload={"reason": runtime.reason},
+                )
+            return
+        await self.database.record_event(
+            "PRISM_ENABLED",
+            payload={
+                "kvcached_version": runtime.package_version,
+                "kvcached_revision": runtime.source_revision,
+                "vllm_version": runtime.vllm_version,
+                "officially_tested": runtime.officially_tested,
+                "max_workers_per_gpu": self.settings.prism_max_workers_per_gpu,
+            },
+        )
+        selectors = self.settings.prism_preload_models
+        if not selectors:
+            return
+        models = await self.database.list_models()
+        by_nickname = {str(model["nickname"]): model for model in models}
+        selected = (
+            models
+            if selectors == ["*"]
+            else [by_nickname[name] for name in selectors if name in by_nickname]
+        )
+        selected_nicknames = {str(model["nickname"]) for model in selected}
+        for nickname in selectors:
+            if nickname != "*" and nickname not in selected_nicknames:
+                await self.database.record_event(
+                    "PRISM_PRELOAD_SKIPPED",
+                    payload={"nickname": nickname, "reason": "model_not_found"},
+                )
+        for model in selected:
+            if model.get("state") == CatalogState.AVAILABLE.value and model.get("artifact_path"):
+                self._prism_preload_model_ids.add(str(model["id"]))
+            else:
+                await self.database.record_event(
+                    "PRISM_PRELOAD_SKIPPED",
+                    str(model["id"]),
+                    {
+                        "nickname": model["nickname"],
+                        "reason": "model_not_available",
+                    },
+                )
 
     async def close(self) -> None:
         self._closed = True
@@ -219,12 +281,37 @@ class ResidencyScheduler:
 
         await self._route_ready_work()
         pressures = self._pressures()
+        now = datetime.now(UTC)
+        pressured_model_ids = {pressure.model_id for pressure in pressures}
+        pressures.extend(
+            QueuePressure(
+                model_id=model_id,
+                requests=0,
+                estimated_tokens=1,
+                oldest_enqueued_at=now,
+                preload=True,
+            )
+            for model_id in sorted(self._prism_preload_model_ids - pressured_model_ids)
+        )
         profile_map = {
             pressure.model_id: await self.profiles.for_model(pressure.model_id)
             for pressure in pressures
         }
+        if self.kvcached.enabled:
+            for model_id, model_profiles in profile_map.items():
+                compatible = any(profile.memory_backend == "kvcached" for profile in model_profiles)
+                if (
+                    model_profiles
+                    and not compatible
+                    and model_id not in self._reported_incompatible_profiles
+                ):
+                    self._reported_incompatible_profiles.add(model_id)
+                    await self.database.record_event(
+                        "PRISM_PROFILE_REVALIDATION_REQUIRED",
+                        model_id,
+                    )
         actions = self.planner.plan(
-            now=datetime.now(UTC),
+            now=now,
             all_gpu_uuids={device.uuid for device in self.inventory.gpus}
             - self._validation_gpu_uuids,
             workers=list(self.supervisor.workers.values()),

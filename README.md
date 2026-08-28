@@ -25,7 +25,7 @@ cd LLM-RIO
 python3 -m pip install --user uv==0.12.1
 export PATH="$HOME/.local/bin:$PATH"
 uv venv --python 3.12
-uv sync --extra engine
+uv sync --extra engine --extra prism
 cp config.example.toml config.toml
 mkdir -p state models logs diagnostics
 chmod +x llmctl
@@ -41,6 +41,40 @@ number of additional admin keys. Local `llmctl` management commands automaticall
 active admin credential from the protected host database, so they do not require
 `LLMRIO_API_KEY`. Remote management still requires an explicitly supplied admin key.
 
+### Prism-style dynamic residency
+
+LLM-RIO can keep multiple vLLM engines ready on the same GPU set while kvcached allocates physical
+KV memory on demand. Set `engines.kvcached_mode = "required"` after installing the `prism`
+extra, and list model nicknames in `prism_preload_models` (or use `["*"]`). Preloaded engines
+remain READY after requests finish; Prism mode does not use vLLM sleep mode.
+
+Co-residency accepts only placement profiles created while kvcached mode was enabled. Validation
+measures each engine's idle and inference-peak footprints, and the planner sums the larger values against
+the strictest colocated profile's `gpu_memory_utilization` ceiling while retaining each worker's
+validated GPU headroom. This lets the planner choose a wider TP profile when a narrower placement
+would leave no usable elastic KV pool. Existing native profiles must therefore be revalidated after
+enabling Prism. `reserved_vram_mib` remains a host-wide floor, and
+`prism_max_workers_per_gpu` is an independent hard cap.
+
+kvcached has not officially validated vLLM 0.26.0. The `prism` extra pins upstream revision
+`60cad949` for its vLLM 0.26 and hybrid-cache fixes. LLM-RIO also supplies a narrowly scoped
+packed-KV tensor adapter for vLLM 0.26 MHA/GQA and linear-attention hybrids, and selects the
+legacy vLLM model runner patched by this kvcached revision. It uses 4 MiB kvcached pages for large
+KV blocks, immediately returns freed request pages instead of retaining prefix-cache pages, and
+normalizes a shared-pool free-count race to vLLM's ordinary scheduling-retry path. If that race
+occurs midway through a hybrid allocation, the adapter also rolls back the waiting request's partial
+group state before retrying. Run the isolated compatibility check before
+enabling it for the service:
+
+```bash
+uv run python -m llm_rio.prism_compat \
+  --model-a /path/to/model-a --model-b /path/to/model-b \
+  --gpu-uuid GPU-... --tensor-parallel-size 1
+```
+
+Use [KVCACHED_COMPATIBILITY.md](KVCACHED_COMPATIBILITY.md) to qualify new models, vLLM releases,
+kvcached revisions, and GPU architectures, or to remove the temporary vLLM 0.26 compatibility
+layer after upstream support is proven.
 
 ## Terminal administration
 

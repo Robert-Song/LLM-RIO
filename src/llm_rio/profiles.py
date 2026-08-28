@@ -56,6 +56,7 @@ def profile_from_dict(raw: dict[str, Any]) -> PlacementProfile:
             if raw["max_full_length_concurrency"] is None
             else float(raw["max_full_length_concurrency"])
         ),
+        memory_backend=str(raw.get("memory_backend", "native")),
     )
 
 
@@ -93,6 +94,7 @@ def profile_key(raw: dict[str, Any]) -> str:
             "eligible_gpu_sets",
             "chat_template_hash",
             "launch_args",
+            "memory_backend",
         )
     }
     return hashlib.sha256(json.dumps(identifying_fields, sort_keys=True).encode()).hexdigest()

@@ -55,6 +55,15 @@ fair_share_seconds = 7200
 # The permissive default is 0, so free GPUs can validate immediately.
 validation_idle_window_seconds = 0
 
+# Nicknames to load at service startup when Prism/kvcached is active. Use ["*"]
+# to preload every AVAILABLE model whose validated weights fit. An empty list
+# keeps demand-driven loading while retaining workers after their first use.
+prism_preload_models = []
+
+# Hard process-count guard per GPU in Prism mode. Static model-weight admission
+# is also bounded by each kvcached validation profile's measured idle VRAM.
+prism_max_workers_per_gpu = 2
+
 # Worker health polling deadline. Omitted by default, so unusually slow model
 # loads remain allowed while process exit and maintenance still interrupt them.
 # worker_startup_timeout_seconds = 900
@@ -125,6 +134,13 @@ enable_llama_cpp = false
 
 # Engine batched-token ceiling. Omitted by default.
 # max_num_batched_tokens = 8192
+
+# Prism-style co-residency mode. "auto" enables kvcached when installed;
+# "required" also makes a missing kvcached/vLLM package fatal. Because
+# kvcached is only officially tested through vLLM 0.24.0. The prism extra pins
+# a newer source revision with 0.26/hybrid fixes; keep this disabled until the
+# compatibility runner passes on the deployment's exact model and GPU shape.
+kvcached_mode = "disabled"
 
 [engines.environment]
 

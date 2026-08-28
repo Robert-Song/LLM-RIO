@@ -19,6 +19,7 @@ import httpx
 from llm_rio.config import Settings
 from llm_rio.domain import Engine, PlacementProfile, RuntimeState, WorkerPlacement
 from llm_rio.inventory import gpu_environment
+from llm_rio.prism import add_kvcached_vllm_flags, detect_kvcached
 from llm_rio.storage import Database, _now
 from llm_rio.tool_support import detect_vllm_parser_configuration
 
@@ -31,22 +32,25 @@ async def _terminate_worker_process_tree(
     process: asyncio.subprocess.Process, *, force: bool
 ) -> None:
     """Request termination of a worker and every engine process it owns."""
-    if process.returncode is not None:
-        return
-
     if os.name == "posix":
         try:
             killpg = getattr(os, "killpg", None)
             getpgid = getattr(os, "getpgid", None)
             if killpg is not None and getpgid is not None:
+                # Every engine is launched with start_new_session=True, so its
+                # PID remains the process-group ID after the API parent exits.
+                # That lets a final SIGKILL reap orphaned TP descendants.
+                process_group = getpgid(process.pid) if process.returncode is None else process.pid
                 termination_signal = (
                     getattr(signal, "SIGKILL", signal.SIGTERM) if force else signal.SIGTERM
                 )
-                killpg(getpgid(process.pid), termination_signal)
+                killpg(process_group, termination_signal)
                 return
         except (AttributeError, ProcessLookupError, OSError):
             # Preserve the direct-child fallback for platforms or launchers without a group.
             pass
+    if process.returncode is not None:
+        return
     with contextlib.suppress(ProcessLookupError, OSError):
         process.kill() if force else process.terminate()
 
@@ -74,6 +78,7 @@ class WorkerSupervisor:
         self._lock = asyncio.Lock()
         self._event_callback: WorkerEventCallback | None = None
         self.internal_api_key = f"rio_internal_{secrets.token_urlsafe(32)}"
+        self.kvcached = detect_kvcached(settings.engines.kvcached_mode)
 
     def set_event_callback(self, callback: WorkerEventCallback) -> None:
         self._event_callback = callback
@@ -97,9 +102,22 @@ class WorkerSupervisor:
     ) -> WorkerPlacement:
         if len(gpu_uuids) != profile.gpu_count or gpu_uuids not in profile.eligible_gpu_sets:
             raise WorkerLaunchError("placement does not match a validated GPU set")
+        if self.kvcached.enabled and (
+            profile.engine is not Engine.VLLM or profile.memory_backend != "kvcached"
+        ):
+            raise WorkerLaunchError("Prism mode accepts only vLLM profiles validated with kvcached")
         async with self._lock:
-            overlap = set(gpu_uuids) & self.occupied_gpu_uuids
-            if overlap:
+            requested_gpus = set(gpu_uuids)
+            overlapping_workers = [
+                worker
+                for worker in self.workers.values()
+                if worker.state is not RuntimeState.COLD
+                and bool(set(worker.gpu_uuids) & requested_gpus)
+            ]
+            overlap = {
+                gpu for worker in overlapping_workers for gpu in worker.gpu_uuids
+            } & requested_gpus
+            if overlap and not self._can_share_gpus(profile, gpu_uuids, overlapping_workers):
                 raise WorkerLaunchError(f"GPU UUIDs already owned: {sorted(overlap)}")
             worker_id = str(uuid.uuid4())
             port = self._allocate_port()
@@ -112,12 +130,10 @@ class WorkerSupervisor:
             self.workers[worker_id] = worker
             try:
                 command = self._command(worker, model_path, served_model_name)
+                environment = self._environment(worker)
             except BaseException:
                 self.workers.pop(worker_id, None)
                 raise
-            environment = gpu_environment(gpu_uuids, self.settings.engines.environment)
-            if worker.profile.engine is Engine.VLLM:
-                environment["VLLM_API_KEY"] = self.internal_api_key
             log_path: Path | None = None
             log_handle: Any | None = None
             worker_output: Any = asyncio.subprocess.DEVNULL
@@ -177,6 +193,43 @@ class WorkerSupervisor:
             if port not in used:
                 return port
         raise WorkerLaunchError("private worker port range is exhausted")
+
+    def _can_share_gpus(
+        self,
+        profile: PlacementProfile,
+        gpu_uuids: tuple[str, ...],
+        overlapping_workers: list[WorkerPlacement],
+    ) -> bool:
+        if (
+            not self.kvcached.enabled
+            or profile.engine is not Engine.VLLM
+            or profile.memory_backend != "kvcached"
+        ):
+            return False
+        if any(
+            worker.profile.engine is not Engine.VLLM or worker.profile.memory_backend != "kvcached"
+            for worker in overlapping_workers
+        ):
+            return False
+        for gpu_uuid in gpu_uuids:
+            colocated = sum(gpu_uuid in worker.gpu_uuids for worker in overlapping_workers)
+            if colocated >= self.settings.prism_max_workers_per_gpu:
+                return False
+        return True
+
+    def _environment(self, worker: WorkerPlacement) -> dict[str, str]:
+        environment = gpu_environment(worker.gpu_uuids, self.settings.engines.environment)
+        if worker.profile.engine is Engine.VLLM:
+            environment["VLLM_API_KEY"] = self.internal_api_key
+            if worker.profile.memory_backend == "kvcached":
+                if not self.kvcached.enabled:
+                    raise WorkerLaunchError(
+                        "kvcached placement profile cannot run while Prism mode is disabled"
+                    )
+                environment.update(
+                    self.kvcached.environment(pythonpath=environment.get("PYTHONPATH"))
+                )
+        return environment
 
     def _command(
         self, worker: WorkerPlacement, model_path: str, served_model_name: str
@@ -249,6 +302,12 @@ class WorkerSupervisor:
                 command.extend([flag, json.dumps(value, separators=(",", ":"), sort_keys=True)])
             elif value is not None:
                 command.extend([flag, str(value)])
+        if profile.memory_backend == "kvcached":
+            if not self.kvcached.enabled:
+                raise WorkerLaunchError(
+                    "kvcached placement profile cannot run while Prism mode is disabled"
+                )
+            add_kvcached_vllm_flags(command, self.kvcached)
         return command
 
     @staticmethod
@@ -309,9 +368,11 @@ class WorkerSupervisor:
             worker.outstanding_token_work = 0
             worker.state = RuntimeState.COLD
             process = self._processes.get(worker.id)
-        if process and process.returncode is None:
+        if process:
+            if process.returncode is None:
+                await _terminate_worker_process_tree(process, force=True)
+                await process.wait()
             await _terminate_worker_process_tree(process, force=True)
-            await process.wait()
         await self._persist(worker)
         log_path = self._log_paths.get(worker.id)
         await self.database.record_event(
@@ -400,13 +461,17 @@ class WorkerSupervisor:
             # after the process is gone.
             logger.exception("could not persist worker %s before stopping it", worker_id)
         try:
-            if process and process.returncode is None:
-                await _terminate_worker_process_tree(process, force=force)
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=5.0 if force else 30.0)
-                except TimeoutError:
-                    await _terminate_worker_process_tree(process, force=True)
-                    await process.wait()
+            if process:
+                if process.returncode is None:
+                    await _terminate_worker_process_tree(process, force=force)
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=5.0 if force else 30.0)
+                    except TimeoutError:
+                        await _terminate_worker_process_tree(process, force=True)
+                        await process.wait()
+                # vLLM's API parent may exit while TP workers remain in its
+                # session. Reap that exact group before declaring it COLD.
+                await _terminate_worker_process_tree(process, force=True)
         finally:
             async with self._lock:
                 worker.state = RuntimeState.COLD

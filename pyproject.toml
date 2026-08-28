@@ -28,6 +28,9 @@ dependencies = [
 
 [project.optional-dependencies]
 engine = ["vllm==0.26.0"]
+prism = [
+  "kvcached @ git+https://github.com/ovg-project/kvcached.git@60cad949389af6bbf1d65c4eddf325113df5a9eb",
+]
 dev = [
   "mypy==1.17.1",
   "pytest==8.4.1",
@@ -41,6 +44,14 @@ llm-rio = "llm_rio.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/llm_rio"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.uv]
+# kvcached imports Torch from setup.py without declaring it as a PEP 518
+# build dependency. Limit the isolation workaround to that source package.
+no-build-isolation-package = ["kvcached"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

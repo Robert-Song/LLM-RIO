@@ -94,6 +94,7 @@ class PlacementProfile:
     gpu_memory_utilization: float
     kv_cache_capacity_tokens: int | None
     max_full_length_concurrency: float | None
+    memory_backend: str = "native"
 
 
 @dataclass(slots=True)

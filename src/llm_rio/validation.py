@@ -19,6 +19,7 @@ import httpx
 from llm_rio.config import Settings
 from llm_rio.domain import Engine, MachineInventory, PlacementProfile
 from llm_rio.inventory import candidate_gpu_sets, gpu_environment
+from llm_rio.prism import add_kvcached_vllm_flags, detect_kvcached
 from llm_rio.runtime import ResidencyScheduler
 from llm_rio.tool_support import detect_vllm_parser_configuration
 
@@ -140,6 +141,7 @@ class ProfileValidator:
         self.settings = settings
         self.inventory = inventory
         self.scheduler = scheduler
+        self.kvcached = detect_kvcached(settings.engines.kvcached_mode)
 
     async def validate_vllm(
         self,
@@ -216,11 +218,10 @@ class ProfileValidator:
             command.extend(["--quantization", candidate.quantization])
         parsers = detect_vllm_parser_configuration(model_path)
         if parsers.tool_parser is not None:
-            command.extend(
-                ["--enable-auto-tool-choice", "--tool-call-parser", parsers.tool_parser]
-            )
+            command.extend(["--enable-auto-tool-choice", "--tool-call-parser", parsers.tool_parser])
         if parsers.reasoning_parser is not None:
             command.extend(["--reasoning-parser", parsers.reasoning_parser])
+        add_kvcached_vllm_flags(command, self.kvcached)
         gpu_indices = tuple(
             device.index for device in self.inventory.gpus if device.uuid in gpu_set
         )
@@ -233,6 +234,7 @@ class ProfileValidator:
         )
         environment = gpu_environment(gpu_set, self.settings.engines.environment)
         environment["VLLM_API_KEY"] = api_key
+        environment.update(self.kvcached.environment(pythonpath=environment.get("PYTHONPATH")))
         started = time.monotonic()
         with log_path.open("ab", buffering=0) as log_handle:
             try:
@@ -301,6 +303,7 @@ class ProfileValidator:
             gpu_memory_utilization=candidate.gpu_memory_utilization,
             kv_cache_capacity_tokens=kv_cache_capacity,
             max_full_length_concurrency=max_concurrency,
+            memory_backend=self.kvcached.memory_backend,
         )
 
     @staticmethod

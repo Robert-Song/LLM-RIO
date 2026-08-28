@@ -11,6 +11,8 @@ from pydantic_settings import (
     TomlConfigSettingsSource,
 )
 
+from llm_rio.prism import KVCachedMode
+
 
 class EngineSettings(BaseModel):
     vllm_executable: str = "vllm"
@@ -23,6 +25,9 @@ class EngineSettings(BaseModel):
     max_model_len: int | None = Field(default=None, gt=0)
     max_num_seqs: int | None = Field(default=None, gt=0)
     max_num_batched_tokens: int | None = Field(default=None, gt=0)
+    # disabled: ordinary exclusive vLLM workers; auto: use kvcached when installed;
+    # required: refuse startup unless kvcached and vLLM are both importable.
+    kvcached_mode: KVCachedMode = "disabled"
 
 
 class Settings(BaseSettings):
@@ -48,6 +53,8 @@ class Settings(BaseSettings):
     minimum_residency_seconds: float = Field(default=0.0, ge=0)
     fair_share_seconds: float = Field(default=7200.0, gt=0)
     validation_idle_window_seconds: float = Field(default=0.0, ge=0)
+    prism_preload_models: list[str] = Field(default_factory=list)
+    prism_max_workers_per_gpu: int = Field(default=2, ge=1)
     worker_startup_timeout_seconds: float | None = Field(default=None, gt=0)
     worker_drain_watchdog_seconds: float | None = Field(default=None, gt=0)
     worker_request_timeout_seconds: float | None = Field(default=None, gt=0)
@@ -83,6 +90,12 @@ class Settings(BaseSettings):
     def validate_settings(self) -> Settings:
         if self.worker_port_start > self.worker_port_end:
             raise ValueError("worker_port_start must not exceed worker_port_end")
+        preload = [name.strip() for name in self.prism_preload_models]
+        if any(not name for name in preload):
+            raise ValueError("prism_preload_models cannot contain blank nicknames")
+        if "*" in preload and len(preload) != 1:
+            raise ValueError("'*' must be the only prism_preload_models entry")
+        self.prism_preload_models = preload
         return self
 
     def ensure_directories(self) -> None:
