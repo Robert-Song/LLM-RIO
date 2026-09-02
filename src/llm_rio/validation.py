@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.metadata
 import json
 import os
@@ -398,22 +399,52 @@ class ProfileValidator:
         return completion_tokens / elapsed, tuple(peak)
 
     @staticmethod
-    async def _terminate(process: asyncio.subprocess.Process) -> None:
-        if process.returncode is not None:
-            return
+    def _process_group_exists(process_group: int) -> bool:
         try:
-            pgid = os.getpgid(process.pid)
-            os.killpg(pgid, signal.SIGTERM)
-        except (ProcessLookupError, OSError):
-            process.terminate()
-        try:
-            await asyncio.wait_for(process.wait(), timeout=10.0)
-        except TimeoutError:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    @classmethod
+    async def _terminate(cls, process: asyncio.subprocess.Process) -> None:
+        # Validation engines are launched with start_new_session=True. The
+        # launch PID is therefore also the stable process-group ID, even after
+        # the API parent exits and TP workers are reparented to init.
+        process_group = process.pid
+        if os.name == "posix":
             try:
-                pgid = os.getpgid(process.pid)
-                os.killpg(pgid, signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                process.kill()
+                os.killpg(process_group, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                if process.returncode is None:
+                    process.terminate()
+        elif process.returncode is None:
+            process.terminate()
+
+        if process.returncode is None:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(process.wait(), timeout=10.0)
+
+        if os.name == "posix":
+            for _ in range(50):
+                if not cls._process_group_exists(process_group):
+                    return
+                await asyncio.sleep(0.1)
+            try:
+                os.killpg(process_group, signal.SIGKILL)
+            except ProcessLookupError:
+                return
+            if process.returncode is None:
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(process.wait(), timeout=5.0)
+            return
+
+        if process.returncode is None:
+            process.kill()
             await process.wait()
 
     @staticmethod

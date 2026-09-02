@@ -10,9 +10,10 @@ cluster and never share queues.
 
 ## Status
 
-This repository contains the greenfield control-plane implementation and an external-HPC
-acceptance suite. Hardware execution and endpoint testing are intentionally deferred until the
-target HPC environment and a test API key are available.
+This repository contains the control-plane implementation and external-HPC acceptance suite.
+The kvcached compatibility path and three-model resident fallback have been exercised on the
+target two-GPU host; see [PRISM_RESEARCH_FEASIBILITY.md](PRISM_RESEARCH_FEASIBILITY.md) for the measured result and the remaining
+full-Prism boundary.
 
 ## Manual start on the target Linux host
 
@@ -41,22 +42,28 @@ number of additional admin keys. Local `llmctl` management commands automaticall
 active admin credential from the protected host database, so they do not require
 `LLMRIO_API_KEY`. Remote management still requires an explicitly supplied admin key.
 
-### Prism-style dynamic residency
+### kvcached dynamic KV co-residency
 
 LLM-RIO can keep multiple vLLM engines ready on the same GPU set while kvcached allocates physical
-KV memory on demand. Set `engines.kvcached_mode = "required"` after installing the `prism`
-extra, and list model nicknames in `prism_preload_models` (or use `["*"]`). Preloaded engines
-remain READY after requests finish; Prism mode does not use vLLM sleep mode.
+KV memory on demand. This is **not** the full Prism system: it does not virtualize model weights or
+reuse one preinitialized worker for different models.
+See [PRISM_RESEARCH_FEASIBILITY.md](PRISM_RESEARCH_FEASIBILITY.md) for the upstream-code audit,
+measured activation breakdown, and three-model fallback demonstration.
+
+Set `engines.kvcached_mode = "required"` after installing the legacy-named `prism` extra, and
+list model nicknames in `prism_preload_models` (or use `["*"]`). The names remain for
+compatibility. Preloaded vLLM engines stay READY; this mode does not use vLLM sleep mode.
+
 
 Co-residency accepts only placement profiles created while kvcached mode was enabled. Validation
 measures each engine's idle and inference-peak footprints, and the planner sums the larger values against
 the strictest colocated profile's `gpu_memory_utilization` ceiling while retaining each worker's
 validated GPU headroom. This lets the planner choose a wider TP profile when a narrower placement
 would leave no usable elastic KV pool. Existing native profiles must therefore be revalidated after
-enabling Prism. `reserved_vram_mib` remains a host-wide floor, and
+enabling kvcached co-residency. `reserved_vram_mib` remains a host-wide floor, and
 `prism_max_workers_per_gpu` is an independent hard cap.
 
-kvcached has not officially validated vLLM 0.26.0. The `prism` extra pins upstream revision
+kvcached has not officially validated vLLM 0.26.0. The legacy-named `prism` extra pins upstream revision
 `60cad949` for its vLLM 0.26 and hybrid-cache fixes. LLM-RIO also supplies a narrowly scoped
 packed-KV tensor adapter for vLLM 0.26 MHA/GQA and linear-attention hybrids, and selects the
 legacy vLLM model runner patched by this kvcached revision. It uses 4 MiB kvcached pages for large
@@ -95,6 +102,16 @@ All command-oriented workflows remain available for scripts and runbooks. For ex
 `./llmctl keys list`, `./llmctl models review MODEL`, `./llmctl maintenance drain`,
 `./llmctl doctor`, and `./llmctl serve` behave as before. `./llmctl interactive` is an explicit
 alias for opening the TUI.
+
+New model registration automatically resolves, downloads, inspects, and hardware-validates the
+model. Add `--wait` to print each state transition until the model is available or fails:
+
+```bash
+./llmctl models add qwen3-8b Qwen/Qwen3-8B --grant-to teamA --wait
+```
+
+The same asynchronous workflow starts with `POST /staff/models` and is observed with
+`GET /staff/model-jobs/{job_id}`.
 
 Settled per-call usage can be compacted from the TUI Maintenance page or with:
 

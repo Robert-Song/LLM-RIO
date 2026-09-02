@@ -92,7 +92,7 @@ def detect_kvcached(mode: KVCachedMode) -> KVCachedRuntime:
     except importlib.metadata.PackageNotFoundError as exc:
         if mode == "required":
             raise KVCachedCompatibilityError(
-                "Prism mode requires kvcached; install the 'prism' optional dependency"
+                "kvcached mode requires kvcached; install the legacy-named 'prism' extra"
             ) from exc
         return KVCachedRuntime(False, None, None, False, "kvcached_not_installed")
     try:
@@ -100,7 +100,7 @@ def detect_kvcached(mode: KVCachedMode) -> KVCachedRuntime:
     except importlib.metadata.PackageNotFoundError as exc:
         if mode == "required":
             raise KVCachedCompatibilityError(
-                "Prism mode requires vLLM in the same environment as kvcached"
+                "kvcached mode requires vLLM in the same environment as kvcached"
             ) from exc
         return KVCachedRuntime(False, package_version, None, False, "vllm_not_installed")
 

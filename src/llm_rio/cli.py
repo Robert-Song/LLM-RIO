@@ -6,6 +6,7 @@ import os
 import platform
 import shutil
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -266,6 +267,40 @@ def _print_model_job(job: dict[str, Any]) -> None:
         f"  3. If this model will not be fixed, disable it: "
         f"./llmctl models disable {job.get('nickname')}"
     )
+
+
+def _wait_for_model_job(
+    job_id: str,
+    *,
+    poll_seconds: float,
+    timeout_seconds: float | None,
+) -> dict[str, Any]:
+    """Poll a registration job while printing each newly observed stage."""
+    started = time.monotonic()
+    previous: tuple[object, object, object] | None = None
+    while True:
+        job = _request("GET", f"/staff/model-jobs/{job_id}")
+        if not isinstance(job, dict):
+            raise click.ClickException("The server returned an invalid registration job.")
+        state = job.get("state")
+        marker = (state, job.get("catalog_state"), job.get("stage"))
+        if marker != previous:
+            elapsed = time.monotonic() - started
+            typer.echo(f"[{elapsed:7.1f}s] {marker[0]} / {marker[1]} / {marker[2]}")
+            previous = marker
+        if state == "COMPLETED":
+            typer.echo(f"Model '{job.get('nickname')}' is validated and available.")
+            return job
+        if state == "FAILED":
+            _print_model_job(job)
+            raise click.ClickException(
+                f"Registration job {job_id} failed at stage {job.get('stage')}."
+            )
+        if timeout_seconds is not None and time.monotonic() - started >= timeout_seconds:
+            raise click.ClickException(
+                f"Timed out waiting for registration job {job_id}; it is still running."
+            )
+        time.sleep(poll_seconds)
 
 
 def _print_model_records(records: list[dict[str, Any]]) -> None:
@@ -568,8 +603,20 @@ def add_model(
     grant_to: list[str] | None = typer.Option(
         None, "--grant-to", help="API-key nickname or full API key."
     ),
+    wait: bool = typer.Option(
+        False,
+        "--wait/--no-wait",
+        help="Follow automatic download and hardware validation until it finishes.",
+    ),
+    poll_seconds: float = typer.Option(2.0, "--poll-seconds", min=0.1),
+    timeout_seconds: float | None = typer.Option(
+        None,
+        "--timeout-seconds",
+        min=1.0,
+        help="Stop following after this many seconds; the server-side job continues.",
+    ),
 ) -> None:
-    """Register a model and optionally grant it to named API keys."""
+    """Register a model; the server downloads and validates it automatically."""
     result = _request(
         "POST",
         "/staff/models",
@@ -582,7 +629,14 @@ def add_model(
     )
     typer.echo(f"Registration started for '{nickname}'.")
     typer.echo(f"Registration job: {result['job_id']}")
-    typer.echo(f"Check progress: ./llmctl models review {nickname}")
+    if wait:
+        _wait_for_model_job(
+            str(result["job_id"]),
+            poll_seconds=poll_seconds,
+            timeout_seconds=timeout_seconds,
+        )
+    else:
+        typer.echo(f"Check progress: ./llmctl models review {nickname}")
 
 
 @models_app.command("profile-clone")

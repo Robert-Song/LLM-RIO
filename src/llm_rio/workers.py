@@ -105,7 +105,9 @@ class WorkerSupervisor:
         if self.kvcached.enabled and (
             profile.engine is not Engine.VLLM or profile.memory_backend != "kvcached"
         ):
-            raise WorkerLaunchError("Prism mode accepts only vLLM profiles validated with kvcached")
+            raise WorkerLaunchError(
+                "kvcached mode accepts only vLLM profiles validated with kvcached"
+            )
         async with self._lock:
             requested_gpus = set(gpu_uuids)
             overlapping_workers = [
@@ -224,7 +226,7 @@ class WorkerSupervisor:
             if worker.profile.memory_backend == "kvcached":
                 if not self.kvcached.enabled:
                     raise WorkerLaunchError(
-                        "kvcached placement profile cannot run while Prism mode is disabled"
+                        "kvcached placement profile cannot run while kvcached mode is disabled"
                     )
                 environment.update(
                     self.kvcached.environment(pythonpath=environment.get("PYTHONPATH"))
@@ -305,7 +307,7 @@ class WorkerSupervisor:
         if profile.memory_backend == "kvcached":
             if not self.kvcached.enabled:
                 raise WorkerLaunchError(
-                    "kvcached placement profile cannot run while Prism mode is disabled"
+                    "kvcached placement profile cannot run while kvcached mode is disabled"
                 )
             add_kvcached_vllm_flags(command, self.kvcached)
         return command
