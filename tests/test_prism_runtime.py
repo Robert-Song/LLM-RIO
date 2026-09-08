@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -11,6 +11,7 @@ from llm_rio.kvcached_vllm_compat import (
     _install_persistent_weight_backup_shim,
 )
 from llm_rio.planner import (
+    DrainPlacement,
     GreedyPlacementPlanner,
     QueuePressure,
     StartPlacement,
@@ -204,6 +205,57 @@ def _profile(
         max_full_length_concurrency=1.0,
         memory_backend="kvcached",
     )
+
+
+def test_prism_cache_pressure_evicts_least_recently_used_sleeping_worker() -> None:
+    now = datetime.now(UTC)
+    planner = GreedyPlacementPlanner(
+        wait_duration_seconds=1,
+        minimum_residency_seconds=0,
+        fair_share_seconds=60,
+        prism_enabled=True,
+        gpu_vram_mib={"GPU-0": 97_887},
+        reserved_vram_mib=2048,
+        prism_max_workers_per_gpu=2,
+        prism_max_cached_workers_per_gpu=2,
+    )
+    older = WorkerPlacement(
+        id="older-cache-entry",
+        profile=_profile("model-a", ("GPU-0",), (30_000,)),
+        gpu_uuids=("GPU-0",),
+        port=18000,
+        state=RuntimeState.SLEEPING,
+    )
+    older.last_demand_at = now - timedelta(minutes=2)
+    newer = WorkerPlacement(
+        id="newer-cache-entry",
+        profile=_profile("model-b", ("GPU-0",), (30_000,)),
+        gpu_uuids=("GPU-0",),
+        port=18001,
+        state=RuntimeState.SLEEPING,
+    )
+    newer.last_demand_at = now - timedelta(minutes=1)
+    incoming = _profile("model-c", ("GPU-0",), (30_000,))
+
+    actions = planner.plan(
+        now=now,
+        all_gpu_uuids={"GPU-0"},
+        workers=[newer, older],
+        pressures=[
+            QueuePressure(
+                model_id="model-c",
+                requests=1,
+                estimated_tokens=128,
+                oldest_enqueued_at=now - timedelta(seconds=2),
+            )
+        ],
+        profiles={"model-c": [incoming]},
+    )
+
+    assert len(actions) == 1
+    assert isinstance(actions[0], DrainPlacement)
+    assert actions[0].worker_id == older.id
+    assert actions[0].reason == "prism_ram_cache_lru"
 
 
 def test_prism_falls_back_to_tp_profile_that_preserves_elastic_headroom() -> None:

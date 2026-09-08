@@ -104,7 +104,7 @@ active inference worker.
 The restored implementation is committed on branch `prism`. Its current
 acceptance gates pass:
 
-- 25 automated tests in the isolated Prism branch.
+- 26 automated tests in the isolated Prism branch.
 - Targeted Ruff checks pass on the Prism runtime, preflight, and demo drivers;
   the repository's existing unrelated lint findings are not counted as this gate.
 - The real vLLM 0.26 worker bootstrap reports all required compatibility
