@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 DEMO_PORT = 3737
 PROTECTED_PORT = 8002
 MIN_AVAILABLE_RAM_GIB = 220.0
+MIN_READY_AVAILABLE_RAM_GIB = 64.0
 TARGET_NICKNAME = "qwen3-8b-q8"
 TARGET_REPOSITORY = "Qwen/Qwen3-8B-FP8"
 REQUIRED_PRELOADS = Counter(
@@ -332,11 +333,16 @@ def check_database(
 
 def check_host(checks: Checks, phase: str) -> None:
     ram = available_ram_gib()
-    if ram >= MIN_AVAILABLE_RAM_GIB:
+    required_ram = (
+        MIN_AVAILABLE_RAM_GIB
+        if phase == "before-start"
+        else MIN_READY_AVAILABLE_RAM_GIB
+    )
+    if ram >= required_ram:
         checks.passed(f"host has {ram:.1f} GiB available RAM")
     else:
         checks.failed(
-            f"host has only {ram:.1f} GiB available RAM; need {MIN_AVAILABLE_RAM_GIB:.0f} GiB"
+            f"host has only {ram:.1f} GiB available RAM; need {required_ram:.0f} GiB"
         )
 
     rows = gpu_rows()

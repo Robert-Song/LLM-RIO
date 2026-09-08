@@ -28,6 +28,21 @@ def test_valid_cache_profile_requires_measured_ram_transition() -> None:
     assert not preflight.valid_cache_profile(profile)
 
 
+def test_host_ram_threshold_accounts_for_cached_ready_workers(monkeypatch) -> None:
+    monkeypatch.setattr(preflight, "available_ram_gib", lambda: 100.0)
+    monkeypatch.setattr(
+        preflight, "gpu_rows", lambda: [("GPU-0", 0.0, 0.0), ("GPU-1", 0.0, 0.0)]
+    )
+
+    before_start = preflight.Checks()
+    preflight.check_host(before_start, "before-start")
+    assert before_start.failures
+
+    ready = preflight.Checks()
+    preflight.check_host(ready, "ready")
+    assert ready.failures == []
+
+
 def test_ready_service_accepts_complete_sleeping_cache(monkeypatch) -> None:
     status = {
         "prism": {"kvcached": True, "weight_cache": "host_ram"},
