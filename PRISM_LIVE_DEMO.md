@@ -102,34 +102,41 @@ active inference worker.
 ## Verification status on this two-GPU host
 
 The restored implementation is committed on branch `prism`. Its current
-non-GPU acceptance gates pass:
+acceptance gates pass:
 
-- 47 retained and restored automated tests.
-- 19 focused Prism runtime/transition tests.
-- Ruff on every restored or changed Python file.
-- The real vLLM 0.26 worker bootstrap reports all six required compatibility
+- 25 automated tests in the isolated Prism branch.
+- Targeted Ruff checks pass on the Prism runtime, preflight, and demo drivers;
+  the repository's existing unrelated lint findings are not counted as this gate.
+- The real vLLM 0.26 worker bootstrap reports all required compatibility
   shims installed.
-- An isolated no-preload control plane served correctly on port 3737 and shut
-  down cleanly.
+- The formal ready gate passed against four sleeping host-RAM workers.
+- A fresh end-to-end two-GPU rehearsal passed on port 3737 on Sep. 8, 2026.
 
-The full GPU rehearsal must be rerun before presenting. The numbers below are
-prior successful Sep. 2 rehearsal evidence, not a claim about the currently
-stopped service:
-
-| Prior rehearsal behavior | Observed result |
+| Sep. 8 rehearsal behavior | Observed result |
 |---|---:|
-| Six-call Qwen/Gemma/Laguna sequence | 3.065-4.386 s end to end; all HTTP 200 |
-| Switch queue/activation wait | 1.169-2.410 s |
-| Complete switching run | 27.38 s |
-| Qwen burst | 40/40 requests; 17,236 completion tokens; zero errors |
-| Qwen burst routing | Exact 20/20 split across the two TP=1 workers |
-| Burst wall time | 22.62 s |
+| Six-call Qwen/Gemma/Laguna sequence | 3.038-4.279 s end to end; 6/6 HTTP 200 |
+| Switch queue/activation wait | 1.196-3.010 s |
+| Complete switching run | 24.64 s |
+| Qwen burst | 40/40 requests; 3,795 completion tokens; zero errors |
+| Qwen burst routing | Both TP=1 workers served: 37/3 requests |
+| Burst wall time | 10.28 s |
+| Fresh Qwen3-8B-FP8 onboarding | 271.2 s to `AVAILABLE`; TP=1 on both GPUs plus TP=2 validated |
+| New-model first runtime response | 18.61 s while its one-time warm worker was constructed |
+| New-model RAM-cache hit | 0.558 s end to end; 0.386 s measured activation |
 
-A preserved Gemma worker log also demonstrates the intended mechanism: the
-first RAM offload took about 9.8 s, RAM wake took about 0.83 s, and later
-sleep/wake cycles reused the same process and host copy. A separate restart
-storm failed because its worker lacked the packed-KV compatibility shim; the
-restored branch now installs that shim and tests its bootstrap marker.
+Cold preload construction cached Laguna, Gemma, and two independent Qwen
+workers in host RAM. Their first offloads took 10.612-33.146 seconds. After
+the persistent host copies existed, measured activations were 0.777-2.011
+seconds and repeated offloads took 0.144-0.263 seconds. The dynamically added
+Qwen3-8B worker then became a fifth host-RAM entry and woke without rereading
+its checkpoint.
+
+The rehearsal also found and fixed a worker-launch issue: an absolute vLLM
+path did not expose the sibling `ninja` helper needed by FlashInfer JIT. Engine
+and validation launches now prepend the configured executable directory to
+`PATH`, with a regression test. Failed workers now clear their dead PID before
+persistence, and startup recovery also clears legacy COLD/PID residue; the real
+rehearsal database recovery reduced stale records from three to zero.
 
 DeepSeek-V4-Flash-0731 is not part of the live switching sequence. On this
 SM120 host, vLLM 0.26 reaches an upstream sparse-MLA backend incompatibility.
@@ -315,9 +322,10 @@ blueprint and a JSON evidence report under `diagnostics/`.
 > Prism is not slowing an active decode by moving its weights. It changes
 > residency only at safe request boundaries.
 
-The prior rehearsal produced 17,236 completion tokens with zero errors and
-split all 40 requests exactly 20/20. Present the live values; label the prior
-numbers clearly if you need them as a fallback.
+The Sep. 8 rehearsal completed 40/40 requests, produced 3,795 completion
+tokens, used both TP=1 workers (37/3), and finished in 10.28 seconds. The
+uneven split is valid: both workers served, but the first-ready replica safely
+accepted most of this short burst.
 
 ### Act 3 — rapid model switching: about 3 minutes
 
@@ -353,20 +361,26 @@ In one sentence, explain why a sleeping model can wake faster than a cold model.
 
 After each response, point to `last_activation_seconds`, `weight_storage`, and
 the corresponding `nvidia-smi` change. Do not promise exactly 1.5 seconds for
-the whole HTTP call. Prior evidence showed roughly one-to-two-second activation
-and 3.065-4.386-second end-to-end calls; use the newly rehearsed measurements
-for the live claim.
+the whole HTTP call. The Sep. 8 run measured 0.777-2.011-second large-model
+activations and 3.038-4.279-second end-to-end calls across all six switches.
+Use the live values if they differ.
 
 ### Return to Act 1: 45-60 seconds
 
 **Action:** Return to the Models/Jobs page. When `qwen3-8b-q8` is `AVAILABLE`,
-send it one short chat request through the normal port-3737 client.
+confirm its one-time warm worker is `SLEEPING`, then send one short chat through
+the normal port-3737 client. Disable Qwen thinking for a short visible answer:
+
+```json
+{"chat_template_kwargs":{"enable_thinking":false}}
+```
 
 **Say:**
 
 > The model became callable only after every validation gate passed. LLM-RIO
-> also requested a one-time warm placement, so this request can use a validated
-> RAM-cached worker rather than an untested cold engine.
+> requested a one-time warm placement; after that worker slept, the Sep. 8
+> rehearsal restored its weights from RAM in 0.386 seconds and completed the
+> visible chat in 0.558 seconds.
 
 If the job is still validating, show its current stage and say that this is the
 intended asynchronous behavior. Finish with the already-completed switching

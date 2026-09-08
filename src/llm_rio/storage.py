@@ -1270,7 +1270,10 @@ class Database:
         for reservation in reservations:
             await self.release_reservation(reservation["id"], "service_restarted")
         await self.execute(
-            "UPDATE workers SET state = 'COLD', pid = NULL, updated_at = ? WHERE state != 'COLD'",
+            """
+            UPDATE workers SET state = 'COLD', pid = NULL, updated_at = ?
+             WHERE state != 'COLD' OR pid IS NOT NULL
+            """,
             (_now(),),
         )
         await self.execute(

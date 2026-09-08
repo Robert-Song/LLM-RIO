@@ -432,6 +432,8 @@ class WorkerSupervisor:
                 await _terminate_worker_process_tree(process, force=True)
                 await process.wait()
             await _terminate_worker_process_tree(process, force=True)
+        async with self._lock:
+            worker.process_pid = None
         await self._persist(worker)
         log_path = self._log_paths.get(worker.id)
         await self.database.record_event(

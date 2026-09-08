@@ -152,6 +152,7 @@ async def test_worker_waits_for_active_request_before_sleeping() -> None:
 
 async def test_worker_transition_failure_fails_closed_without_deadlock() -> None:
     worker = _ready_worker()
+    worker.process_pid = 43123
     supervisor, database = _supervisor(worker)
 
     async def failed_post(
@@ -167,6 +168,7 @@ async def test_worker_transition_failure_fails_closed_without_deadlock() -> None
     await asyncio.wait_for(supervisor.sleep(worker.id), timeout=1.0)
 
     assert worker.state is RuntimeState.COLD
+    assert worker.process_pid is None
     assert not worker.host_weights_cached
     failure = next(event for event in database.events if event[0] == "WORKER_FAILED")
     assert failure[2]["reason"] == "weight_offload_failed:RuntimeError"
