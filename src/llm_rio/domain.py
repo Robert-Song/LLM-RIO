@@ -31,6 +31,9 @@ class RuntimeState(StrEnum):
     LOADING = "LOADING"
     READY = "READY"
     DRAINING = "DRAINING"
+    OFFLOADING = "OFFLOADING"
+    SLEEPING = "SLEEPING"
+    WAKING = "WAKING"
     STOPPING = "STOPPING"
 
 
@@ -95,6 +98,9 @@ class PlacementProfile:
     kv_cache_capacity_tokens: int | None
     max_full_length_concurrency: float | None
     memory_backend: str = "native"
+    sleep_vram_mib_per_gpu: tuple[int, ...] | None = None
+    weight_cache_offload_seconds: float | None = None
+    weight_cache_activation_seconds: float | None = None
 
 
 @dataclass(slots=True)
@@ -110,6 +116,10 @@ class WorkerPlacement:
     ready_at: datetime | None = None
     last_demand_at: datetime = field(default_factory=utc_now)
     drain_started_at: datetime | None = None
+    sleeping_at: datetime | None = None
+    last_activation_seconds: float | None = None
+    last_offload_seconds: float | None = None
+    host_weights_cached: bool = False
     process_pid: int | None = None
 
     @property

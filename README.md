@@ -11,9 +11,9 @@ cluster and never share queues.
 ## Status
 
 This repository contains the control-plane implementation and external-HPC acceptance suite.
-The kvcached compatibility path and three-model resident fallback have been exercised on the
-target two-GPU host; see [PRISM_RESEARCH_FEASIBILITY.md](PRISM_RESEARCH_FEASIBILITY.md) for the measured result and the remaining
-full-Prism boundary.
+The kvcached elastic-KV path and host-RAM model-weight cache have been exercised on the target
+two-GPU host; see [PRISM_RESEARCH_FEASIBILITY.md](PRISM_RESEARCH_FEASIBILITY.md) for measured
+offload, activation, and compatibility results.
 
 ## Manual start on the target Linux host
 
@@ -42,36 +42,66 @@ number of additional admin keys. Local `llmctl` management commands automaticall
 active admin credential from the protected host database, so they do not require
 `LLMRIO_API_KEY`. Remote management still requires an explicitly supplied admin key.
 
-### kvcached dynamic KV co-residency
+### Prism scheduling: elastic KV plus a host-RAM weight cache
 
 LLM-RIO can keep multiple vLLM engines ready on the same GPU set while kvcached allocates physical
-KV memory on demand. This is **not** the full Prism system: it does not virtualize model weights or
-reuse one preinitialized worker for different models.
-See [PRISM_RESEARCH_FEASIBILITY.md](PRISM_RESEARCH_FEASIBILITY.md) for the upstream-code audit,
-measured activation breakdown, and three-model fallback demonstration.
+KV memory on demand. When an idle engine blocks another model, the scheduler uses vLLM level-1
+sleep to release its model and KV allocations from GPU memory while preserving its initialized
+process and model weights in host RAM. A later request wakes that same PID and copies the weights
+back instead of rebuilding the engine or rereading the checkpoint.
 
 Set `engines.kvcached_mode = "required"` after installing the legacy-named `prism` extra, and
-list model nicknames in `prism_preload_models` (or use `["*"]`). The names remain for
-compatibility. Preloaded vLLM engines stay READY; this mode does not use vLLM sleep mode.
+set `prism_weight_cache_mode = "ram"`. `prism_preload_models` is only the startup warming policy;
+it is not an eligibility list. Any compatible model requested later can cold-start, displace an
+idle resident to RAM, and remain cached after its request drains. A newly registered model also
+requests a one-time warm after automatic validation, so its first presentation-time chat does not
+pay another cold engine start. Repeat a nickname in `prism_preload_models` to prepare more than
+one distinct placement—for example, two Qwen TP=1 workers, one per GPU—before a live burst needs
+them.
 
+Automatic validation is fail-closed. Each GPU/TP placement must pass generation, level-1 sleep,
+sleep-state and VRAM-reclamation checks, wake, and post-wake generation before its profile becomes
+callable. The saved profile includes measured sleeping VRAM and offload/activation latency. The
+runtime exposes `OFFLOADING`, `SLEEPING`, and `WAKING` states plus corresponding lifecycle events.
+
+The scheduler never offloads a worker with an admitted request. It protects minimum residency and
+fair-share rules, sleeps least-cost idle blockers under GPU pressure, and prefers a matching
+sleeping worker over a cold start. `prism_max_workers_per_gpu` bounds GPU-resident engines;
+`prism_max_cached_workers_per_gpu` separately bounds live RAM-cached processes. When the latter is
+full, real demand evicts the least-recently-used sleeping process, while preload work never churns
+a full cache.
 
 Co-residency accepts only placement profiles created while kvcached mode was enabled. Validation
-measures each engine's idle and inference-peak footprints, and the planner sums the larger values against
-the strictest colocated profile's `gpu_memory_utilization` ceiling while retaining each worker's
-validated GPU headroom. This lets the planner choose a wider TP profile when a narrower placement
-would leave no usable elastic KV pool. Existing native profiles must therefore be revalidated after
-enabling kvcached co-residency. `reserved_vram_mib` remains a host-wide floor, and
-`prism_max_workers_per_gpu` is an independent hard cap.
+measures each engine's idle, inference-peak, and sleeping footprints. The planner accounts for the
+larger active footprint plus headroom, and for each sleeping worker's measured residual allocation,
+against the strictest colocated `gpu_memory_utilization` ceiling. Existing native profiles must be
+revalidated after enabling Prism mode.
 
-kvcached has not officially validated vLLM 0.26.0. The legacy-named `prism` extra pins upstream revision
-`60cad949` for its vLLM 0.26 and hybrid-cache fixes. LLM-RIO also supplies a narrowly scoped
-packed-KV tensor adapter for vLLM 0.26 MHA/GQA and linear-attention hybrids, and selects the
+On the target RTX PRO 6000 host, the first Qwen3-8B validation measured 4.25-8.07 seconds to
+offload, 0.25-0.34 seconds to restore, and roughly 2.3-3.0 GiB sleeping VRAM. A routed cache-hit
+request completed in 0.887 seconds total and retained the worker PID. Treat these numbers as
+checkpoint-, placement-, and host-specific; registration records the current measurements rather
+than assuming a paper benchmark. A later Qwen3.8 27B live run woke in 0.522 seconds, served a short
+request in 1.413 seconds end to end, and re-entered sleep in 0.352 seconds while keeping the host
+backup. Two cached Qwen3.8 TP=1 workers then woke in 0.533 and 0.610 seconds. A 40-request,
+two-wave homepage workload returned 17,425 completion tokens (18,665 total) with no errors, and
+the second wave split evenly across the two workers. Scale-out is deliberately limited to the
+model's one-GPU profiles once one TP=1 copy is serving; it does not add a redundant TP=2 worker.
+In a six-call Qwen/Gemma/Laguna round robin, every public-API response completed in 1.10-8.61
+seconds. Measured worker wakes were 0.648, 0.707, and 1.661 seconds, while repeated offloads were
+0.146-0.218 seconds.
+
+
+kvcached has not officially validated vLLM 0.26.0. The legacy-named `prism` extra pins upstream
+revision `60cad949` for its vLLM 0.26 and hybrid-cache fixes. LLM-RIO also supplies a narrowly
+scoped packed-KV tensor adapter for vLLM 0.26 MHA/GQA and linear-attention hybrids, and selects the
 legacy vLLM model runner patched by this kvcached revision. It uses 4 MiB kvcached pages for large
 KV blocks, immediately returns freed request pages instead of retaining prefix-cache pages, and
 normalizes a shared-pool free-count race to vLLM's ordinary scheduling-retry path. If that race
-occurs midway through a hybrid allocation, the adapter also rolls back the waiting request's partial
-group state before retrying. Run the isolated compatibility check before
-enabling it for the service:
+occurs midway through a hybrid allocation, the adapter also rolls back the waiting request's
+partial group state before retrying. The adapter additionally handles vLLM 0.26's nested hybrid
+FP8 cache groups during wake. Run the isolated compatibility check before enabling it for the
+service:
 
 ```bash
 uv run python -m llm_rio.prism_compat \

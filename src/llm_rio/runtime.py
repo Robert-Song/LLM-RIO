@@ -5,11 +5,19 @@ import contextlib
 import logging
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from typing import cast
 
 from llm_rio.config import Settings
 from llm_rio.domain import CatalogState, MachineInventory, RuntimeState, ServiceMode
 from llm_rio.errors import MaintenanceError, RioError
-from llm_rio.planner import DrainPlacement, GreedyPlacementPlanner, QueuePressure, StartPlacement
+from llm_rio.planner import (
+    DrainPlacement,
+    GreedyPlacementPlanner,
+    QueuePressure,
+    SleepPlacement,
+    StartPlacement,
+    WakePlacement,
+)
 from llm_rio.prism import detect_kvcached
 from llm_rio.profiles import ProfileRepository
 from llm_rio.queueing import ModelQueues, QueuedRequest
@@ -61,6 +69,14 @@ class ResidencyScheduler:
             gpu_vram_mib={device.uuid: device.total_vram_mib for device in inventory.gpus},
             reserved_vram_mib=settings.reserved_vram_mib,
             prism_max_workers_per_gpu=settings.prism_max_workers_per_gpu,
+            prism_max_cached_workers_per_gpu=settings.prism_max_cached_workers_per_gpu,
+            prism_sleep_gpu_reserve_mib=settings.prism_sleep_gpu_reserve_mib,
+            prism_idle_sleep_seconds=settings.prism_idle_sleep_seconds,
+            prism_weight_cache_enabled=getattr(
+                supervisor,
+                "ram_weight_cache_enabled",
+                self.kvcached.enabled and settings.prism_weight_cache_mode == "ram",
+            ),
         )
         self._state_lock = asyncio.Lock()
         self._event = asyncio.Event()
@@ -70,7 +86,8 @@ class ResidencyScheduler:
         self._validation_gpu_uuids: set[str] = set()
         self._last_arrival_at = datetime.now(UTC)
         self._maintenance_requested = False
-        self._prism_preload_model_ids: set[str] = set()
+        self._prism_preload_model_ids: dict[str, int] = {}
+        self._prism_one_time_warm_model_ids: set[str] = set()
         self._reported_incompatible_profiles: set[str] = set()
         self._prism_configured = False
         supervisor.set_event_callback(self.worker_event)
@@ -100,6 +117,15 @@ class ResidencyScheduler:
                 "vllm_version": runtime.vllm_version,
                 "officially_tested": runtime.officially_tested,
                 "max_workers_per_gpu": self.settings.prism_max_workers_per_gpu,
+                "weight_cache": (
+                    "vllm_sleep_level_1"
+                    if self.supervisor.ram_weight_cache_enabled
+                    else "disabled"
+                ),
+                "max_cached_workers_per_gpu": (
+                    self.settings.prism_max_cached_workers_per_gpu
+                ),
+                "idle_sleep_seconds": self.settings.prism_idle_sleep_seconds,
             },
         )
         selectors = self.settings.prism_preload_models
@@ -121,7 +147,10 @@ class ResidencyScheduler:
                 )
         for model in selected:
             if model.get("state") == CatalogState.AVAILABLE.value and model.get("artifact_path"):
-                self._prism_preload_model_ids.add(str(model["id"]))
+                model_id = str(model["id"])
+                self._prism_preload_model_ids[model_id] = (
+                    self._prism_preload_model_ids.get(model_id, 0) + 1
+                )
             else:
                 await self.database.record_event(
                     "PRISM_PRELOAD_SKIPPED",
@@ -159,13 +188,26 @@ class ResidencyScheduler:
             self._last_arrival_at = datetime.now(UTC)
         self._event.set()
         try:
-            return await request.assignment
+            return cast(WorkerLease, await request.assignment)
         except asyncio.CancelledError:
             async with self._state_lock:
                 removed = self.queues.remove(request.model_id, request.id)
             if removed:
                 await self.database.release_reservation(request.reservation_id, "client_cancelled")
             raise
+
+    async def warm_model_once(self, model_id: str) -> None:
+        """Populate one newly validated model into the host-RAM weight cache."""
+        if not self.kvcached.enabled or not self.planner.prism_weight_cache_enabled:
+            return
+        async with self._state_lock:
+            self._prism_one_time_warm_model_ids.add(model_id)
+        await self.database.record_event(
+            "PRISM_MODEL_WARM_REQUESTED",
+            model_id,
+            {"target": "host_ram"},
+        )
+        self._event.set()
 
     async def release(self, lease: WorkerLease) -> None:
         if self._request_leases.pop(lease.request_id, None) is None:
@@ -192,22 +234,95 @@ class ResidencyScheduler:
         self._event.set()
 
     async def acquire_validation_gpus(self, gpu_uuids: tuple[str, ...]) -> bool:
+        worker_ids: list[str] = []
+        preserve_weight_cache = bool(
+            getattr(self.supervisor, "ram_weight_cache_enabled", False)
+        )
         async with self._state_lock:
             idle_for = (datetime.now(UTC) - self._last_arrival_at).total_seconds()
+            overlapping = [
+                worker
+                for worker in self.supervisor.workers.values()
+                if worker.state is not RuntimeState.COLD
+                and bool(set(worker.gpu_uuids) & set(gpu_uuids))
+            ]
             if (
                 await self.database.service_mode() is not ServiceMode.ACTIVE
                 or self._maintenance_requested
                 or self.queues.pending_models()
                 or idle_for < self.settings.validation_idle_window_seconds
-                or set(gpu_uuids) & self.supervisor.occupied_gpu_uuids
                 or set(gpu_uuids) & self._validation_gpu_uuids
+                or any(worker.admitted_request_ids for worker in overlapping)
+                or any(
+                    worker.state not in {RuntimeState.READY, RuntimeState.SLEEPING}
+                    for worker in overlapping
+                )
             ):
                 return False
             self._validation_gpu_uuids.update(gpu_uuids)
-            await self.database.record_event(
-                "VALIDATION_GPUS_ACQUIRED", payload={"gpu_uuids": gpu_uuids}
+            worker_ids = [worker.id for worker in overlapping]
+        if preserve_weight_cache:
+            results = await asyncio.gather(
+                *(
+                    self.supervisor.sleep(worker.id)
+                    for worker in overlapping
+                    if worker.state is RuntimeState.READY
+                ),
+                return_exceptions=True,
             )
-            return True
+        else:
+            results = await asyncio.gather(
+                *(
+                    self.supervisor.stop(worker_id, force=False)
+                    for worker_id in worker_ids
+                ),
+                return_exceptions=True,
+            )
+        failures = [result for result in results if isinstance(result, BaseException)]
+        async with self._state_lock:
+            retained_worker_ids = [
+                worker_id
+                for worker_id in worker_ids
+                if (worker := self.supervisor.workers.get(worker_id)) is not None
+                and worker.state is RuntimeState.SLEEPING
+            ]
+            unresolved_worker_ids = [
+                worker_id
+                for worker_id in worker_ids
+                if (worker := self.supervisor.workers.get(worker_id)) is not None
+                and worker.state not in {RuntimeState.COLD, RuntimeState.SLEEPING}
+            ]
+            demand_arrived = bool(self.queues.pending_models())
+            if failures or unresolved_worker_ids or demand_arrived:
+                self._validation_gpu_uuids.difference_update(gpu_uuids)
+        if failures or unresolved_worker_ids or demand_arrived:
+            await self.database.record_event(
+                (
+                    "VALIDATION_GPUS_DEFERRED"
+                    if demand_arrived and not failures and not unresolved_worker_ids
+                    else "VALIDATION_GPUS_ACQUIRE_FAILED"
+                ),
+                payload={
+                    "gpu_uuids": gpu_uuids,
+                    "transition_failures": len(failures),
+                    "unresolved_worker_ids": unresolved_worker_ids,
+                    "production_demand": demand_arrived,
+                    "preserved_cached_worker_ids": retained_worker_ids,
+                },
+            )
+            self._event.set()
+            return False
+        await self.database.record_event(
+            "VALIDATION_GPUS_ACQUIRED",
+            payload={
+                "gpu_uuids": gpu_uuids,
+                "preserved_cached_worker_ids": retained_worker_ids,
+                "evicted_cached_worker_ids": (
+                    [] if preserve_weight_cache else worker_ids
+                ),
+            },
+        )
+        return True
 
     async def release_validation_gpus(self, gpu_uuids: tuple[str, ...]) -> None:
         async with self._state_lock:
@@ -282,7 +397,16 @@ class ResidencyScheduler:
         await self._route_ready_work()
         pressures = self._pressures()
         now = datetime.now(UTC)
+        warm_model_ids = {
+            worker.model_id
+            for worker in self.supervisor.workers.values()
+            if worker.state in {RuntimeState.READY, RuntimeState.SLEEPING}
+        }
+        self._prism_one_time_warm_model_ids.difference_update(warm_model_ids)
         pressured_model_ids = {pressure.model_id for pressure in pressures}
+        preload_requirements = dict(self._prism_preload_model_ids)
+        for model_id in self._prism_one_time_warm_model_ids:
+            preload_requirements.setdefault(model_id, 1)
         pressures.extend(
             QueuePressure(
                 model_id=model_id,
@@ -290,8 +414,16 @@ class ResidencyScheduler:
                 estimated_tokens=1,
                 oldest_enqueued_at=now,
                 preload=True,
+                desired_workers=desired_workers,
             )
-            for model_id in sorted(self._prism_preload_model_ids - pressured_model_ids)
+            for model_id, desired_workers in sorted(preload_requirements.items())
+            if model_id not in pressured_model_ids
+            and sum(
+                worker.model_id == model_id
+                and worker.state not in {RuntimeState.COLD, RuntimeState.STOPPING}
+                for worker in self.supervisor.workers.values()
+            )
+            < desired_workers
         )
         profile_map = {
             pressure.model_id: await self.profiles.for_model(pressure.model_id)
@@ -318,9 +450,20 @@ class ResidencyScheduler:
             pressures=pressures,
             profiles=profile_map,
         )
+        sleep_actions = [
+            action for action in actions if isinstance(action, SleepPlacement)
+        ]
+        if sleep_actions:
+            await asyncio.gather(
+                *(self.supervisor.sleep(action.worker_id) for action in sleep_actions)
+            )
         for action in actions:
+            if isinstance(action, SleepPlacement):
+                continue
             if isinstance(action, DrainPlacement):
                 await self.supervisor.drain(action.worker_id)
+            elif isinstance(action, WakePlacement):
+                await self._wake_if_active(action)
             elif isinstance(action, StartPlacement):
                 await self._launch_if_active(action)
 
@@ -366,6 +509,7 @@ class ResidencyScheduler:
             if (
                 self._maintenance_requested
                 or await self.database.service_mode() is not ServiceMode.ACTIVE
+                or bool(set(action.gpu_uuids) & self._validation_gpu_uuids)
             ):
                 return
             model = await self.database.model_by_id(action.profile.model_id)
@@ -382,6 +526,18 @@ class ResidencyScheduler:
                 model_path=model["artifact_path"],
                 served_model_name=model["nickname"],
             )
+
+    async def _wake_if_active(self, action: WakePlacement) -> None:
+        async with self._state_lock:
+            worker = self.supervisor.workers.get(action.worker_id)
+            if (
+                worker is None
+                or self._maintenance_requested
+                or await self.database.service_mode() is not ServiceMode.ACTIVE
+                or bool(set(worker.gpu_uuids) & self._validation_gpu_uuids)
+            ):
+                return
+        await self.supervisor.wake(action.worker_id)
 
     async def _route_ready_work(self) -> None:
         async with self._state_lock:

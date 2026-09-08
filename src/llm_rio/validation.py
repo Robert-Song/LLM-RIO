@@ -60,6 +60,24 @@ def validation_log_path(
     return log_dir / filename
 
 
+def _model_launch_args(model_path: Path) -> dict[str, Any]:
+    """Derive mandatory vLLM arguments from immutable model metadata."""
+    config_path = model_path / "config.json"
+    if not config_path.exists():
+        return {}
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    architectures = config.get("architectures")
+    architecture_names = {
+        str(value) for value in architectures if isinstance(architectures, list)
+    }
+    if (
+        config.get("model_type") == "deepseek_v4"
+        or "DeepseekV4ForCausalLM" in architecture_names
+    ):
+        return {"kv_cache_dtype": "fp8"}
+    return {}
+
+
 @dataclass(frozen=True, slots=True)
 class CandidateShape:
     gpu_count: int
@@ -143,6 +161,9 @@ class ProfileValidator:
         self.inventory = inventory
         self.scheduler = scheduler
         self.kvcached = detect_kvcached(settings.engines.kvcached_mode)
+        self.ram_weight_cache_enabled = (
+            self.kvcached.enabled and settings.prism_weight_cache_mode == "ram"
+        )
 
     async def validate_vllm(
         self,
@@ -190,6 +211,7 @@ class ProfileValidator:
     ) -> PlacementProfile:
         port = self.settings.worker_port_end + 1
         api_key = f"rio_validation_{secrets.token_urlsafe(32)}"
+        launch_args = _model_launch_args(model_path)
         command = [
             self.settings.engines.vllm_executable,
             "serve",
@@ -222,6 +244,20 @@ class ProfileValidator:
             command.extend(["--enable-auto-tool-choice", "--tool-call-parser", parsers.tool_parser])
         if parsers.reasoning_parser is not None:
             command.extend(["--reasoning-parser", parsers.reasoning_parser])
+        if self.ram_weight_cache_enabled:
+            command.append("--enable-sleep-mode")
+        for key, value in launch_args.items():
+            flag = f"--{key.replace('_', '-')}"
+            if isinstance(value, bool):
+                if value:
+                    command.append(flag)
+            elif isinstance(value, list):
+                for item in value:
+                    command.extend([flag, str(item)])
+            elif isinstance(value, dict):
+                command.extend([flag, json.dumps(value, separators=(",", ":"), sort_keys=True)])
+            elif value is not None:
+                command.extend([flag, str(value)])
         add_kvcached_vllm_flags(command, self.kvcached)
         gpu_indices = tuple(
             device.index for device in self.inventory.gpus if device.uuid in gpu_set
@@ -236,7 +272,12 @@ class ProfileValidator:
         environment = gpu_environment(gpu_set, self.settings.engines.environment)
         environment["VLLM_API_KEY"] = api_key
         environment.update(self.kvcached.environment(pythonpath=environment.get("PYTHONPATH")))
+        if self.ram_weight_cache_enabled:
+            environment["VLLM_SERVER_DEV_MODE"] = "1"
         started = time.monotonic()
+        sleep_memory: tuple[int, ...] | None = None
+        offload_seconds: float | None = None
+        activation_seconds: float | None = None
         with log_path.open("ab", buffering=0) as log_handle:
             try:
                 process = await asyncio.create_subprocess_exec(
@@ -262,6 +303,32 @@ class ProfileValidator:
                     nickname=nickname,
                     gpu_set=gpu_set,
                 )
+                if self.ram_weight_cache_enabled:
+                    (
+                        offload_seconds,
+                        activation_seconds,
+                        sleep_memory,
+                    ) = await self._sleep_wake_contract(
+                        port=port,
+                        api_key=api_key,
+                        gpu_set=gpu_set,
+                    )
+                    post_wake_throughput, post_wake_peak = (
+                        await self._generation_contract(
+                            process=process,
+                            port=port,
+                            api_key=api_key,
+                            nickname=nickname,
+                            gpu_set=gpu_set,
+                        )
+                    )
+                    throughput = min(throughput, post_wake_throughput)
+                    peak_memory = tuple(
+                        max(before, after)
+                        for before, after in zip(
+                            peak_memory, post_wake_peak, strict=True
+                        )
+                    )
             except ValidationError as exc:
                 await self._terminate(process)
                 exc.details.setdefault("log_path", str(log_path))
@@ -300,12 +367,81 @@ class ProfileValidator:
                 if parsers.tool_parser is not None
                 else {"chat", "streaming"}
             ),
-            launch_args={},
+            launch_args=launch_args,
             gpu_memory_utilization=candidate.gpu_memory_utilization,
             kv_cache_capacity_tokens=kv_cache_capacity,
             max_full_length_concurrency=max_concurrency,
             memory_backend=self.kvcached.memory_backend,
+            sleep_vram_mib_per_gpu=sleep_memory,
+            weight_cache_offload_seconds=offload_seconds,
+            weight_cache_activation_seconds=activation_seconds,
         )
+
+    async def _sleep_wake_contract(
+        self,
+        *,
+        port: int,
+        api_key: str,
+        gpu_set: tuple[str, ...],
+    ) -> tuple[float, float, tuple[int, ...]]:
+        if self.scheduler.validation_should_yield():
+            raise ValidationPreempted()
+        headers = {"Authorization": f"Bearer {api_key}"}
+        timeout = self.settings.prism_transition_timeout_seconds
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                started = time.monotonic()
+                sleep_response = await client.post(
+                    f"http://127.0.0.1:{port}/sleep",
+                    headers=headers,
+                    params={"level": "1"},
+                )
+                if not sleep_response.is_success:
+                    raise ValidationError(
+                        "weight_cache",
+                        f"sleep returned HTTP {sleep_response.status_code}",
+                        {"body": sleep_response.text[-2000:]},
+                    )
+                offload_seconds = time.monotonic() - started
+                sleeping_response = await client.get(
+                    f"http://127.0.0.1:{port}/is_sleeping",
+                    headers=headers,
+                )
+                sleeping_response.raise_for_status()
+                if sleeping_response.json().get("is_sleeping") is not True:
+                    raise ValidationError(
+                        "weight_cache", "engine did not enter level-1 sleep"
+                    )
+                sleep_memory = self._used_vram(gpu_set)
+
+                started = time.monotonic()
+                wake_response = await client.post(
+                    f"http://127.0.0.1:{port}/wake_up",
+                    headers=headers,
+                )
+                if not wake_response.is_success:
+                    raise ValidationError(
+                        "weight_cache",
+                        f"wake returned HTTP {wake_response.status_code}",
+                        {"body": wake_response.text[-2000:]},
+                    )
+                activation_seconds = time.monotonic() - started
+                awake_response = await client.get(
+                    f"http://127.0.0.1:{port}/is_sleeping",
+                    headers=headers,
+                )
+                awake_response.raise_for_status()
+                if awake_response.json().get("is_sleeping") is not False:
+                    raise ValidationError(
+                        "weight_cache", "engine remained asleep after wake"
+                    )
+        except ValidationError:
+            raise
+        except (httpx.HTTPError, ValueError) as exc:
+            raise ValidationError("weight_cache", str(exc)) from exc
+        if self.scheduler.validation_should_yield():
+            raise ValidationPreempted()
+        return offload_seconds, activation_seconds, sleep_memory
 
     @staticmethod
     def _capacity_from_log(log_path: Path) -> tuple[int | None, float | None]:

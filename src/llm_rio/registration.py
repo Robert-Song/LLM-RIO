@@ -185,6 +185,7 @@ class RegistrationManager:
                     """,
                     (json.dumps({"profiles": len(profiles)}), _now(), job_id),
                 )
+            await self.validator.scheduler.warm_model_once(job["model_id"])
         except asyncio.CancelledError:
             raise
         except Exception as exc:

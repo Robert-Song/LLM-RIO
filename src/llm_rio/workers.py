@@ -27,6 +27,17 @@ logger = logging.getLogger(__name__)
 
 WorkerEventCallback = Callable[[str, str], Awaitable[None]]
 
+_GPU_RESIDENT_STATES = frozenset(
+    {
+        RuntimeState.LOADING,
+        RuntimeState.READY,
+        RuntimeState.DRAINING,
+        RuntimeState.OFFLOADING,
+        RuntimeState.WAKING,
+        RuntimeState.STOPPING,
+    }
+)
+
 
 async def _terminate_worker_process_tree(
     process: asyncio.subprocess.Process, *, force: bool
@@ -76,6 +87,8 @@ class WorkerSupervisor:
         self._log_handles: dict[str, Any] = {}
         self._log_paths: dict[str, Path] = {}
         self._lock = asyncio.Lock()
+        self._transition_locks: dict[str, asyncio.Lock] = {}
+        self._drain_to_sleep: set[str] = set()
         self._event_callback: WorkerEventCallback | None = None
         self.internal_api_key = f"rio_internal_{secrets.token_urlsafe(32)}"
         self.kvcached = detect_kvcached(settings.engines.kvcached_mode)
@@ -84,11 +97,30 @@ class WorkerSupervisor:
         self._event_callback = callback
 
     @property
+    def ram_weight_cache_enabled(self) -> bool:
+        return self.kvcached.enabled and self.settings.prism_weight_cache_mode == "ram"
+
+    @property
+    def persistent_host_weight_cache_enabled(self) -> bool:
+        return (
+            self.kvcached.environment().get("LLM_RIO_KVCACHED_VLLM026_SHIM") == "1"
+        )
+
+    @property
     def occupied_gpu_uuids(self) -> set[str]:
         return {
             gpu
             for worker in self.workers.values()
-            if worker.state is not RuntimeState.COLD
+            if worker.state in _GPU_RESIDENT_STATES
+            for gpu in worker.gpu_uuids
+        }
+
+    @property
+    def cached_gpu_uuids(self) -> set[str]:
+        return {
+            gpu
+            for worker in self.workers.values()
+            if worker.state is RuntimeState.SLEEPING
             for gpu in worker.gpu_uuids
         }
 
@@ -214,8 +246,13 @@ class WorkerSupervisor:
         ):
             return False
         for gpu_uuid in gpu_uuids:
-            colocated = sum(gpu_uuid in worker.gpu_uuids for worker in overlapping_workers)
-            if colocated >= self.settings.prism_max_workers_per_gpu:
+            colocated = [
+                worker for worker in overlapping_workers if gpu_uuid in worker.gpu_uuids
+            ]
+            active = sum(worker.state in _GPU_RESIDENT_STATES for worker in colocated)
+            if active >= self.settings.prism_max_workers_per_gpu:
+                return False
+            if len(colocated) >= self.settings.prism_max_cached_workers_per_gpu:
                 return False
         return True
 
@@ -231,6 +268,10 @@ class WorkerSupervisor:
                 environment.update(
                     self.kvcached.environment(pythonpath=environment.get("PYTHONPATH"))
                 )
+                if self.ram_weight_cache_enabled:
+                    # vLLM gates its authenticated sleep/wake routes behind this
+                    # opt-in. Workers listen only on loopback private ports.
+                    environment["VLLM_SERVER_DEV_MODE"] = "1"
         return environment
 
     def _command(
@@ -274,6 +315,12 @@ class WorkerSupervisor:
                 )
             if parsers.reasoning_parser is not None:
                 command.extend(["--reasoning-parser", parsers.reasoning_parser])
+            if (
+                self.ram_weight_cache_enabled
+                and profile.memory_backend == "kvcached"
+                and not profile.launch_args.get("enable_sleep_mode")
+            ):
+                command.append("--enable-sleep-mode")
         elif profile.engine is Engine.LLAMA_CPP and self.settings.engines.enable_llama_cpp:
             command = [
                 self.settings.engines.llama_cpp_executable,
@@ -369,6 +416,7 @@ class WorkerSupervisor:
             worker.admitted_request_ids.clear()
             worker.outstanding_token_work = 0
             worker.state = RuntimeState.COLD
+            self._drain_to_sleep.discard(worker.id)
             process = self._processes.get(worker.id)
         if process:
             if process.returncode is None:
@@ -401,6 +449,7 @@ class WorkerSupervisor:
 
     async def release(self, worker_id: str, request_id: str, estimated_tokens: int) -> None:
         should_stop = False
+        should_offload = False
         async with self._lock:
             worker = self.workers.get(worker_id)
             if worker is None:
@@ -408,10 +457,151 @@ class WorkerSupervisor:
             worker.admitted_request_ids.discard(request_id)
             worker.last_demand_at = datetime.now(UTC)
             worker.outstanding_token_work = max(0, worker.outstanding_token_work - estimated_tokens)
-            should_stop = worker.state is RuntimeState.DRAINING and not worker.admitted_request_ids
-        if should_stop:
+            drained = worker.state is RuntimeState.DRAINING and not worker.admitted_request_ids
+            should_offload = drained and worker_id in self._drain_to_sleep
+            should_stop = drained and not should_offload
+        if should_offload:
+            await self._offload(worker_id)
+        elif should_stop:
             await self.stop(worker_id, force=False)
         await self._emit(worker_id, "released")
+
+    async def sleep(self, worker_id: str) -> None:
+        """Drain a routable worker and retain its weights in host RAM."""
+        if not self.ram_weight_cache_enabled:
+            await self.drain(worker_id)
+            return
+        offload_now = False
+        async with self._lock:
+            worker = self.workers.get(worker_id)
+            if worker is None or worker.state in {
+                RuntimeState.COLD,
+                RuntimeState.OFFLOADING,
+                RuntimeState.SLEEPING,
+                RuntimeState.WAKING,
+                RuntimeState.STOPPING,
+            }:
+                return
+            if worker.state is RuntimeState.LOADING:
+                return
+            self._drain_to_sleep.add(worker_id)
+            if worker.admitted_request_ids:
+                worker.state = RuntimeState.DRAINING
+                worker.drain_started_at = datetime.now(UTC)
+            else:
+                offload_now = True
+        if offload_now:
+            await self._offload(worker_id)
+            return
+        await self._persist(worker)
+        await self.database.record_event(
+            "WORKER_DRAINING_TO_RAM",
+            worker_id,
+            {"active_requests": len(worker.admitted_request_ids)},
+        )
+
+    async def _offload(self, worker_id: str) -> None:
+        transition_lock = self._transition_locks.setdefault(worker_id, asyncio.Lock())
+        async with transition_lock:
+            async with self._lock:
+                worker = self.workers.get(worker_id)
+                if worker is None or worker.state in {
+                    RuntimeState.COLD,
+                    RuntimeState.SLEEPING,
+                    RuntimeState.STOPPING,
+                }:
+                    return
+                if worker.admitted_request_ids:
+                    self._drain_to_sleep.add(worker_id)
+                    worker.state = RuntimeState.DRAINING
+                    worker.drain_started_at = datetime.now(UTC)
+                    return
+                worker.state = RuntimeState.OFFLOADING
+                worker.drain_started_at = None
+                self._drain_to_sleep.discard(worker_id)
+            await self._persist(worker)
+            await self.database.record_event("WORKER_OFFLOADING", worker_id)
+            started = asyncio.get_running_loop().time()
+            try:
+                await self._post_engine(worker, "/sleep", params={"level": "1"})
+            except Exception as exc:
+                await self._fail(worker, f"weight_offload_failed:{type(exc).__name__}")
+                return
+            elapsed = asyncio.get_running_loop().time() - started
+            async with self._lock:
+                if worker.state is not RuntimeState.OFFLOADING:
+                    return
+                worker.state = RuntimeState.SLEEPING
+                worker.sleeping_at = datetime.now(UTC)
+                worker.last_offload_seconds = elapsed
+                worker.host_weights_cached = True
+            await self._persist(worker)
+            await self.database.record_event(
+                "WORKER_WEIGHTS_CACHED",
+                worker_id,
+                {"offload_seconds": elapsed, "storage": "host_ram"},
+            )
+            await self._emit(worker_id, "sleeping")
+
+    async def wake(self, worker_id: str) -> None:
+        """Restore a SLEEPING worker's retained weights from host RAM."""
+        if not self.ram_weight_cache_enabled:
+            raise WorkerLaunchError("host-RAM weight caching is disabled")
+        transition_lock = self._transition_locks.setdefault(worker_id, asyncio.Lock())
+        async with transition_lock:
+            async with self._lock:
+                worker = self.workers.get(worker_id)
+                if worker is None or worker.state is not RuntimeState.SLEEPING:
+                    return
+                worker.state = RuntimeState.WAKING
+            await self._persist(worker)
+            await self.database.record_event(
+                "WORKER_WAKING",
+                worker_id,
+                {"storage": "host_ram"},
+            )
+            started = asyncio.get_running_loop().time()
+            try:
+                await self._post_engine(worker, "/wake_up")
+            except Exception as exc:
+                await self._fail(worker, f"weight_restore_failed:{type(exc).__name__}")
+                return
+            elapsed = asyncio.get_running_loop().time() - started
+            async with self._lock:
+                if worker.state is not RuntimeState.WAKING:
+                    return
+                now = datetime.now(UTC)
+                worker.state = RuntimeState.READY
+                worker.ready_at = now
+                worker.last_demand_at = now
+                worker.sleeping_at = None
+                worker.last_activation_seconds = elapsed
+                if not self.persistent_host_weight_cache_enabled:
+                    worker.host_weights_cached = False
+            await self._persist(worker)
+            await self.database.record_event(
+                "WORKER_WEIGHTS_RESTORED",
+                worker_id,
+                {"activation_seconds": elapsed, "storage": "host_ram"},
+            )
+            await self._emit(worker_id, "ready")
+
+    async def _post_engine(
+        self,
+        worker: WorkerPlacement,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+    ) -> None:
+        headers = {"Authorization": f"Bearer {self.internal_api_key}"}
+        timeout = self.settings.prism_transition_timeout_seconds
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f"http://127.0.0.1:{worker.port}{path}",
+                headers=headers,
+                params=params,
+            )
+            response.raise_for_status()
 
     async def drain(self, worker_id: str) -> None:
         stop_now = False
@@ -423,6 +613,7 @@ class WorkerSupervisor:
                 RuntimeState.COLD,
             }:
                 return
+            self._drain_to_sleep.discard(worker_id)
             worker.state = RuntimeState.DRAINING
             worker.drain_started_at = datetime.now(UTC)
             stop_now = not worker.admitted_request_ids
@@ -447,6 +638,11 @@ class WorkerSupervisor:
         return overdue
 
     async def stop(self, worker_id: str, *, force: bool) -> None:
+        transition_lock = self._transition_locks.setdefault(worker_id, asyncio.Lock())
+        async with transition_lock:
+            await self._stop(worker_id, force=force)
+
+    async def _stop(self, worker_id: str, *, force: bool) -> None:
         async with self._lock:
             worker = self.workers.get(worker_id)
             if worker is None or worker.state is RuntimeState.COLD:
@@ -480,6 +676,9 @@ class WorkerSupervisor:
                 worker.process_pid = None
                 worker.admitted_request_ids.clear()
                 worker.outstanding_token_work = 0
+                worker.sleeping_at = None
+                worker.host_weights_cached = False
+                self._drain_to_sleep.discard(worker_id)
             try:
                 await self._persist(worker)
                 await self.database.record_event("WORKER_COLD", worker_id, {"forced": force})
@@ -500,6 +699,7 @@ class WorkerSupervisor:
                     logger.error("could not stop worker %s during shutdown: %r", worker_id, result)
 
     async def _cleanup(self, worker_id: str, *, retain_log: bool = False) -> None:
+        self._drain_to_sleep.discard(worker_id)
         self._processes.pop(worker_id, None)
         handle = self._log_handles.pop(worker_id, None)
         if handle:

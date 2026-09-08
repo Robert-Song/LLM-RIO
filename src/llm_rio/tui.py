@@ -525,7 +525,7 @@ class RioTui(App[Path | None]):
             "Model", "Current rank", "Current tokens", "Total rank", "Total tokens", "Share"
         )
         self.query_one("#dashboard-gpus-table", DataTable).add_columns(
-            "GPU", "Util", "VRAM", "Temp", "Power", "Model", "State", "Slots"
+            "GPU", "Util", "VRAM", "Temp", "Power", "Model", "State", "Weights", "Slots"
         )
         self.run_worker(self.refresh_all(initial=True), name="initial-refresh", exit_on_error=False)
         self.set_interval(2.0, self._refresh_dashboard_if_visible)
@@ -698,6 +698,10 @@ class RioTui(App[Path | None]):
             )
             models = ", ".join(str(item.get("model") or "-") for item in placements) or "idle"
             states = ", ".join(str(item.get("state") or "-") for item in placements) or "idle"
+            weight_storage = (
+                ", ".join(str(item.get("weight_storage") or "-") for item in placements)
+                or "none"
+            )
             slot_values: list[str] = []
             for placement in placements:
                 raw_slots = placement.get("continuous_batching_slots")
@@ -720,6 +724,7 @@ class RioTui(App[Path | None]):
                 f"{float(power):.1f} W" if power is not None else "-",
                 models,
                 states,
+                weight_storage,
                 ", ".join(slot_values) or "0/?",
                 key=str(gpu.get("uuid") or gpu.get("index")),
             )

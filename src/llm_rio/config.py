@@ -54,7 +54,14 @@ class Settings(BaseSettings):
     fair_share_seconds: float = Field(default=7200.0, gt=0)
     validation_idle_window_seconds: float = Field(default=0.0, ge=0)
     prism_preload_models: list[str] = Field(default_factory=list)
+    # Host-RAM weight caching is the temporal half of Prism. Level-1 vLLM
+    # sleep retains weights in RAM while releasing their GPU allocations.
+    prism_weight_cache_mode: Literal["disabled", "ram"] = "ram"
+    prism_idle_sleep_seconds: float = Field(default=45.0, ge=0)
     prism_max_workers_per_gpu: int = Field(default=2, ge=1)
+    prism_max_cached_workers_per_gpu: int = Field(default=8, ge=1)
+    prism_sleep_gpu_reserve_mib: int = Field(default=1536, ge=0)
+    prism_transition_timeout_seconds: float = Field(default=180.0, gt=0)
     worker_startup_timeout_seconds: float | None = Field(default=None, gt=0)
     worker_drain_watchdog_seconds: float | None = Field(default=None, gt=0)
     worker_request_timeout_seconds: float | None = Field(default=None, gt=0)
@@ -95,6 +102,11 @@ class Settings(BaseSettings):
             raise ValueError("prism_preload_models cannot contain blank nicknames")
         if "*" in preload and len(preload) != 1:
             raise ValueError("'*' must be the only prism_preload_models entry")
+        if self.prism_max_cached_workers_per_gpu < self.prism_max_workers_per_gpu:
+            raise ValueError(
+                "prism_max_cached_workers_per_gpu must be at least "
+                "prism_max_workers_per_gpu"
+            )
         self.prism_preload_models = preload
         return self
 

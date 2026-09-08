@@ -8,6 +8,10 @@ _ELASTIC_POOL_INSTALL_MARKER = "_llm_rio_vllm026_shared_pool_race"
 _ELASTIC_POOL_METHOD_MARKER = "_llm_rio_vllm026_shared_pool_retry"
 _ALLOCATE_SLOTS_INSTALL_MARKER = "_llm_rio_vllm026_allocate_slots_rollback"
 _ALLOCATE_SLOTS_METHOD_MARKER = "_llm_rio_vllm026_allocate_slots_transactional"
+_HYBRID_WAKE_INSTALL_MARKER = "_llm_rio_vllm026_hybrid_wake"
+_HYBRID_WAKE_METHOD_MARKER = "_llm_rio_vllm026_hybrid_wake_recursive_zero"
+_PERSISTENT_BACKUP_SLEEP_MARKER = "_llm_rio_vllm026_persistent_backup_sleep"
+_PERSISTENT_BACKUP_WAKE_MARKER = "_llm_rio_vllm026_persistent_backup_wake"
 
 
 def _is_shared_pool_capacity_race(exc: BaseException) -> bool:
@@ -169,6 +173,109 @@ def _install_allocate_slots_rollback_shim(kvp: Any, logger: Any) -> None:
     patch_class.patch_allocate_slots = patch_allocate_slots
 
 
+def _zero_cache_tree(value: Any) -> None:
+    if isinstance(value, dict):
+        for child in value.values():
+            _zero_cache_tree(child)
+        return
+    if isinstance(value, list | tuple):
+        for child in value:
+            _zero_cache_tree(child)
+        return
+    if value is not None:
+        value.zero_()
+
+
+class _ZeroableCacheList(list[Any]):
+    def zero_(self) -> _ZeroableCacheList:
+        _zero_cache_tree(self)
+        return self
+
+
+def _install_hybrid_sleep_wake_shim(runner_module: Any, logger: Any) -> None:
+    """Make vLLM's FP8 wake initialization handle hybrid KV-cache groups."""
+    runner_class = runner_module.GPUModelRunner
+    original = runner_class.init_fp8_kv_scales
+    if getattr(original, _HYBRID_WAKE_METHOD_MARKER, False):
+        return
+
+    @wraps(original)
+    def init_fp8_kv_scales(runner: Any) -> Any:
+        caches = getattr(runner, "kv_caches", None)
+        if not isinstance(caches, list):
+            return original(runner)
+        replacements: list[tuple[int, Any]] = []
+        for index, cache in enumerate(caches):
+            if isinstance(cache, list | tuple) and not hasattr(cache, "zero_"):
+                replacements.append((index, cache))
+                caches[index] = _ZeroableCacheList(cache)
+        try:
+            return original(runner)
+        finally:
+            for index, cache in replacements:
+                caches[index] = cache
+
+    setattr(init_fp8_kv_scales, _HYBRID_WAKE_METHOD_MARKER, True)
+    runner_class.init_fp8_kv_scales = init_fp8_kv_scales
+    setattr(runner_class, _HYBRID_WAKE_INSTALL_MARKER, True)
+    logger.info("Installed LLM-RIO hybrid FP8 KV-cache wake compatibility shim")
+
+
+def _install_persistent_weight_backup_shim(cumem_module: Any, logger: Any) -> None:
+    """Retain immutable host weight copies across repeated wake/sleep cycles."""
+    allocator_class = cumem_module.CuMemAllocator
+    original_sleep = allocator_class.sleep
+    original_wake = allocator_class.wake_up
+
+    if not getattr(original_sleep, _PERSISTENT_BACKUP_SLEEP_MARKER, False):
+
+        @wraps(original_sleep)
+        def sleep(allocator: Any, offload_tags: tuple[str, ...] | str | None = None) -> Any:
+            selected_tags: tuple[str, ...]
+            if offload_tags is None:
+                selected_tags = (allocator_class.default_tag,)
+            elif isinstance(offload_tags, str):
+                selected_tags = (offload_tags,)
+            else:
+                selected_tags = offload_tags
+            preserved: list[tuple[Any, str]] = []
+            sentinel_tag = "llm_rio_persistent_host_backup"
+            for data in allocator.pointer_to_data.values():
+                if data.tag in selected_tags and data.cpu_backup_tensor is not None:
+                    preserved.append((data, data.tag))
+                    data.tag = sentinel_tag
+            try:
+                return original_sleep(allocator, offload_tags)
+            finally:
+                for data, tag in preserved:
+                    data.tag = tag
+
+        setattr(sleep, _PERSISTENT_BACKUP_SLEEP_MARKER, True)
+        allocator_class.sleep = sleep
+
+    if not getattr(original_wake, _PERSISTENT_BACKUP_WAKE_MARKER, False):
+
+        @wraps(original_wake)
+        def wake_up(allocator: Any, tags: list[str] | None = None) -> Any:
+            backups = [
+                (data, data.cpu_backup_tensor)
+                for data in allocator.pointer_to_data.values()
+                if data.cpu_backup_tensor is not None
+                and (tags is None or data.tag in tags)
+            ]
+            try:
+                return original_wake(allocator, tags)
+            finally:
+                for data, backup in backups:
+                    if data.cpu_backup_tensor is None:
+                        data.cpu_backup_tensor = backup
+
+        setattr(wake_up, _PERSISTENT_BACKUP_WAKE_MARKER, True)
+        allocator_class.wake_up = wake_up
+
+    logger.info("Installed LLM-RIO persistent host weight-cache compatibility shim")
+
+
 def install() -> None:
     """Teach the pinned kvcached revision about vLLM 0.26 packed K/V tensors.
 
@@ -188,10 +295,14 @@ def install() -> None:
     from kvcached.integration.vllm import interfaces as kvi  # type: ignore[import-untyped]
     from kvcached.integration.vllm import patches as kvp
     from kvcached.utils import get_kvcached_logger  # type: ignore[import-untyped]
+    from vllm.device_allocator import cumem
+    from vllm.v1.worker import gpu_model_runner
 
     logger = get_kvcached_logger()
     _install_shared_pool_race_shim(kvp, logger)
     _install_allocate_slots_rollback_shim(kvp, logger)
+    _install_hybrid_sleep_wake_shim(gpu_model_runner, logger)
+    _install_persistent_weight_backup_shim(cumem, logger)
 
     if getattr(kvi.alloc_kv_cache, _INSTALL_MARKER, False):
         return

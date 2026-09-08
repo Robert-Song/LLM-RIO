@@ -57,6 +57,21 @@ def profile_from_dict(raw: dict[str, Any]) -> PlacementProfile:
             else float(raw["max_full_length_concurrency"])
         ),
         memory_backend=str(raw.get("memory_backend", "native")),
+        sleep_vram_mib_per_gpu=(
+            None
+            if raw.get("sleep_vram_mib_per_gpu") is None
+            else tuple(int(value) for value in raw["sleep_vram_mib_per_gpu"])
+        ),
+        weight_cache_offload_seconds=(
+            None
+            if raw.get("weight_cache_offload_seconds") is None
+            else float(raw["weight_cache_offload_seconds"])
+        ),
+        weight_cache_activation_seconds=(
+            None
+            if raw.get("weight_cache_activation_seconds") is None
+            else float(raw["weight_cache_activation_seconds"])
+        ),
     )
 
 
