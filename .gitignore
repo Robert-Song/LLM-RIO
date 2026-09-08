@@ -23,6 +23,7 @@ scripts/
 tests/*
 !tests/test_cli_model_registration.py
 !tests/test_prism_runtime.py
+!tests/test_prism_demo_preflight.py
 !tests/test_prism_worker_transitions.py
 !tests/test_validation_cleanup.py
 uv.lock

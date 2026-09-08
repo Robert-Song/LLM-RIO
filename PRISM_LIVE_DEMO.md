@@ -104,7 +104,7 @@ active inference worker.
 The restored implementation is committed on branch `prism`. Its current
 non-GPU acceptance gates pass:
 
-- 44 retained and restored automated tests.
+- 47 retained and restored automated tests.
 - 19 focused Prism runtime/transition tests.
 - Ruff on every restored or changed Python file.
 - The real vLLM 0.26 worker bootstrap reports all six required compatibility
@@ -168,6 +168,13 @@ ss -ltnp | grep -E ':(3737|8002)\b' || true
 nvidia-smi --query-gpu=index,name,memory.used,utilization.gpu --format=csv,noheader
 ```
 
+Run the fail-fast preflight and continue only if its summary says `PASS`:
+
+```bash
+/.gavea/store/song669/LLM-RIO/.venv/bin/python prism_demo_preflight.py \
+  --config /tmp/llm-rio-prism-rehearsal/config.toml --phase before-start
+```
+
 Set the isolated endpoint without putting a credential in shell history:
 
 ```bash
@@ -219,7 +226,7 @@ read -rsp 'LLM-RIO API key: ' LLMRIO_API_KEY; export LLMRIO_API_KEY; echo
 Before going on stage, confirm the dashboard shows:
 
 - Laguna TP=2, `SLEEPING`, `weight_storage=host_ram`.
-- Gemma TP=2, `SLEEPING`, `weight_storage=host_ram`.
+- One validated Gemma placement, `SLEEPING`, `weight_storage=host_ram`.
 - Two Qwen TP=1 workers on distinct GPUs, both `SLEEPING`.
 - No temporary `qwen3-8b-q8` catalog row or local Hugging Face cache. Otherwise
   the registration act will be a duplicate or a cache hit instead of a real
@@ -227,6 +234,14 @@ Before going on stage, confirm the dashboard shows:
 
 Do not use or expose port 8002. All demo traffic goes through LLM-RIO on 3737;
 private worker ports stay bound to `127.0.0.1`.
+
+With `LLMRIO_API_KEY` set in pane 4, make the dashboard requirements an
+executable gate:
+
+```bash
+/.gavea/store/song669/LLM-RIO/.venv/bin/python prism_demo_preflight.py \
+  --config /tmp/llm-rio-prism-rehearsal/config.toml --phase ready
+```
 
 ## Live demo: 7-9 minutes
 
