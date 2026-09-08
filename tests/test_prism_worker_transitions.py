@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -33,6 +35,11 @@ def _supervisor(worker: WorkerPlacement) -> tuple[WorkerSupervisor, _TransitionD
     supervisor.settings = SimpleNamespace(
         prism_weight_cache_mode="ram",
         prism_transition_timeout_seconds=10.0,
+        engines=SimpleNamespace(
+            vllm_executable="/opt/llm-rio/bin/vllm",
+            llama_cpp_executable="llama-server",
+            environment={"PATH": "/usr/local/bin:/usr/bin"},
+        ),
     )
     supervisor.database = database
     supervisor.workers = {worker.id: worker}
@@ -46,7 +53,7 @@ def _supervisor(worker: WorkerPlacement) -> tuple[WorkerSupervisor, _TransitionD
     supervisor.internal_api_key = "internal-test-key"
     supervisor.kvcached = SimpleNamespace(
         enabled=True,
-        environment=lambda: {"LLM_RIO_KVCACHED_VLLM026_SHIM": "1"},
+        environment=lambda **_kwargs: {"LLM_RIO_KVCACHED_VLLM026_SHIM": "1"},
     )
     return supervisor, database
 
@@ -63,6 +70,21 @@ def _ready_worker(*, active_request: bool = False) -> WorkerPlacement:
         worker.admitted_request_ids.add("request-1")
         worker.outstanding_token_work = 128
     return worker
+
+
+def test_worker_environment_finds_helpers_beside_absolute_vllm() -> None:
+    worker = _ready_worker()
+    supervisor, _database = _supervisor(worker)
+
+    environment = supervisor._environment(worker)
+
+    assert environment["PATH"].split(os.pathsep) == [
+        str(Path("/opt/llm-rio/bin").resolve()),
+        "/usr/local/bin",
+        "/usr/bin",
+    ]
+    assert environment["CUDA_VISIBLE_DEVICES"] == "GPU-0"
+    assert environment["VLLM_API_KEY"] == "internal-test-key"
 
 
 async def test_worker_sleep_wake_round_trip_preserves_host_backup() -> None:

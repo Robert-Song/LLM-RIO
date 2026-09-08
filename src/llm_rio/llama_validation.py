@@ -107,7 +107,11 @@ async def _probe_llama_cpp(
                 *command,
                 stdout=log_handle,
                 stderr=asyncio.subprocess.STDOUT,
-                env=gpu_environment(gpu_set, settings.engines.environment),
+                env=gpu_environment(
+                    gpu_set,
+                    settings.engines.environment,
+                    executable=settings.engines.llama_cpp_executable,
+                ),
                 start_new_session=True,
             )
         except OSError as exc:

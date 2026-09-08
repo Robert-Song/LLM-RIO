@@ -257,7 +257,16 @@ class WorkerSupervisor:
         return True
 
     def _environment(self, worker: WorkerPlacement) -> dict[str, str]:
-        environment = gpu_environment(worker.gpu_uuids, self.settings.engines.environment)
+        executable = (
+            self.settings.engines.vllm_executable
+            if worker.profile.engine is Engine.VLLM
+            else self.settings.engines.llama_cpp_executable
+        )
+        environment = gpu_environment(
+            worker.gpu_uuids,
+            self.settings.engines.environment,
+            executable=executable,
+        )
         if worker.profile.engine is Engine.VLLM:
             environment["VLLM_API_KEY"] = self.internal_api_key
             if worker.profile.memory_backend == "kvcached":

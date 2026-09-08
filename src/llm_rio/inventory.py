@@ -8,6 +8,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import asdict
 from itertools import combinations
+from pathlib import Path
 from typing import Any
 
 from llm_rio.domain import GpuDevice, MachineInventory
@@ -164,11 +165,23 @@ def discover_inventory(machine_id: str, managed_gpu_uuids: list[str]) -> Machine
 
 
 def gpu_environment(
-    gpu_uuids: tuple[str, ...], overrides: dict[str, str] | None = None
+    gpu_uuids: tuple[str, ...],
+    overrides: dict[str, str] | None = None,
+    *,
+    executable: str | None = None,
 ) -> dict[str, str]:
     environment = dict(os.environ)
     environment.update(overrides or {})
     environment["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_uuids)
+    # An absolute/relative engine path does not activate its virtual environment.
+    # Keep sibling helper binaries (for example FlashInfer's ``ninja``) visible.
+    if executable and os.path.dirname(executable):
+        executable_dir = str(Path(executable).expanduser().resolve().parent)
+        path_entries = environment.get("PATH", "").split(os.pathsep)
+        if executable_dir not in path_entries:
+            environment["PATH"] = os.pathsep.join(
+                [executable_dir, *(entry for entry in path_entries if entry)]
+            )
     return environment
 
 

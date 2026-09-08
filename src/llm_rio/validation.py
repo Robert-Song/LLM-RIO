@@ -269,7 +269,11 @@ class ProfileValidator:
             tensor_parallel_size=candidate.tensor_parallel_size,
             gpu_indices=gpu_indices,
         )
-        environment = gpu_environment(gpu_set, self.settings.engines.environment)
+        environment = gpu_environment(
+            gpu_set,
+            self.settings.engines.environment,
+            executable=self.settings.engines.vllm_executable,
+        )
         environment["VLLM_API_KEY"] = api_key
         environment.update(self.kvcached.environment(pythonpath=environment.get("PYTHONPATH")))
         if self.ram_weight_cache_enabled:
