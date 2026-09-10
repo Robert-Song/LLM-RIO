@@ -6,7 +6,12 @@ import uuid
 from pathlib import Path
 
 from llm_rio.config import Settings
-from llm_rio.domain import Engine, MachineInventory, PlacementProfile
+from llm_rio.domain import (
+    CURRENT_VRAM_MEASUREMENT_VERSION,
+    Engine,
+    MachineInventory,
+    PlacementProfile,
+)
 from llm_rio.inventory import gpu_environment
 from llm_rio.runtime import ResidencyScheduler
 from llm_rio.validation import (
@@ -14,6 +19,7 @@ from llm_rio.validation import (
     ProfileValidator,
     ValidationError,
     ValidationPreempted,
+    _VramSampler,
     validation_log_path,
 )
 
@@ -34,7 +40,7 @@ async def validate_llama_cpp(
     profiles: list[PlacementProfile] = []
     failures: list[ValidationError] = []
     for gpu_set in candidate.eligible_gpu_sets:
-        while not await scheduler.acquire_validation_gpus(gpu_set):
+        while not await scheduler.acquire_validation_gpus(gpu_set):  # noqa: ASYNC110
             await asyncio.sleep(5.0)
         try:
             profiles.append(
@@ -101,6 +107,8 @@ async def _probe_llama_cpp(
         gpu_indices=gpu_indices,
     )
     started = time.monotonic()
+    sampler = _VramSampler(probes._used_vram, gpu_set)
+    sampler.start()
     with log_path.open("ab", buffering=0) as log_handle:
         try:
             process = await asyncio.create_subprocess_exec(
@@ -115,21 +123,29 @@ async def _probe_llama_cpp(
                 start_new_session=True,
             )
         except OSError as exc:
+            await sampler.stop()
             raise ValidationError(
                 "llama_cpp_launch", str(exc), {"log_path": str(log_path)}
             ) from exc
         try:
             await probes._wait_for_health(process, port, api_key)
             load_seconds = time.monotonic() - started
-            idle_memory = probes._used_vram(gpu_set)
-            throughput, peak_memory = await probes._generation_contract(
+            idle_memory = sampler.sample_now()
+            throughput = await probes._generation_contract(
                 process=process,
                 port=port,
                 api_key=api_key,
                 nickname=nickname,
+            )
+            peak_memory = sampler.peak()
+            await sampler.stop()
+            probes._validate_vram_measurements(
                 gpu_set=gpu_set,
+                peak_memory=peak_memory,
+                baseline_drop_mib=sampler.baseline_drop_mib,
             )
         except BaseException as exc:
+            await sampler.stop()
             await probes._terminate(process)
             if isinstance(exc, ValidationError):
                 exc.details.setdefault("log_path", str(log_path))
@@ -156,12 +172,14 @@ async def _probe_llama_cpp(
         load_and_warmup_seconds=load_seconds,
         idle_vram_mib_per_gpu=idle_memory,
         peak_vram_mib_per_gpu=peak_memory,
-        gpu_headroom_mib_per_gpu=tuple(settings.reserved_vram_mib for _ in gpu_set),
+        gpu_headroom_mib_per_gpu=(0,) * len(gpu_set),
         capabilities=frozenset({"chat", "streaming"}),
         launch_args={"model": str(gguf_path), "n_gpu_layers": 999},
         gpu_memory_utilization=candidate.gpu_memory_utilization,
         kv_cache_capacity_tokens=None,
         max_full_length_concurrency=None,
+        vram_measurement_version=CURRENT_VRAM_MEASUREMENT_VERSION,
+        vram_baseline_mib_per_gpu=sampler.baseline_mib,
     )
 
 

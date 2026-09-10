@@ -11,7 +11,7 @@ from typing import Literal
 
 logger = logging.getLogger(__name__)
 
-KVCachedMode = Literal["disabled", "auto", "required"]
+KVCachedMode = Literal["none", "auto", "required"]
 KVCACHED_COMPAT_REVISION = "60cad949389af6bbf1d65c4eddf325113df5a9eb"
 
 
@@ -83,8 +83,8 @@ def _source_revision(distribution: importlib.metadata.Distribution) -> str | Non
     return str(commit_id) if commit_id else None
 
 
-def detect_kvcached(mode: KVCachedMode) -> KVCachedRuntime:
-    if mode == "disabled":
+def detect_kvcached(mode: KVCachedMode | str | None) -> KVCachedRuntime:
+    if mode is None or str(mode).strip().lower() in {"", "none", "disabled"}:
         return KVCachedRuntime(False, None, None, False, "disabled_by_configuration")
     try:
         distribution = importlib.metadata.distribution("kvcached")

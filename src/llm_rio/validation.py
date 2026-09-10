@@ -8,17 +8,25 @@ import os
 import re
 import secrets
 import signal
+import socket
 import time
 import uuid
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
 from llm_rio.config import Settings
-from llm_rio.domain import Engine, MachineInventory, PlacementProfile
+from llm_rio.domain import (
+    CURRENT_VRAM_MEASUREMENT_VERSION,
+    Engine,
+    MachineInventory,
+    PlacementProfile,
+)
+from llm_rio.host_memory import sample_process_group_memory
 from llm_rio.inventory import candidate_gpu_sets, gpu_environment
 from llm_rio.prism import add_kvcached_vllm_flags, detect_kvcached
 from llm_rio.runtime import ResidencyScheduler
@@ -67,13 +75,8 @@ def _model_launch_args(model_path: Path) -> dict[str, Any]:
         return {}
     config = json.loads(config_path.read_text(encoding="utf-8"))
     architectures = config.get("architectures")
-    architecture_names = {
-        str(value) for value in architectures if isinstance(architectures, list)
-    }
-    if (
-        config.get("model_type") == "deepseek_v4"
-        or "DeepseekV4ForCausalLM" in architecture_names
-    ):
+    architecture_names = {str(value) for value in architectures if isinstance(architectures, list)}
+    if config.get("model_type") == "deepseek_v4" or "DeepseekV4ForCausalLM" in architecture_names:
         return {"kv_cache_dtype": "fp8"}
     return {}
 
@@ -89,6 +92,7 @@ class CandidateShape:
     dtype: str
     quantization: str | None
     eligible_gpu_sets: tuple[tuple[str, ...], ...]
+    launch_args: dict[str, Any] = field(default_factory=dict)
 
 
 def build_candidate_shapes(
@@ -148,6 +152,83 @@ def build_candidate_shapes(
     return candidates
 
 
+class _VramSampler:
+    """Continuously measure one worker above a stable pre-launch GPU baseline."""
+
+    def __init__(
+        self,
+        read_vram: Callable[[tuple[str, ...]], tuple[int, ...]],
+        gpu_set: tuple[str, ...],
+        *,
+        interval_seconds: float = 0.1,
+    ) -> None:
+        self._read_vram = read_vram
+        self.gpu_set = gpu_set
+        self.interval_seconds = interval_seconds
+        self.baseline_mib = read_vram(gpu_set)
+        self._latest_mib = self.baseline_mib
+        self._peak_delta_mib = [0 for _ in gpu_set]
+        self._minimum_absolute_mib = list(self.baseline_mib)
+        self._stop = asyncio.Event()
+        self._task: asyncio.Task[None] | None = None
+
+    @staticmethod
+    def _delta(current: tuple[int, ...], baseline: tuple[int, ...]) -> tuple[int, ...]:
+        return tuple(
+            max(0, observed - initial) for observed, initial in zip(current, baseline, strict=True)
+        )
+
+    def _observe(self, current: tuple[int, ...]) -> tuple[int, ...]:
+        if len(current) != len(self.baseline_mib):
+            raise RuntimeError("GPU VRAM sample shape changed during validation")
+        self._latest_mib = current
+        delta = self._delta(current, self.baseline_mib)
+        self._peak_delta_mib = [
+            max(peak, observed) for peak, observed in zip(self._peak_delta_mib, delta, strict=True)
+        ]
+        self._minimum_absolute_mib = [
+            min(minimum, observed)
+            for minimum, observed in zip(self._minimum_absolute_mib, current, strict=True)
+        ]
+        return delta
+
+    def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.create_task(self._run(), name="validation-vram-sampler")
+
+    async def _run(self) -> None:
+        while not self._stop.is_set():
+            current = await asyncio.to_thread(self._read_vram, self.gpu_set)
+            self._observe(current)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._stop.wait(), timeout=self.interval_seconds)
+
+    def sample_now(self) -> tuple[int, ...]:
+        return self._observe(self._read_vram(self.gpu_set))
+
+    def peak(self) -> tuple[int, ...]:
+        self.sample_now()
+        return tuple(self._peak_delta_mib)
+
+    def reset_peak(self) -> None:
+        current = self.sample_now()
+        self._peak_delta_mib = list(current)
+
+    @property
+    def baseline_drop_mib(self) -> tuple[int, ...]:
+        return tuple(
+            max(0, initial - minimum)
+            for initial, minimum in zip(self.baseline_mib, self._minimum_absolute_mib, strict=True)
+        )
+
+    async def stop(self) -> None:
+        self._stop.set()
+        if self._task is not None:
+            await self._task
+            self._task = None
+        self.sample_now()
+
+
 class ProfileValidator:
     """Runs preemptible, idle-only engine contract and capacity probes."""
 
@@ -160,10 +241,34 @@ class ProfileValidator:
         self.settings = settings
         self.inventory = inventory
         self.scheduler = scheduler
-        self.kvcached = detect_kvcached(settings.engines.kvcached_mode)
-        self.ram_weight_cache_enabled = (
-            self.kvcached.enabled and settings.prism_weight_cache_mode == "ram"
+        self._validation_ports: set[int] = set()
+        self._validation_port_lock = asyncio.Lock()
+
+    @staticmethod
+    def _local_port_available(port: int) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            try:
+                listener.bind(("127.0.0.1", port))
+            except OSError:
+                return False
+        return True
+
+    async def _reserve_validation_port(self) -> int:
+        first_port = self.settings.worker_port_end + 1
+        async with self._validation_port_lock:
+            for port in range(first_port, first_port + 128):
+                if port in self._validation_ports or not self._local_port_available(port):
+                    continue
+                self._validation_ports.add(port)
+                return port
+        raise ValidationError(
+            "engine_launch",
+            f"no free validation port is available in {first_port}-{first_port + 127}",
         )
+
+    async def _release_validation_port(self, port: int) -> None:
+        async with self._validation_port_lock:
+            self._validation_ports.discard(port)
 
     async def validate_vllm(
         self,
@@ -173,28 +278,49 @@ class ProfileValidator:
         model_path: Path,
         nickname: str,
         candidate: CandidateShape,
+        backend: Literal["native", "kvcached"] = "native",
     ) -> list[PlacementProfile]:
-        profiles: list[PlacementProfile] = []
-        failures: list[ValidationError] = []
-        for gpu_set in candidate.eligible_gpu_sets:
+        async def validate_gpu_set(
+            gpu_set: tuple[str, ...],
+        ) -> PlacementProfile | ValidationError:
             while not await self.scheduler.acquire_validation_gpus(gpu_set):  # noqa: ASYNC110
                 await asyncio.sleep(5.0)
             try:
-                profile = await self._probe_vllm(
+                return await self._probe_vllm(
                     model_id=model_id,
                     model_revision=model_revision,
                     model_path=model_path,
                     nickname=nickname,
                     candidate=candidate,
                     gpu_set=gpu_set,
+                    backend=backend,
                 )
-                profiles.append(profile)
             except ValidationPreempted:
                 raise
             except ValidationError as exc:
-                failures.append(exc)
+                return exc
             finally:
                 await self.scheduler.release_validation_gpus(gpu_set)
+
+        tasks = [
+            asyncio.create_task(validate_gpu_set(gpu_set), name=f"vllm-validation-{index}")
+            for index, gpu_set in enumerate(candidate.eligible_gpu_sets, 1)
+        ]
+        try:
+            results = await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+        profiles: list[PlacementProfile] = []
+        failures: list[ValidationError] = []
+        for result in results:
+            if isinstance(result, ValidationError):
+                failures.append(result)
+            else:
+                profiles.append(result)
         if not profiles and failures:
             raise failures[-1]
         return profiles
@@ -208,10 +334,45 @@ class ProfileValidator:
         nickname: str,
         candidate: CandidateShape,
         gpu_set: tuple[str, ...],
+        backend: Literal["native", "kvcached"],
     ) -> PlacementProfile:
-        port = self.settings.worker_port_end + 1
+        port = await self._reserve_validation_port()
+        try:
+            return await self._probe_vllm_on_port(
+                model_id=model_id,
+                model_revision=model_revision,
+                model_path=model_path,
+                nickname=nickname,
+                candidate=candidate,
+                gpu_set=gpu_set,
+                backend=backend,
+                port=port,
+            )
+        finally:
+            await self._release_validation_port(port)
+
+    async def _probe_vllm_on_port(
+        self,
+        *,
+        model_id: str,
+        model_revision: str,
+        model_path: Path,
+        nickname: str,
+        candidate: CandidateShape,
+        gpu_set: tuple[str, ...],
+        backend: Literal["native", "kvcached"],
+        port: int,
+    ) -> PlacementProfile:
+        gpu_indices = tuple(
+            device.index for device in self.inventory.gpus if device.uuid in gpu_set
+        )
         api_key = f"rio_validation_{secrets.token_urlsafe(32)}"
-        launch_args = _model_launch_args(model_path)
+        launch_args = {
+            **_model_launch_args(model_path),
+            **candidate.launch_args,
+        }
+        kvcached = detect_kvcached("required") if backend == "kvcached" else detect_kvcached("none")
+        ram_weight_cache_enabled = self.settings.prism_weight_cache_mode == "ram"
         command = [
             self.settings.engines.vllm_executable,
             "serve",
@@ -244,7 +405,7 @@ class ProfileValidator:
             command.extend(["--enable-auto-tool-choice", "--tool-call-parser", parsers.tool_parser])
         if parsers.reasoning_parser is not None:
             command.extend(["--reasoning-parser", parsers.reasoning_parser])
-        if self.ram_weight_cache_enabled:
+        if ram_weight_cache_enabled:
             command.append("--enable-sleep-mode")
         for key, value in launch_args.items():
             flag = f"--{key.replace('_', '-')}"
@@ -258,14 +419,11 @@ class ProfileValidator:
                 command.extend([flag, json.dumps(value, separators=(",", ":"), sort_keys=True)])
             elif value is not None:
                 command.extend([flag, str(value)])
-        add_kvcached_vllm_flags(command, self.kvcached)
-        gpu_indices = tuple(
-            device.index for device in self.inventory.gpus if device.uuid in gpu_set
-        )
+        add_kvcached_vllm_flags(command, kvcached)
         log_path = validation_log_path(
             log_dir=self.settings.log_dir,
             nickname=nickname,
-            engine="vllm",
+            engine=f"vllm-{backend}",
             tensor_parallel_size=candidate.tensor_parallel_size,
             gpu_indices=gpu_indices,
         )
@@ -275,13 +433,17 @@ class ProfileValidator:
             executable=self.settings.engines.vllm_executable,
         )
         environment["VLLM_API_KEY"] = api_key
-        environment.update(self.kvcached.environment(pythonpath=environment.get("PYTHONPATH")))
-        if self.ram_weight_cache_enabled:
+        environment.update(kvcached.environment(pythonpath=environment.get("PYTHONPATH")))
+        if ram_weight_cache_enabled:
             environment["VLLM_SERVER_DEV_MODE"] = "1"
         started = time.monotonic()
         sleep_memory: tuple[int, ...] | None = None
+        wake_peak_memory: tuple[int, ...] | None = None
         offload_seconds: float | None = None
         activation_seconds: float | None = None
+        host_cache_mib: float | None = None
+        sampler = _VramSampler(self._used_vram, gpu_set)
+        sampler.start()
         with log_path.open("ab", buffering=0) as log_handle:
             try:
                 process = await asyncio.create_subprocess_exec(
@@ -292,6 +454,7 @@ class ProfileValidator:
                     start_new_session=True,
                 )
             except OSError as exc:
+                await sampler.stop()
                 raise ValidationError(
                     "engine_launch", str(exc), {"log_path": str(log_path)}
                 ) from exc
@@ -299,45 +462,51 @@ class ProfileValidator:
                 await self._wait_for_health(process, port, api_key)
                 load_seconds = time.monotonic() - started
                 kv_cache_capacity, max_concurrency = self._capacity_from_log(log_path)
-                idle_memory = self._used_vram(gpu_set)
-                throughput, peak_memory = await self._generation_contract(
+                idle_memory = sampler.sample_now()
+                throughput = await self._generation_contract(
                     process=process,
                     port=port,
                     api_key=api_key,
                     nickname=nickname,
-                    gpu_set=gpu_set,
                 )
-                if self.ram_weight_cache_enabled:
+                peak_memory = sampler.peak()
+                if ram_weight_cache_enabled:
                     (
                         offload_seconds,
                         activation_seconds,
                         sleep_memory,
+                        host_cache_mib,
                     ) = await self._sleep_wake_contract(
                         port=port,
                         api_key=api_key,
-                        gpu_set=gpu_set,
+                        process_pid=process.pid,
+                        sampler=sampler,
                     )
-                    post_wake_throughput, post_wake_peak = (
-                        await self._generation_contract(
-                            process=process,
-                            port=port,
-                            api_key=api_key,
-                            nickname=nickname,
-                            gpu_set=gpu_set,
-                        )
+                    post_wake_throughput = await self._generation_contract(
+                        process=process,
+                        port=port,
+                        api_key=api_key,
+                        nickname=nickname,
                     )
                     throughput = min(throughput, post_wake_throughput)
+                    wake_peak_memory = sampler.peak()
                     peak_memory = tuple(
                         max(before, after)
-                        for before, after in zip(
-                            peak_memory, post_wake_peak, strict=True
-                        )
+                        for before, after in zip(peak_memory, wake_peak_memory, strict=True)
                     )
+                await sampler.stop()
+                self._validate_vram_measurements(
+                    gpu_set=gpu_set,
+                    peak_memory=peak_memory,
+                    baseline_drop_mib=sampler.baseline_drop_mib,
+                )
             except ValidationError as exc:
+                await sampler.stop()
                 await self._terminate(process)
                 exc.details.setdefault("log_path", str(log_path))
                 raise
             except BaseException:
+                await sampler.stop()
                 await self._terminate(process)
                 raise
             await self._terminate(process)
@@ -365,7 +534,7 @@ class ProfileValidator:
             load_and_warmup_seconds=load_seconds,
             idle_vram_mib_per_gpu=idle_memory,
             peak_vram_mib_per_gpu=peak_memory,
-            gpu_headroom_mib_per_gpu=tuple(self.settings.reserved_vram_mib for _ in gpu_set),
+            gpu_headroom_mib_per_gpu=(0,) * len(gpu_set),
             capabilities=frozenset(
                 {"chat", "streaming", "tools"}
                 if parsers.tool_parser is not None
@@ -375,10 +544,16 @@ class ProfileValidator:
             gpu_memory_utilization=candidate.gpu_memory_utilization,
             kv_cache_capacity_tokens=kv_cache_capacity,
             max_full_length_concurrency=max_concurrency,
-            memory_backend=self.kvcached.memory_backend,
+            memory_backend=backend,
             sleep_vram_mib_per_gpu=sleep_memory,
             weight_cache_offload_seconds=offload_seconds,
             weight_cache_activation_seconds=activation_seconds,
+            host_cache_mib=host_cache_mib,
+            normal_verified=backend == "native",
+            kvcached_verified=backend == "kvcached",
+            vram_measurement_version=CURRENT_VRAM_MEASUREMENT_VERSION,
+            vram_baseline_mib_per_gpu=sampler.baseline_mib,
+            wake_peak_vram_mib_per_gpu=wake_peak_memory,
         )
 
     async def _sleep_wake_contract(
@@ -386,8 +561,9 @@ class ProfileValidator:
         *,
         port: int,
         api_key: str,
-        gpu_set: tuple[str, ...],
-    ) -> tuple[float, float, tuple[int, ...]]:
+        process_pid: int,
+        sampler: _VramSampler,
+    ) -> tuple[float, float, tuple[int, ...], float]:
         if self.scheduler.validation_should_yield():
             raise ValidationPreempted()
         headers = {"Authorization": f"Bearer {api_key}"}
@@ -413,11 +589,10 @@ class ProfileValidator:
                 )
                 sleeping_response.raise_for_status()
                 if sleeping_response.json().get("is_sleeping") is not True:
-                    raise ValidationError(
-                        "weight_cache", "engine did not enter level-1 sleep"
-                    )
-                sleep_memory = self._used_vram(gpu_set)
-
+                    raise ValidationError("weight_cache", "engine did not enter level-1 sleep")
+                sleep_memory = sampler.sample_now()
+                process_memory = await asyncio.to_thread(sample_process_group_memory, process_pid)
+                sampler.reset_peak()
                 started = time.monotonic()
                 wake_response = await client.post(
                     f"http://127.0.0.1:{port}/wake_up",
@@ -436,16 +611,60 @@ class ProfileValidator:
                 )
                 awake_response.raise_for_status()
                 if awake_response.json().get("is_sleeping") is not False:
-                    raise ValidationError(
-                        "weight_cache", "engine remained asleep after wake"
-                    )
+                    raise ValidationError("weight_cache", "engine remained asleep after wake")
         except ValidationError:
             raise
         except (httpx.HTTPError, ValueError) as exc:
             raise ValidationError("weight_cache", str(exc)) from exc
         if self.scheduler.validation_should_yield():
             raise ValidationPreempted()
-        return offload_seconds, activation_seconds, sleep_memory
+        return offload_seconds, activation_seconds, sleep_memory, process_memory.accounted_mib
+
+    def _validate_vram_measurements(
+        self,
+        *,
+        gpu_set: tuple[str, ...],
+        peak_memory: tuple[int, ...],
+        baseline_drop_mib: tuple[int, ...],
+    ) -> None:
+        if len(peak_memory) != len(gpu_set) or len(baseline_drop_mib) != len(gpu_set):
+            raise ValidationError(
+                "gpu_measurement",
+                "GPU VRAM measurement shape changed during validation",
+            )
+        unstable = {
+            gpu_uuid: drop
+            for gpu_uuid, drop in zip(gpu_set, baseline_drop_mib, strict=True)
+            if drop > 0
+        }
+        if unstable:
+            raise ValidationError(
+                "gpu_measurement",
+                "pre-launch GPU baseline changed during validation",
+                {"baseline_drop_mib_per_gpu": unstable},
+            )
+        totals = {device.uuid: device.total_vram_mib for device in self.inventory.gpus}
+        violations: dict[str, dict[str, int]] = {}
+        for gpu_uuid, observed_mib in zip(gpu_set, peak_memory, strict=True):
+            total_mib = totals.get(gpu_uuid)
+            if total_mib is None:
+                raise ValidationError(
+                    "gpu_measurement", f"GPU {gpu_uuid} is missing from machine inventory"
+                )
+            budget_mib = max(0, total_mib - self.settings.reserved_vram_mib)
+            if observed_mib > budget_mib:
+                violations[gpu_uuid] = {
+                    "measured_peak_mib": observed_mib,
+                    "schedulable_budget_mib": budget_mib,
+                    "total_vram_mib": total_mib,
+                    "reserved_vram_mib": self.settings.reserved_vram_mib,
+                }
+        if violations:
+            raise ValidationError(
+                "gpu_capacity",
+                "measured worker peak exceeds the schedulable GPU budget",
+                {"violations": violations},
+            )
 
     @staticmethod
     def _capacity_from_log(log_path: Path) -> tuple[int | None, float | None]:
@@ -490,8 +709,7 @@ class ProfileValidator:
         port: int,
         api_key: str,
         nickname: str,
-        gpu_set: tuple[str, ...],
-    ) -> tuple[float, tuple[int, ...]]:
+    ) -> float:
         payload = {
             "model": nickname,
             "messages": [{"role": "user", "content": "Reply with a short greeting."}],
@@ -502,7 +720,6 @@ class ProfileValidator:
         }
         completion_tokens = 0
         saw_done = False
-        peak = list(self._used_vram(gpu_set))
         started = time.monotonic()
         async with httpx.AsyncClient(timeout=120.0) as client:  # noqa: SIM117
             async with client.stream(
@@ -521,8 +738,6 @@ class ProfileValidator:
                 async for line in response.aiter_lines():
                     if self.scheduler.validation_should_yield():
                         raise ValidationPreempted()
-                    current = self._used_vram(gpu_set)
-                    peak = [max(old, new) for old, new in zip(peak, current, strict=True)]
                     if not line.startswith("data: "):
                         continue
                     data = line[6:]
@@ -536,7 +751,7 @@ class ProfileValidator:
         elapsed = max(time.monotonic() - started, 0.001)
         if process.returncode is not None or not saw_done or completion_tokens <= 0:
             raise ValidationError("streaming_contract", "stream or usage contract failed")
-        return completion_tokens / elapsed, tuple(peak)
+        return completion_tokens / elapsed
 
     @staticmethod
     def _process_group_exists(process_group: int) -> bool:

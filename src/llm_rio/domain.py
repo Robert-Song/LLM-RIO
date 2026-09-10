@@ -5,6 +5,11 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
+# Version 1 profiles stored whole-device NVML usage and therefore could not be
+# composed safely with other active or sleeping workers. Version 2 stores the
+# validation worker's incremental usage above a captured per-GPU baseline.
+CURRENT_VRAM_MEASUREMENT_VERSION = 2
+
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
@@ -101,6 +106,12 @@ class PlacementProfile:
     sleep_vram_mib_per_gpu: tuple[int, ...] | None = None
     weight_cache_offload_seconds: float | None = None
     weight_cache_activation_seconds: float | None = None
+    host_cache_mib: float | None = None
+    normal_verified: bool = True
+    kvcached_verified: bool = False
+    vram_measurement_version: int = 1
+    vram_baseline_mib_per_gpu: tuple[int, ...] | None = None
+    wake_peak_vram_mib_per_gpu: tuple[int, ...] | None = None
 
 
 @dataclass(slots=True)
@@ -121,6 +132,12 @@ class WorkerPlacement:
     last_offload_seconds: float | None = None
     host_weights_cached: bool = False
     process_pid: int | None = None
+    host_cache_accounted_mib: float = 0.0
+    host_cache_accounting_source: str | None = None
+    process_rss_mib: float = 0.0
+    process_pss_mib: float = 0.0
+    process_swap_mib: float = 0.0
+    last_cache_eviction_reason: str | None = None
 
     @property
     def model_id(self) -> str:

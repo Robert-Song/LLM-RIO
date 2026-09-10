@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from itertools import combinations
 
 from llm_rio.domain import Engine, PlacementProfile, RuntimeState, WorkerPlacement
+from llm_rio.profiles import profile_verified_for_mode
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,10 +59,10 @@ class GreedyPlacementPlanner:
         scale_window_seconds: float = 30.0,
         minimum_marginal_efficiency: float = 0.05,
         prism_enabled: bool = False,
+        kvcached_required: bool = False,
         gpu_vram_mib: dict[str, int] | None = None,
         reserved_vram_mib: int = 0,
-        prism_max_workers_per_gpu: int = 2,
-        prism_max_cached_workers_per_gpu: int = 8,
+        prism_max_workers_per_gpu: int = 1,
         prism_sleep_gpu_reserve_mib: int = 1536,
         prism_idle_sleep_seconds: float = 45.0,
         prism_weight_cache_enabled: bool = True,
@@ -72,10 +73,10 @@ class GreedyPlacementPlanner:
         self.scale_window_seconds = scale_window_seconds
         self.minimum_marginal_efficiency = minimum_marginal_efficiency
         self.prism_enabled = prism_enabled
+        self.kvcached_required = kvcached_required
         self.gpu_vram_mib = gpu_vram_mib or {}
         self.reserved_vram_mib = reserved_vram_mib
         self.prism_max_workers_per_gpu = prism_max_workers_per_gpu
-        self.prism_max_cached_workers_per_gpu = prism_max_cached_workers_per_gpu
         self.prism_sleep_gpu_reserve_mib = prism_sleep_gpu_reserve_mib
         self.prism_idle_sleep_seconds = prism_idle_sleep_seconds
         self.prism_weight_cache_enabled = prism_weight_cache_enabled
@@ -207,7 +208,7 @@ class GreedyPlacementPlanner:
         pressures: list[QueuePressure],
         profiles: dict[str, list[PlacementProfile]],
     ) -> list[PlannerAction]:
-        """Combine elastic KV allocation with persistent host-RAM weights."""
+        """Combine backend-appropriate GPU placement with host-RAM weights."""
         live_workers = [
             worker
             for worker in workers
@@ -223,15 +224,11 @@ class GreedyPlacementPlanner:
             if worker.state is RuntimeState.READY
             and worker.model_id not in real_pressure
             and not worker.admitted_request_ids
-            and (now - worker.last_demand_at).total_seconds()
-            >= self.prism_idle_sleep_seconds
+            and (now - worker.last_demand_at).total_seconds() >= self.prism_idle_sleep_seconds
             and self._residency_satisfied(worker, now)
         ]
         if idle_workers:
-            return [
-                SleepPlacement(worker.id, "prism_idle_weight_cache")
-                for worker in idle_workers
-            ]
+            return [SleepPlacement(worker.id, "prism_idle_weight_cache") for worker in idle_workers]
 
         for pressure in sorted(
             pressures,
@@ -240,7 +237,12 @@ class GreedyPlacementPlanner:
             candidates = [
                 profile
                 for profile in profiles.get(pressure.model_id, [])
-                if profile.engine is Engine.VLLM and profile.memory_backend == "kvcached"
+                if profile.engine is Engine.VLLM
+                and profile_verified_for_mode(
+                    profile,
+                    kvcached_required=self.kvcached_required,
+                    ram_weight_cache_required=True,
+                )
             ]
             if not candidates:
                 continue
@@ -298,8 +300,7 @@ class GreedyPlacementPlanner:
                 )
                 if blockers:
                     return [
-                        SleepPlacement(worker.id, "prism_weight_capacity")
-                        for worker in blockers
+                        SleepPlacement(worker.id, "prism_weight_capacity") for worker in blockers
                     ]
                 continue
             if transitioning:
@@ -308,18 +309,14 @@ class GreedyPlacementPlanner:
             if not ready_workers:
                 if sleeping_workers:
                     per_worker_capacity = max(
-                        worker.profile.predicted_tokens_per_second
-                        * self.scale_window_seconds
+                        worker.profile.predicted_tokens_per_second * self.scale_window_seconds
                         for worker in sleeping_workers
                     )
                     desired = min(
                         max(pressure.requests, 1),
                         max(
                             1,
-                            math.ceil(
-                                pressure.estimated_tokens
-                                / max(per_worker_capacity, 1)
-                            ),
+                            math.ceil(pressure.estimated_tokens / max(per_worker_capacity, 1)),
                         ),
                     )
                     wakes = self._cached_wakes(
@@ -354,9 +351,7 @@ class GreedyPlacementPlanner:
                         ]
                     continue
 
-                start = self._smallest_cached_prism_fitting(
-                    candidates, all_gpu_uuids, live_workers
-                )
+                start = self._smallest_cached_prism_fitting(candidates, all_gpu_uuids, live_workers)
                 if start is not None:
                     reason = "prism_preload" if pressure.preload else "prism_cold_backlog"
                     return [StartPlacement(start[0], start[1], reason)]
@@ -370,8 +365,7 @@ class GreedyPlacementPlanner:
                 )
                 if blockers:
                     return [
-                        SleepPlacement(worker.id, "prism_weight_capacity")
-                        for worker in blockers
+                        SleepPlacement(worker.id, "prism_weight_capacity") for worker in blockers
                     ]
                 if not pressure.preload:
                     evictions = self._choose_prism_cache_eviction(
@@ -382,8 +376,7 @@ class GreedyPlacementPlanner:
                     )
                     if evictions:
                         return [
-                            DrainPlacement(worker.id, "prism_ram_cache_lru")
-                            for worker in evictions
+                            DrainPlacement(worker.id, "prism_ram_cache_lru") for worker in evictions
                         ]
                 continue
 
@@ -397,9 +390,7 @@ class GreedyPlacementPlanner:
             )
             if desired <= len(ready_workers):
                 continue
-            one_gpu_candidates = [
-                profile for profile in candidates if profile.gpu_count == 1
-            ]
+            one_gpu_candidates = [profile for profile in candidates if profile.gpu_count == 1]
             one_gpu_sleeping = [
                 worker for worker in sleeping_workers if worker.profile.gpu_count == 1
             ]
@@ -416,9 +407,7 @@ class GreedyPlacementPlanner:
             start = self._smallest_cached_prism_fitting(
                 one_gpu_candidates, all_gpu_uuids, live_workers
             )
-            if start is not None and self._replica_has_useful_margin(
-                start[0], ready_workers
-            ):
+            if start is not None and self._replica_has_useful_margin(start[0], ready_workers):
                 return [StartPlacement(start[0], start[1], "prism_replica_backlog")]
             blockers = self._choose_prism_sleep(
                 now=now,
@@ -429,10 +418,7 @@ class GreedyPlacementPlanner:
                 real_pressure=real_pressure,
             )
             if blockers:
-                return [
-                    SleepPlacement(worker.id, "prism_replica_capacity")
-                    for worker in blockers
-                ]
+                return [SleepPlacement(worker.id, "prism_replica_capacity") for worker in blockers]
         return []
 
     def _cached_wakes(
@@ -457,13 +443,10 @@ class GreedyPlacementPlanner:
             selected.append(wake)
             remaining = [worker for worker in remaining if worker.id != wake.id]
             projected = [
-                replace(worker, state=RuntimeState.WAKING)
-                if worker.id == wake.id
-                else worker
+                replace(worker, state=RuntimeState.WAKING) if worker.id == wake.id else worker
                 for worker in projected
             ]
         return selected
-
 
     def _first_cached_wake(
         self,
@@ -542,7 +525,7 @@ class GreedyPlacementPlanner:
             candidates = [
                 profile
                 for profile in profiles.get(pressure.model_id, [])
-                if profile.engine is Engine.VLLM and profile.memory_backend == "kvcached"
+                if profile_verified_for_mode(profile, kvcached_required=True)
             ]
             if not candidates:
                 continue
@@ -607,6 +590,23 @@ class GreedyPlacementPlanner:
                     return profile, gpu_set
         return None
 
+    @staticmethod
+    def _active_vram_mib(profile: PlacementProfile, index: int) -> int | None:
+        if index >= len(profile.idle_vram_mib_per_gpu) or index >= len(
+            profile.peak_vram_mib_per_gpu
+        ):
+            return None
+        values = [
+            profile.idle_vram_mib_per_gpu[index],
+            profile.peak_vram_mib_per_gpu[index],
+        ]
+        wake_peak = profile.wake_peak_vram_mib_per_gpu
+        if wake_peak is not None:
+            if index >= len(wake_peak):
+                return None
+            values.append(wake_peak[index])
+        return max(values)
+
     def _cached_prism_fits(
         self,
         profile: PlacementProfile,
@@ -616,10 +616,8 @@ class GreedyPlacementPlanner:
         existing_worker_id: str | None = None,
         prospective_sleep: frozenset[str] = frozenset(),
     ) -> bool:
-        if (
-            len(profile.idle_vram_mib_per_gpu) != len(gpu_set)
-            or len(profile.peak_vram_mib_per_gpu) != len(gpu_set)
-            or len(profile.gpu_headroom_mib_per_gpu) != len(gpu_set)
+        if profile.engine is not Engine.VLLM or not profile_verified_for_mode(
+            profile, kvcached_required=self.kvcached_required, ram_weight_cache_required=True
         ):
             return False
         live = [worker for worker in workers if worker.state is not RuntimeState.COLD]
@@ -643,12 +641,13 @@ class GreedyPlacementPlanner:
             colocated = [worker for worker in live if gpu_uuid in worker.gpu_uuids]
             if any(
                 worker.profile.engine is not Engine.VLLM
-                or worker.profile.memory_backend != "kvcached"
+                or not profile_verified_for_mode(
+                    worker.profile,
+                    kvcached_required=self.kvcached_required,
+                    ram_weight_cache_required=True,
+                )
                 for worker in colocated
             ):
-                return False
-            new_processes = 0 if existing_worker_id is not None else 1
-            if len(colocated) + new_processes > self.prism_max_cached_workers_per_gpu:
                 return False
 
             active = [
@@ -658,58 +657,34 @@ class GreedyPlacementPlanner:
                 and worker.id not in prospective_sleep
                 and worker.state in gpu_resident_states
             ]
-            if len(active) + 1 > self.prism_max_workers_per_gpu:
+            active_limit = self.prism_max_workers_per_gpu if self.kvcached_required else 1
+            if len(active) + 1 > active_limit:
                 return False
 
             used_mib = 0
             for worker in active:
                 worker_index = worker.gpu_uuids.index(gpu_uuid)
-                if (
-                    worker_index >= len(worker.profile.idle_vram_mib_per_gpu)
-                    or worker_index >= len(worker.profile.peak_vram_mib_per_gpu)
-                    or worker_index >= len(worker.profile.gpu_headroom_mib_per_gpu)
-                ):
+                footprint = self._active_vram_mib(worker.profile, worker_index)
+                if footprint is None:
                     return False
-                used_mib += (
-                    max(
-                        worker.profile.idle_vram_mib_per_gpu[worker_index],
-                        worker.profile.peak_vram_mib_per_gpu[worker_index],
-                    )
-                    + worker.profile.gpu_headroom_mib_per_gpu[worker_index]
-                )
+                used_mib += footprint
             sleeping = [
                 worker
                 for worker in colocated
                 if worker.id != existing_worker_id
-                and (
-                    worker.state is RuntimeState.SLEEPING
-                    or worker.id in prospective_sleep
-                )
+                and (worker.state is RuntimeState.SLEEPING or worker.id in prospective_sleep)
             ]
             for sleeping_worker in sleeping:
                 worker_index = sleeping_worker.gpu_uuids.index(gpu_uuid)
-                residual_mib = self.prism_sleep_gpu_reserve_mib
                 measured = sleeping_worker.profile.sleep_vram_mib_per_gpu
-                if measured is not None and worker_index < len(measured):
-                    residual_mib = max(residual_mib, measured[worker_index])
-                used_mib += residual_mib
+                if measured is None or worker_index >= len(measured):
+                    return False
+                used_mib += measured[worker_index]
 
-            total_mib = self.gpu_vram_mib.get(gpu_uuid, 0)
-            utilization = min(
-                [profile.gpu_memory_utilization]
-                + [worker.profile.gpu_memory_utilization for worker in colocated]
-            )
-            budget_mib = min(
-                total_mib - self.reserved_vram_mib,
-                math.floor(total_mib * utilization),
-            )
-            requested_mib = (
-                max(
-                    profile.idle_vram_mib_per_gpu[requested_index],
-                    profile.peak_vram_mib_per_gpu[requested_index],
-                )
-                + profile.gpu_headroom_mib_per_gpu[requested_index]
-            )
+            requested_mib = self._active_vram_mib(profile, requested_index)
+            if requested_mib is None:
+                return False
+            budget_mib = self.gpu_vram_mib.get(gpu_uuid, 0) - self.reserved_vram_mib
             if used_mib + requested_mib > budget_mib:
                 return False
         return True
@@ -733,9 +708,7 @@ class GreedyPlacementPlanner:
             now - pressure.oldest_enqueued_at
         ).total_seconds() >= self.fair_share_seconds
 
-        placements: list[
-            tuple[PlacementProfile, tuple[str, ...], str | None]
-        ]
+        placements: list[tuple[PlacementProfile, tuple[str, ...], str | None]]
         if existing_workers is None:
             placements = [
                 (profile, gpu_set, None)
@@ -787,9 +760,7 @@ class GreedyPlacementPlanner:
                     last_demand_score = sum(
                         worker.last_demand_at.timestamp() for worker in selected
                     )
-                    options.append(
-                        (count, lost_throughput, last_demand_score, selected)
-                    )
+                    options.append((count, lost_throughput, last_demand_score, selected))
                     found = True
                 if found:
                     break
@@ -824,9 +795,7 @@ class GreedyPlacementPlanner:
                     for selected_tuple in combinations(evictable, count):
                         selected = list(selected_tuple)
                         selected_ids = {worker.id for worker in selected}
-                        remaining = [
-                            worker for worker in workers if worker.id not in selected_ids
-                        ]
+                        remaining = [worker for worker in workers if worker.id not in selected_ids]
                         if not self._cached_prism_fits(profile, gpu_set, remaining):
                             continue
                         most_recent_demand = max(
@@ -853,56 +822,34 @@ class GreedyPlacementPlanner:
         gpu_set: tuple[str, ...],
         active: list[WorkerPlacement],
     ) -> bool:
-        if (
-            len(profile.idle_vram_mib_per_gpu) != len(gpu_set)
-            or len(profile.peak_vram_mib_per_gpu) != len(gpu_set)
-            or len(profile.gpu_headroom_mib_per_gpu) != len(gpu_set)
-        ):
+        if not profile_verified_for_mode(profile, kvcached_required=True):
             return False
         if any(
             worker.model_id == profile.model_id and worker.gpu_uuids == gpu_set for worker in active
         ):
             return False
-        for gpu_uuid, requested_mib in zip(gpu_set, profile.idle_vram_mib_per_gpu, strict=True):
+        for requested_index, gpu_uuid in enumerate(gpu_set):
             colocated = [worker for worker in active if gpu_uuid in worker.gpu_uuids]
             if len(colocated) >= self.prism_max_workers_per_gpu:
                 return False
             if any(
                 worker.profile.engine is not Engine.VLLM
-                or worker.profile.memory_backend != "kvcached"
+                or not profile_verified_for_mode(worker.profile, kvcached_required=True)
                 for worker in colocated
             ):
                 return False
             used_mib = 0
             for worker in colocated:
                 index = worker.gpu_uuids.index(gpu_uuid)
-                if (
-                    index >= len(worker.profile.idle_vram_mib_per_gpu)
-                    or index >= len(worker.profile.peak_vram_mib_per_gpu)
-                    or index >= len(worker.profile.gpu_headroom_mib_per_gpu)
-                ):
+                footprint = self._active_vram_mib(worker.profile, index)
+                if footprint is None:
                     return False
-                used_mib += (
-                    max(
-                        worker.profile.idle_vram_mib_per_gpu[index],
-                        worker.profile.peak_vram_mib_per_gpu[index],
-                    )
-                    + worker.profile.gpu_headroom_mib_per_gpu[index]
-                )
-            total_mib = self.gpu_vram_mib.get(gpu_uuid, 0)
-            utilization = min(
-                [profile.gpu_memory_utilization]
-                + [worker.profile.gpu_memory_utilization for worker in colocated]
-            )
-            budget_mib = min(
-                total_mib - self.reserved_vram_mib,
-                math.floor(total_mib * utilization),
-            )
-            requested_footprint_mib = (
-                max(requested_mib, profile.peak_vram_mib_per_gpu[gpu_set.index(gpu_uuid)])
-                + profile.gpu_headroom_mib_per_gpu[gpu_set.index(gpu_uuid)]
-            )
-            if requested_footprint_mib + used_mib > budget_mib:
+                used_mib += footprint
+            requested_mib = self._active_vram_mib(profile, requested_index)
+            if requested_mib is None:
+                return False
+            budget_mib = self.gpu_vram_mib.get(gpu_uuid, 0) - self.reserved_vram_mib
+            if requested_mib + used_mib > budget_mib:
                 return False
         return True
 

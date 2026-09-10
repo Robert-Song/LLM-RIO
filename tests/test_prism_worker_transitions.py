@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from test_prism_runtime import _profile
 
+from llm_rio.config import EngineSettings
 from llm_rio.domain import RuntimeState, WorkerPlacement
+from llm_rio.host_memory import HostMemorySample, ProcessMemorySample
+from llm_rio.prism import KVCachedRuntime
 from llm_rio.workers import WorkerSupervisor
 
 
@@ -61,7 +66,7 @@ def _supervisor(worker: WorkerPlacement) -> tuple[WorkerSupervisor, _TransitionD
 def _ready_worker(*, active_request: bool = False) -> WorkerPlacement:
     worker = WorkerPlacement(
         id="worker-1",
-        profile=_profile("model-a", ("GPU-0",), (30_000,)),
+        profile=_profile("model-a", ("GPU-0",), (30_000,), backend="kvcached"),
         gpu_uuids=("GPU-0",),
         port=19370,
         state=RuntimeState.READY,
@@ -172,3 +177,63 @@ async def test_worker_transition_failure_fails_closed_without_deadlock() -> None
     assert not worker.host_weights_cached
     failure = next(event for event in database.events if event[0] == "WORKER_FAILED")
     assert failure[2]["reason"] == "weight_offload_failed:RuntimeError"
+
+
+async def test_host_cache_budget_evicts_least_recently_used_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    older = _ready_worker()
+    older.state = RuntimeState.SLEEPING
+    older.host_weights_cached = True
+    older.process_pid = 111
+    older.last_demand_at = datetime.now(UTC) - timedelta(minutes=2)
+    newer = WorkerPlacement(
+        id="worker-2",
+        profile=_profile("model-b", ("GPU-0",), (30_000,)),
+        gpu_uuids=("GPU-0",),
+        port=19371,
+        state=RuntimeState.SLEEPING,
+        host_weights_cached=True,
+        process_pid=222,
+    )
+    newer.last_demand_at = datetime.now(UTC) - timedelta(minutes=1)
+    supervisor, database = _supervisor(older)
+    supervisor.workers[newer.id] = newer
+    supervisor.settings.prism_host_cache_max_gib = 0.75
+    supervisor.settings.prism_host_cache_min_available_gib = 0.1
+    supervisor.settings.prism_swap_max_used_gib = 1.0
+
+    monkeypatch.setattr(
+        "llm_rio.workers.sample_process_group_memory",
+        lambda _pid: ProcessMemorySample(650, 600, 0, 0, 1, "test"),
+    )
+    monkeypatch.setattr(
+        "llm_rio.workers.sample_host_memory",
+        lambda: HostMemorySample("test", 16_384, 4_000, 12_384, 0, 4_096),
+    )
+
+    assert await supervisor.enforce_host_cache_budget()
+    assert older.state is RuntimeState.COLD
+    assert newer.state is RuntimeState.SLEEPING
+    eviction = next(event for event in database.events if event[0] == "WORKER_CACHE_EVICTED")
+    assert eviction[1] == older.id
+    assert eviction[2]["reason"] == "ram_budget"
+
+
+def test_empty_kvcached_mode_normalizes_to_native() -> None:
+    assert EngineSettings(kvcached_mode="").kvcached_mode == "none"
+    assert EngineSettings(kvcached_mode="disabled").kvcached_mode == "none"
+
+
+def test_native_worker_uses_vllm_sleep_without_kvcached_flags() -> None:
+    worker = _ready_worker()
+    supervisor, _database = _supervisor(worker)
+    supervisor.kvcached = KVCachedRuntime(False, None, None, False, "disabled_by_configuration")
+
+    command = supervisor._command(worker, "/models/model-a", "model-a")
+    environment = supervisor._environment(worker)
+
+    assert "--enable-sleep-mode" in command
+    assert "--no-enable-prefix-caching" not in command
+    assert "ENABLE_KVCACHED" not in environment
+    assert environment["VLLM_SERVER_DEV_MODE"] == "1"

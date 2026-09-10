@@ -22,7 +22,12 @@ from llm_rio.api.schemas import (
 from llm_rio.domain import Engine, PlacementProfile, RuntimeState, ServiceMode
 from llm_rio.errors import RioError
 from llm_rio.inventory import candidate_gpu_sets, read_live_gpu_status
-from llm_rio.profiles import StoredProfile, profile_to_dict
+from llm_rio.profiles import (
+    StoredProfile,
+    invalidate_profile_measurements,
+    launch_configuration_changed,
+    profile_to_dict,
+)
 from llm_rio.security import issue_api_key, token_prefix
 
 router = APIRouter()
@@ -318,13 +323,20 @@ def _apply_profile_edit(
             )
         for key in ("model", "n_gpu_layers", "tensor_split", "split_mode"):
             launch_args.pop(key, None)
-        updated = replace(
-            updated,
-            dtype="auto",
-            quantization=None,
-            launch_args=launch_args,
-        )
-    return updated
+        if profile.engine is Engine.LLAMA_CPP:
+            updated = replace(
+                updated,
+                dtype="auto",
+                quantization=None,
+                launch_args=launch_args,
+            )
+        else:
+            updated = replace(updated, launch_args=launch_args)
+    return (
+        invalidate_profile_measurements(updated)
+        if launch_configuration_changed(profile, updated)
+        else updated
+    )
 
 
 @router.get("/admin/models/{model_id}/profiles")
@@ -335,9 +347,118 @@ async def list_model_profiles(
     if model is None:
         raise HTTPException(status_code=404, detail="Model not found")
     records = await request.app.state.profiles.records_for_model(model_id)
+    verification_job = await request.app.state.registration.latest_kvcached_verification_job(
+        model_id
+    )
     return {
         "data": [_profile_payload(record) for record in records],
         "available_gguf_files": _gguf_files(model),
+        "kvcached_verification_job": verification_job,
+    }
+
+
+@router.post(
+    "/admin/models/{model_id}/verify-kvcached",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def verify_model_with_kvcached(
+    model_id: str, request: Request, _: AdminPrincipal
+) -> dict[str, object]:
+    model = await request.app.state.database.model_by_id(model_id)
+    if model is None:
+        raise HTTPException(status_code=404, detail="Model not found")
+    if model.get("state") != "AVAILABLE" or not model.get("artifact_path"):
+        raise RioError(
+            "model_verification_unavailable",
+            "Only an available local model can be verified with kvcached",
+            status_code=409,
+        )
+    return await request.app.state.registration.create_kvcached_verification_job(model_id)
+
+
+@router.get("/admin/model-verification-jobs/{job_id}")
+async def get_model_verification_job(
+    job_id: str, request: Request, _: AdminPrincipal
+) -> dict[str, object]:
+    job = await request.app.state.registration.kvcached_verification_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Verification job not found")
+    return job
+
+
+@router.post("/admin/models/{model_id}/trust-both-backends")
+async def trust_model_for_both_backends(
+    model_id: str, request: Request, _: AdminPrincipal
+) -> dict[str, object]:
+    database = request.app.state.database
+    model = await database.model_by_id(model_id)
+    if model is None:
+        raise HTTPException(status_code=404, detail="Model not found")
+    updated = await request.app.state.profiles.set_model_verified_for_both(model_id)
+    if not updated:
+        raise RioError(
+            "model_profile_missing",
+            "This model has no active placement profiles on the current machine",
+            status_code=409,
+        )
+    await database.record_event(
+        "MODEL_BACKENDS_TRUSTED_BY_ADMIN",
+        model_id,
+        {
+            "profiles_updated": updated,
+            "machine_fingerprint": request.app.state.inventory.fingerprint,
+        },
+    )
+    return {
+        "model_id": model_id,
+        "normal_verified": True,
+        "kvcached_verified": True,
+        "profiles_updated": updated,
+        "machine_fingerprint": request.app.state.inventory.fingerprint,
+    }
+
+
+@router.post("/admin/models/{model_id}/profiles/{profile_id}/verification/{backend}/{action}")
+async def set_model_profile_backend_verification(
+    model_id: str,
+    profile_id: str,
+    backend: str,
+    action: str,
+    request: Request,
+    _: AdminPrincipal,
+) -> dict[str, object]:
+    """Apply an explicit admin verification override to one profile/backend pair."""
+    if backend not in {"native", "kvcached"} or action not in {"validate", "invalidate"}:
+        raise HTTPException(status_code=404, detail="Verification action not found")
+    database = request.app.state.database
+    if await database.model_by_id(model_id) is None:
+        raise HTTPException(status_code=404, detail="Model not found")
+    verified = action == "validate"
+    saved = await request.app.state.profiles.set_profile_backend_verified(
+        model_id=model_id,
+        profile_id=profile_id,
+        backend=backend,
+        verified=verified,
+    )
+    if not saved:
+        raise HTTPException(status_code=404, detail="Placement profile not found")
+    field = "normal_verified" if backend == "native" else "kvcached_verified"
+    await database.record_event(
+        "MODEL_PROFILE_BACKEND_VERIFICATION_SET_BY_ADMIN",
+        profile_id,
+        {
+            "model_id": model_id,
+            "backend": backend,
+            "verified": verified,
+            "machine_fingerprint": request.app.state.inventory.fingerprint,
+        },
+    )
+    return {
+        "model_id": model_id,
+        "profile_id": profile_id,
+        "backend": backend,
+        field: verified,
+        "machine_fingerprint": request.app.state.inventory.fingerprint,
     }
 
 
@@ -450,7 +571,6 @@ async def update_model_profile(
         profile=selected.profile,
         model=model,
         request=body,
-        managed_gpu_count=len(request.app.state.inventory.gpus),
         eligible_gpu_sets=gpu_sets,
         llama_cpp_enabled=request.app.state.settings.engines.enable_llama_cpp,
     )
@@ -532,6 +652,7 @@ async def _scheduler_status(request: Request) -> dict[str, object]:
     database = request.app.state.database
     models = {model["id"]: model["nickname"] for model in await database.list_models()}
     scheduler = request.app.state.scheduler
+    host_cache = await request.app.state.supervisor.host_cache_status()
     workers = []
     for worker in request.app.state.supervisor.workers.values():
         workers.append(
@@ -553,15 +674,19 @@ async def _scheduler_status(request: Request) -> dict[str, object]:
                 "gpu_uuids": worker.gpu_uuids,
                 "profile_id": worker.profile.id,
                 "ready_at": worker.ready_at.isoformat() if worker.ready_at else None,
-                "sleeping_at": (
-                    worker.sleeping_at.isoformat() if worker.sleeping_at else None
-                ),
+                "sleeping_at": (worker.sleeping_at.isoformat() if worker.sleeping_at else None),
                 "last_activation_seconds": worker.last_activation_seconds,
                 "last_offload_seconds": worker.last_offload_seconds,
                 "tensor_parallel_size": worker.profile.tensor_parallel_size,
                 "active_requests": len(worker.admitted_request_ids),
                 "queued_requests": len(scheduler.queues.for_model(worker.model_id)),
                 "accepted_requests": worker.accepted_requests,
+                "host_cache_accounted_mib": worker.host_cache_accounted_mib,
+                "host_cache_accounting_source": worker.host_cache_accounting_source,
+                "process_rss_mib": worker.process_rss_mib,
+                "process_pss_mib": worker.process_pss_mib,
+                "process_swap_mib": worker.process_swap_mib,
+                "last_cache_eviction_reason": worker.last_cache_eviction_reason,
             }
         )
     mode: ServiceMode = await database.service_mode()
@@ -570,14 +695,13 @@ async def _scheduler_status(request: Request) -> dict[str, object]:
         "prism": {
             "kvcached": scheduler.kvcached.enabled,
             "weight_cache": (
-                "host_ram"
-                if request.app.state.supervisor.ram_weight_cache_enabled
-                else "disabled"
+                "host_ram" if request.app.state.supervisor.ram_weight_cache_enabled else "disabled"
             ),
             "cached_workers": sum(
                 worker.state is RuntimeState.SLEEPING
                 for worker in request.app.state.supervisor.workers.values()
             ),
+            "host_memory": host_cache,
         },
         "workers": workers,
         "queued_models": {
@@ -590,9 +714,10 @@ async def _scheduler_status(request: Request) -> dict[str, object]:
 @router.get("/admin/dashboard")
 async def dashboard(request: Request, _: AdminPrincipal) -> dict[str, object]:
     database = request.app.state.database
-    usage, gpu_samples = await asyncio.gather(
+    usage, gpu_samples, live_requests = await asyncio.gather(
         database.dashboard_usage(),
         asyncio.to_thread(read_live_gpu_status, request.app.state.inventory),
+        database.live_requests(),
     )
     models = {str(model["id"]): str(model["nickname"]) for model in await database.list_models()}
     scheduler = request.app.state.scheduler
@@ -642,6 +767,7 @@ async def dashboard(request: Request, _: AdminPrincipal) -> dict[str, object]:
         "mode": (await database.service_mode()).value,
         "usage": usage,
         "gpus": gpus,
+        "requests": live_requests,
     }
 
 

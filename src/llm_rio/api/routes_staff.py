@@ -3,7 +3,12 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request, Response, status
 
 from llm_rio.api.dependencies import StaffPrincipal
-from llm_rio.api.schemas import GrantUpdate, ModelAccessUpdate, RegisterModelRequest
+from llm_rio.api.schemas import (
+    GrantUpdate,
+    ModelAccessUpdate,
+    ModelJobRetryRequest,
+    RegisterModelRequest,
+)
 from llm_rio.domain import CatalogState
 from llm_rio.errors import RioError
 
@@ -45,20 +50,42 @@ async def model_job(job_id: str, request: Request, _: StaffPrincipal) -> dict[st
 
 
 @router.post("/staff/model-jobs/{job_id}/retry", status_code=status.HTTP_202_ACCEPTED)
-async def retry_model_job(job_id: str, request: Request, _: StaffPrincipal) -> dict[str, str]:
+async def retry_model_job(
+    job_id: str,
+    request: Request,
+    _: StaffPrincipal,
+    body: ModelJobRetryRequest | None = None,
+) -> dict[str, object]:
     job = await request.app.state.database.get_model_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     if job["state"] in {"QUEUED", "RUNNING"}:
         raise HTTPException(status_code=409, detail="The model job is already running")
+    overrides = (
+        None
+        if body is None or body.validation_overrides is None
+        else body.validation_overrides.model_dump(exclude_none=True)
+    )
+    if overrides is not None:
+        await request.app.state.database.set_model_job_validation_overrides(job_id, overrides)
     await request.app.state.database.update_model_job(
         job_id,
         job_state="QUEUED",
         stage="resolve",
         catalog_state=CatalogState.REQUESTED,
     )
+    if overrides is not None:
+        await request.app.state.database.record_event(
+            "MODEL_JOB_RETRY_OVERRIDDEN",
+            str(job["model_id"]),
+            {"job_id": job_id, "validation_overrides": overrides},
+        )
     request.app.state.registration.start(job_id)
-    return {"model_id": job["model_id"], "job_id": job_id}
+    return {
+        "model_id": job["model_id"],
+        "job_id": job_id,
+        "validation_overrides": overrides if overrides is not None else job["validation_overrides"],
+    }
 
 
 @router.get("/staff/models")

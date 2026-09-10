@@ -8,7 +8,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from llm_rio.domain import CatalogState, Engine, PlacementProfile
+from llm_rio.domain import (
+    CURRENT_VRAM_MEASUREMENT_VERSION,
+    CatalogState,
+    Engine,
+    PlacementProfile,
+)
 from llm_rio.errors import RioError
 from llm_rio.storage import Database, _now
 
@@ -26,6 +31,7 @@ def _optional_int(value: Any) -> int | None:
 
 
 def profile_from_dict(raw: dict[str, Any]) -> PlacementProfile:
+    memory_backend = str(raw.get("memory_backend", "native"))
     return PlacementProfile(
         id=raw["id"],
         model_id=raw["model_id"],
@@ -56,7 +62,7 @@ def profile_from_dict(raw: dict[str, Any]) -> PlacementProfile:
             if raw["max_full_length_concurrency"] is None
             else float(raw["max_full_length_concurrency"])
         ),
-        memory_backend=str(raw.get("memory_backend", "native")),
+        memory_backend=memory_backend,
         sleep_vram_mib_per_gpu=(
             None
             if raw.get("sleep_vram_mib_per_gpu") is None
@@ -72,6 +78,119 @@ def profile_from_dict(raw: dict[str, Any]) -> PlacementProfile:
             if raw.get("weight_cache_activation_seconds") is None
             else float(raw["weight_cache_activation_seconds"])
         ),
+        host_cache_mib=(
+            None if raw.get("host_cache_mib") is None else float(raw["host_cache_mib"])
+        ),
+        normal_verified=bool(raw.get("normal_verified", True)),
+        kvcached_verified=bool(raw.get("kvcached_verified", memory_backend == "kvcached")),
+        vram_measurement_version=int(raw.get("vram_measurement_version", 1)),
+        vram_baseline_mib_per_gpu=(
+            None
+            if raw.get("vram_baseline_mib_per_gpu") is None
+            else tuple(int(value) for value in raw["vram_baseline_mib_per_gpu"])
+        ),
+        wake_peak_vram_mib_per_gpu=(
+            None
+            if raw.get("wake_peak_vram_mib_per_gpu") is None
+            else tuple(int(value) for value in raw["wake_peak_vram_mib_per_gpu"])
+        ),
+    )
+
+
+def profile_verified_for_mode(
+    profile: PlacementProfile,
+    *,
+    kvcached_required: bool,
+    ram_weight_cache_required: bool = False,
+) -> bool:
+    """Return whether this exact profile was measured for the selected runtime."""
+    if profile.vram_measurement_version != CURRENT_VRAM_MEASUREMENT_VERSION:
+        return False
+    if profile.vram_baseline_mib_per_gpu is None:
+        return False
+    required_vectors = (
+        profile.idle_vram_mib_per_gpu,
+        profile.peak_vram_mib_per_gpu,
+        profile.gpu_headroom_mib_per_gpu,
+        profile.vram_baseline_mib_per_gpu,
+    )
+    if any(len(values) != profile.gpu_count for values in required_vectors):
+        return False
+    if any(value < 0 for values in required_vectors for value in values):
+        return False
+    if any(profile.gpu_headroom_mib_per_gpu):
+        return False
+    if profile.wake_peak_vram_mib_per_gpu is not None and (
+        len(profile.wake_peak_vram_mib_per_gpu) != profile.gpu_count
+        or any(value < 0 for value in profile.wake_peak_vram_mib_per_gpu)
+    ):
+        return False
+    if ram_weight_cache_required and (
+        profile.engine is not Engine.VLLM
+        or profile.sleep_vram_mib_per_gpu is None
+        or len(profile.sleep_vram_mib_per_gpu) != profile.gpu_count
+        or any(value < 0 for value in profile.sleep_vram_mib_per_gpu)
+        or profile.wake_peak_vram_mib_per_gpu is None
+    ):
+        return False
+
+    expected_backend = "kvcached" if kvcached_required else "native"
+    if profile.memory_backend != expected_backend:
+        return False
+    if profile.engine is not Engine.VLLM:
+        return not kvcached_required and profile.normal_verified
+    return profile.kvcached_verified if kvcached_required else profile.normal_verified
+
+
+_LAUNCH_CONFIGURATION_FIELDS = (
+    "engine",
+    "model_revision",
+    "engine_version",
+    "gpu_count",
+    "tensor_parallel_size",
+    "pipeline_parallel_size",
+    "eligible_gpu_sets",
+    "dtype",
+    "quantization",
+    "max_model_len",
+    "max_num_seqs",
+    "max_num_batched_tokens",
+    "launch_args",
+    "gpu_memory_utilization",
+    "memory_backend",
+)
+
+
+def launch_configuration_changed(before: PlacementProfile, after: PlacementProfile) -> bool:
+    """Return whether an edit changes anything exercised by verification."""
+    return any(
+        getattr(before, field) != getattr(after, field) for field in _LAUNCH_CONFIGURATION_FIELDS
+    )
+
+
+def invalidate_profile_measurements(profile: PlacementProfile) -> PlacementProfile:
+    """Clear measurements and trust after a launch-affecting administrator edit."""
+    count = profile.gpu_count
+    return PlacementProfile(
+        **{
+            **asdict(profile),
+            "predicted_tokens_per_second": 0.0,
+            "load_and_warmup_seconds": 0.0,
+            "idle_vram_mib_per_gpu": (0,) * count,
+            "peak_vram_mib_per_gpu": (0,) * count,
+            "gpu_headroom_mib_per_gpu": (0,) * count,
+            "kv_cache_capacity_tokens": None,
+            "max_full_length_concurrency": None,
+            "sleep_vram_mib_per_gpu": None,
+            "weight_cache_offload_seconds": None,
+            "weight_cache_activation_seconds": None,
+            "host_cache_mib": None,
+            "normal_verified": False,
+            "kvcached_verified": False,
+            "vram_measurement_version": 0,
+            "vram_baseline_mib_per_gpu": None,
+            "wake_peak_vram_mib_per_gpu": None,
+        }
     )
 
 
@@ -159,6 +278,69 @@ class ProfileRepository:
                 StoredProfile(profile=profile_from_dict(data), active=bool(row["active"]))
             )
         return records
+
+    async def set_model_verified_for_both(self, model_id: str) -> int:
+        """Explicitly trust every active profile for both launch backends on this machine."""
+        async with self.database.transaction() as connection:
+            rows = await (
+                await connection.execute(
+                    """
+                    SELECT id, profile_json FROM model_profiles
+                     WHERE model_id = ? AND machine_fingerprint = ? AND active = 1
+                    """,
+                    (model_id, self.machine_fingerprint),
+                )
+            ).fetchall()
+            for row in rows:
+                raw = json.loads(row["profile_json"])
+                raw["normal_verified"] = True
+                raw["kvcached_verified"] = True
+                await connection.execute(
+                    """
+                    UPDATE model_profiles SET profile_json = ?, verified_at = ?
+                     WHERE id = ?
+                    """,
+                    (json.dumps(raw), _now(), row["id"]),
+                )
+        return len(rows)
+
+    async def set_profile_backend_verified(
+        self,
+        *,
+        model_id: str,
+        profile_id: str,
+        backend: str,
+        verified: bool,
+    ) -> bool:
+        """Set one backend verification flag for one local placement profile."""
+        field = {
+            "native": "normal_verified",
+            "kvcached": "kvcached_verified",
+        }.get(backend)
+        if field is None:
+            raise ValueError(f"Unsupported verification backend: {backend}")
+        async with self.database.transaction() as connection:
+            row = await (
+                await connection.execute(
+                    """
+                    SELECT profile_json FROM model_profiles
+                     WHERE id = ? AND model_id = ? AND machine_fingerprint = ?
+                    """,
+                    (profile_id, model_id, self.machine_fingerprint),
+                )
+            ).fetchone()
+            if row is None:
+                return False
+            raw = json.loads(row["profile_json"])
+            raw[field] = verified
+            await connection.execute(
+                """
+                UPDATE model_profiles SET profile_json = ?, verified_at = ?
+                 WHERE id = ?
+                """,
+                (json.dumps(raw), _now(), profile_id),
+            )
+        return True
 
     @staticmethod
     def _model_rope_configuration(model: dict[str, Any]) -> tuple[bool, int, dict[str, Any]]:
@@ -341,10 +523,15 @@ class ProfileRepository:
                     "launch_args": launch_args,
                 }
             )
+            measurements_invalidated = launch_configuration_changed(source_profile, profile)
+            if measurements_invalidated:
+                profile = invalidate_profile_measurements(profile)
             raw = profile_to_dict(profile)
             raw["administrator_override"] = True
             raw["administrator_override_at"] = _now()
             raw["cloned_from_profile_id"] = source_profile.id
+            if measurements_invalidated:
+                raw["measurements_invalidated_at"] = _now()
             cloned_profiles.append(profile)
             cloned_profile_rows.append(
                 (
@@ -418,17 +605,12 @@ class ProfileRepository:
         *,
         make_default: bool,
     ) -> bool:
-        """Persist an administrator override and keep catalog context limits in sync."""
-        raw = profile_to_dict(profile)
-        raw["administrator_override"] = True
-        raw["administrator_override_at"] = _now()
-        profile_json = json.dumps(raw)
-        raw_profile_key = profile_key(raw)
+        """Persist an override, invalidating measurements if launch behavior changed."""
         async with self.database.transaction() as connection:
             existing = await (
                 await connection.execute(
                     """
-                    SELECT active FROM model_profiles
+                    SELECT active, profile_json FROM model_profiles
                      WHERE id = ? AND model_id = ? AND machine_fingerprint = ?
                     """,
                     (profile.id, profile.model_id, self.machine_fingerprint),
@@ -436,6 +618,24 @@ class ProfileRepository:
             ).fetchone()
             if existing is None:
                 return False
+
+            before_raw = json.loads(existing["profile_json"])
+            before_raw["id"] = profile.id
+            before_raw["machine_fingerprint"] = self.machine_fingerprint
+            before = profile_from_dict(before_raw)
+            measurements_invalidated = launch_configuration_changed(before, profile)
+            if measurements_invalidated:
+                profile = invalidate_profile_measurements(profile)
+
+            now = _now()
+            raw = profile_to_dict(profile)
+            raw["administrator_override"] = True
+            raw["administrator_override_at"] = now
+            if measurements_invalidated:
+                raw["measurements_invalidated_at"] = now
+            profile_json = json.dumps(raw)
+            raw_profile_key = profile_key(raw)
+
             if make_default:
                 await connection.execute(
                     """
@@ -478,7 +678,7 @@ class ProfileRepository:
                        SET request_limits_json = ?, updated_at = ?
                      WHERE id = ?
                     """,
-                    (json.dumps(limits), _now(), profile.model_id),
+                    (json.dumps(limits), now, profile.model_id),
                 )
         return True
 

@@ -50,32 +50,43 @@ sleep to release its model and KV allocations from GPU memory while preserving i
 process and model weights in host RAM. A later request wakes that same PID and copies the weights
 back instead of rebuilding the engine or rereading the checkpoint.
 
-Set `engines.kvcached_mode = "required"` after installing the legacy-named `prism` extra, and
-set `prism_weight_cache_mode = "ram"`. `prism_preload_models` is only the startup warming policy;
-it is not an eligibility list. Any compatible model requested later can cold-start, displace an
-idle resident to RAM, and remain cached after its request drains. A newly registered model also
-requests a one-time warm after automatic validation, so its first presentation-time chat does not
-pay another cold engine start. Repeat a nickname in `prism_preload_models` to prepare more than
-one distinct placement—for example, two Qwen TP=1 workers, one per GPU—before a live burst needs
-them.
+Set `prism_weight_cache_mode = "ram"` to retain warm level-1 sleeping workers.
+With `engines.kvcached_mode = "none"` (also selected by an empty value), workers use native vLLM
+sleep/wake and at most one engine is GPU-resident on each GPU. Set
+`engines.kvcached_mode = "required"` only after installing the legacy-named `prism` extra and
+manually verifying the model with kvcached on this machine; required mode enables measured
+multi-worker GPU co-residency.
 
-Automatic validation is fail-closed. Each GPU/TP placement must pass generation, level-1 sleep,
-sleep-state and VRAM-reclamation checks, wake, and post-wake generation before its profile becomes
-callable. The saved profile includes measured sleeping VRAM and offload/activation latency. The
-runtime exposes `OFFLOADING`, `SLEEPING`, and `WAKING` states plus corresponding lifecycle events.
+`prism_preload_models` is only the startup warming policy; it is not an eligibility list. Any
+verified model requested later can cold-start, displace an idle resident to RAM, and remain cached
+after its request drains. Repeat a nickname to prepare distinct placements before a burst.
+
+Normal registration performs fail-closed native validation. Independent GPU placements for a
+candidate shape are probed concurrently. When any TP=1 placement passes, its verified one-GPU
+profiles are registered and larger TP shapes are not probed automatically; create and validate a
+larger profile explicitly in the TUI if needed. In RAM weight-cache mode, every probe must pass
+generation, level-1 sleep, wake, and post-wake generation.
+
+VRAM measurement format v2 captures one per-GPU baseline immediately before launch, samples
+continuously through post-wake generation, and stores incremental idle, active-peak, sleeping
+residual, and wake-peak usage relative to that baseline. Legacy absolute-VRAM profiles are not
+routable and cannot be mixed with v2 profiles. kvcached validation remains explicit through the
+Profiles page's **Verify kvcached** action. The independent administrator verification flags cannot
+make a legacy or invalidated profile routable without compatible v2 measurements.
 
 The scheduler never offloads a worker with an admitted request. It protects minimum residency and
-fair-share rules, sleeps least-cost idle blockers under GPU pressure, and prefers a matching
-sleeping worker over a cold start. `prism_max_workers_per_gpu` bounds GPU-resident engines;
-`prism_max_cached_workers_per_gpu` separately bounds live RAM-cached processes. When the latter is
-full, real demand evicts the least-recently-used sleeping process, while preload work never churns
-a full cache.
+fair-share rules, sleeps idle blockers under GPU pressure, and prefers a matching sleeping worker
+over a cold start. Warm capacity is memory-based: `prism_host_cache_max_gib` limits PSS-accounted
+worker process groups, `prism_host_cache_min_available_gib` preserves host/cgroup headroom, and
+`prism_swap_max_used_gib` sets their process-group swap-pressure ceiling. The OS must configure swap
+before startup; virtual address size is not counted as cache capacity. Pressure evicts the
+least-recently-used eligible sleeping process.
 
-Co-residency accepts only placement profiles created while kvcached mode was enabled. Validation
-measures each engine's idle, inference-peak, and sleeping footprints. The planner accounts for the
-larger active footprint plus headroom, and for each sleeping worker's measured residual allocation,
-against the strictest colocated `gpu_memory_utilization` ceiling. Existing native profiles must be
-revalidated after enabling Prism mode.
+For every GPU, the planner enforces `sum(active peaks + sleeping residuals) <= physical VRAM -
+reserved_vram_mib`. Active footprint is the maximum measured initial/wake peak; sleeping footprint
+is the measured level-1 residual. The global reserve is subtracted exactly once, and
+`gpu_memory_utilization` is not applied again as a scheduler ceiling. `prism_max_workers_per_gpu`
+applies only to simultaneously GPU-resident kvcached engines; native mode permits one.
 
 On the target RTX PRO 6000 host, the first Qwen3-8B validation measured 4.25-8.07 seconds to
 offload, 0.25-0.34 seconds to restore, and roughly 2.3-3.0 GiB sleeping VRAM. A routed cache-hit
@@ -175,17 +186,17 @@ token usage, NVML-backed GPU health, loaded model placements, and continuous-bat
 The admin CLI uses the authenticated management routes but automatically recovers a local admin
 credential from the protected database/vault. Use `./llmctl models profiles MODEL` to inspect
 placement profiles and `./llmctl models profile-edit MODEL PROFILE_ID` to override a stored profile.
-An override is not revalidated; use `--make-default` to make it the only active profile and
-`--restart-workers` to drain current workers. Key and model access commands accept human-readable
-nicknames (or a complete API key for key selection), so internal database IDs are not required.
+Any launch-affecting override clears throughput, VRAM, sleep/wake, and verification measurements;
+the exact edited configuration must pass real validation before inference can route to it. Use
+`--restart-workers` to drain workers still using an older profile. Key and model access commands
+accept human-readable nicknames (or a complete API key for key selection).
 
 ### Shared-weight model profiles and request defaults
 
-A cloned model profile receives its own catalog model ID and copies the source model's active
-placement profiles, but references the same downloaded artifact directory and hashes. Consequently,
-it is independently routable and may be resident alongside the source model without downloading or
-copying the weights. Access grants are inherited by default; pass `--no-inherit-grants` to start
-without them.
+A cloned model receives its own catalog model ID but references the same downloaded artifact
+directory and hashes. An exact launch-configuration clone may reuse the source measurement; a clone
+that changes any launch setting is deliberately unroutable until revalidated. Access grants are
+inherited by default; pass `--no-inherit-grants` to start without them.
 
 A profile can store defaults for `temperature`, `top_p`, `top_k`, and `reasoning_effort`. The gateway
 fills only omitted request fields, so any value explicitly supplied in a chat-completions request
@@ -204,9 +215,9 @@ length are stored in the cloned vLLM placement profiles as Hugging Face config o
   --yarn-original-max-model-len 262144
 ```
 
-The same operation is available through the TUI's Models page with **Clone profile**. Cloned
-placement profiles are administrator overrides and are not benchmark-revalidated; their context
-size must fit the selected GPU placement at worker startup.
+The same operation is available through the TUI's Models page with **Clone profile**. A clone that
+changes context length, YaRN, or another launch setting has all inherited measurements invalidated
+and is not routable until that exact configuration passes real validation.
 
 ### Image inputs
 

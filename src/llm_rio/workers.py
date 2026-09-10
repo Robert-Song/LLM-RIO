@@ -18,8 +18,15 @@ import httpx
 
 from llm_rio.config import Settings
 from llm_rio.domain import Engine, PlacementProfile, RuntimeState, WorkerPlacement
+from llm_rio.host_memory import (
+    HostMemorySample,
+    gib_to_mib,
+    sample_host_memory,
+    sample_process_group_memory,
+)
 from llm_rio.inventory import gpu_environment
 from llm_rio.prism import add_kvcached_vllm_flags, detect_kvcached
+from llm_rio.profiles import profile_verified_for_mode
 from llm_rio.storage import Database, _now
 from llm_rio.tool_support import detect_vllm_parser_configuration
 
@@ -88,6 +95,7 @@ class WorkerSupervisor:
         self._log_paths: dict[str, Path] = {}
         self._lock = asyncio.Lock()
         self._transition_locks: dict[str, asyncio.Lock] = {}
+        self._host_cache_lock = asyncio.Lock()
         self._drain_to_sleep: set[str] = set()
         self._event_callback: WorkerEventCallback | None = None
         self.internal_api_key = f"rio_internal_{secrets.token_urlsafe(32)}"
@@ -98,13 +106,136 @@ class WorkerSupervisor:
 
     @property
     def ram_weight_cache_enabled(self) -> bool:
-        return self.kvcached.enabled and self.settings.prism_weight_cache_mode == "ram"
+        return self.settings.prism_weight_cache_mode == "ram"
 
     @property
     def persistent_host_weight_cache_enabled(self) -> bool:
-        return (
-            self.kvcached.environment().get("LLM_RIO_KVCACHED_VLLM026_SHIM") == "1"
+        return self.kvcached.environment().get("LLM_RIO_KVCACHED_VLLM026_SHIM") == "1"
+
+    async def _refresh_cached_worker_samples(self) -> None:
+        async with self._lock:
+            targets = [
+                (worker.id, worker.process_pid)
+                for worker in self.workers.values()
+                if worker.host_weights_cached and worker.process_pid is not None
+            ]
+        samples = await asyncio.gather(
+            *(
+                asyncio.to_thread(sample_process_group_memory, process_pid)
+                for _, process_pid in targets
+            )
         )
+        async with self._lock:
+            for (worker_id, process_pid), sample in zip(targets, samples, strict=True):
+                worker = self.workers.get(worker_id)
+                if worker is None or worker.process_pid != process_pid:
+                    continue
+                worker.process_rss_mib = sample.rss_mib
+                worker.process_pss_mib = sample.pss_mib
+                worker.process_swap_mib = sample.swap_pss_mib or sample.swap_mib
+                worker.host_cache_accounted_mib = sample.accounted_mib
+                worker.host_cache_accounting_source = sample.source
+
+    def _host_cache_limit_mib(self, host: HostMemorySample) -> float:
+        configured = gib_to_mib(getattr(self.settings, "prism_host_cache_max_gib", None))
+        if configured is not None:
+            return configured
+        reserve = (
+            gib_to_mib(getattr(self.settings, "prism_host_cache_min_available_gib", 4.0)) or 0.0
+        )
+        return max(0.0, host.effective_total_mib - reserve)
+
+    def _host_cache_pressure_reason(
+        self,
+        host: HostMemorySample,
+        cache_accounted_mib: float,
+        cache_swap_mib: float = 0.0,
+    ) -> str | None:
+        swap_limit = gib_to_mib(getattr(self.settings, "prism_swap_max_used_gib", 0.0)) or 0.0
+        if cache_swap_mib > swap_limit:
+            return "swap_pressure"
+        minimum_available = (
+            gib_to_mib(getattr(self.settings, "prism_host_cache_min_available_gib", 4.0)) or 0.0
+        )
+        if host.available_mib < minimum_available:
+            return "ram_headroom"
+        if cache_accounted_mib > self._host_cache_limit_mib(host):
+            return "ram_budget"
+        return None
+
+    async def host_cache_status(self) -> dict[str, float | str | None]:
+        await self._refresh_cached_worker_samples()
+        host = await asyncio.to_thread(sample_host_memory)
+        async with self._lock:
+            cached_workers = [
+                worker for worker in self.workers.values() if worker.host_weights_cached
+            ]
+            cache_accounted_mib = sum(worker.host_cache_accounted_mib for worker in cached_workers)
+            cache_swap_mib = sum(worker.process_swap_mib for worker in cached_workers)
+        return {
+            "source": host.source,
+            "effective_total_mib": host.effective_total_mib,
+            "available_mib": host.available_mib,
+            "swap_used_mib": host.swap_used_mib,
+            "swap_total_mib": host.swap_total_mib,
+            "cache_accounted_mib": cache_accounted_mib,
+            "cache_swap_mib": cache_swap_mib,
+            "cache_limit_mib": self._host_cache_limit_mib(host),
+            "pressure_reason": self._host_cache_pressure_reason(
+                host, cache_accounted_mib, cache_swap_mib
+            ),
+        }
+
+    async def enforce_host_cache_budget(self, *, incoming_worker_id: str | None = None) -> bool:
+        """Evict least-recently-demanded sleeping workers until host pressure clears."""
+        if not self.ram_weight_cache_enabled:
+            return True
+        host_cache_lock = getattr(self, "_host_cache_lock", None)
+        if host_cache_lock is None:
+            host_cache_lock = self._host_cache_lock = asyncio.Lock()
+        async with host_cache_lock:
+            while True:
+                status = await self.host_cache_status()
+                reason = status["pressure_reason"]
+                if reason is None:
+                    return True
+                async with self._lock:
+                    candidates = sorted(
+                        (
+                            worker
+                            for worker in self.workers.values()
+                            if worker.id != incoming_worker_id
+                            and worker.state is RuntimeState.SLEEPING
+                            and worker.host_weights_cached
+                            and not worker.admitted_request_ids
+                        ),
+                        key=lambda worker: worker.last_demand_at,
+                    )
+                    if not candidates:
+                        incoming = (
+                            self.workers.get(incoming_worker_id)
+                            if incoming_worker_id is not None
+                            else None
+                        )
+                        if incoming is not None:
+                            incoming.last_cache_eviction_reason = str(reason)
+                        return False
+                    victim = candidates[0]
+                    victim.last_cache_eviction_reason = str(reason)
+                    victim.state = RuntimeState.STOPPING
+                await self.database.record_event(
+                    "WORKER_CACHE_EVICTED",
+                    victim.id,
+                    {
+                        "reason": reason,
+                        "cache_accounted_mib": status["cache_accounted_mib"],
+                        "cache_limit_mib": status["cache_limit_mib"],
+                        "host_available_mib": status["available_mib"],
+                        "host_swap_used_mib": status["swap_used_mib"],
+                        "cache_swap_mib": status["cache_swap_mib"],
+                    },
+                )
+                await self._stop(victim.id, force=False)
 
     @property
     def occupied_gpu_uuids(self) -> set[str]:
@@ -134,11 +265,13 @@ class WorkerSupervisor:
     ) -> WorkerPlacement:
         if len(gpu_uuids) != profile.gpu_count or gpu_uuids not in profile.eligible_gpu_sets:
             raise WorkerLaunchError("placement does not match a validated GPU set")
-        if self.kvcached.enabled and (
-            profile.engine is not Engine.VLLM or profile.memory_backend != "kvcached"
+        if not profile_verified_for_mode(
+            profile,
+            kvcached_required=self.kvcached.enabled,
+            ram_weight_cache_required=self.ram_weight_cache_enabled,
         ):
             raise WorkerLaunchError(
-                "kvcached mode accepts only vLLM profiles validated with kvcached"
+                "placement profile is not verified for the configured vLLM memory backend"
             )
         async with self._lock:
             requested_gpus = set(gpu_uuids)
@@ -234,25 +367,28 @@ class WorkerSupervisor:
         gpu_uuids: tuple[str, ...],
         overlapping_workers: list[WorkerPlacement],
     ) -> bool:
-        if (
-            not self.kvcached.enabled
-            or profile.engine is not Engine.VLLM
-            or profile.memory_backend != "kvcached"
+        kvcached_required = self.kvcached.enabled
+        if profile.engine is not Engine.VLLM or not profile_verified_for_mode(
+            profile,
+            kvcached_required=kvcached_required,
+            ram_weight_cache_required=self.ram_weight_cache_enabled,
         ):
             return False
         if any(
-            worker.profile.engine is not Engine.VLLM or worker.profile.memory_backend != "kvcached"
+            worker.profile.engine is not Engine.VLLM
+            or not profile_verified_for_mode(
+                worker.profile,
+                kvcached_required=kvcached_required,
+                ram_weight_cache_required=self.ram_weight_cache_enabled,
+            )
             for worker in overlapping_workers
         ):
             return False
         for gpu_uuid in gpu_uuids:
-            colocated = [
-                worker for worker in overlapping_workers if gpu_uuid in worker.gpu_uuids
-            ]
+            colocated = [worker for worker in overlapping_workers if gpu_uuid in worker.gpu_uuids]
             active = sum(worker.state in _GPU_RESIDENT_STATES for worker in colocated)
-            if active >= self.settings.prism_max_workers_per_gpu:
-                return False
-            if len(colocated) >= self.settings.prism_max_cached_workers_per_gpu:
+            max_active = self.settings.prism_max_workers_per_gpu if kvcached_required else 1
+            if active >= max_active:
                 return False
         return True
 
@@ -269,18 +405,14 @@ class WorkerSupervisor:
         )
         if worker.profile.engine is Engine.VLLM:
             environment["VLLM_API_KEY"] = self.internal_api_key
-            if worker.profile.memory_backend == "kvcached":
-                if not self.kvcached.enabled:
-                    raise WorkerLaunchError(
-                        "kvcached placement profile cannot run while kvcached mode is disabled"
-                    )
+            if self.kvcached.enabled:
                 environment.update(
                     self.kvcached.environment(pythonpath=environment.get("PYTHONPATH"))
                 )
-                if self.ram_weight_cache_enabled:
-                    # vLLM gates its authenticated sleep/wake routes behind this
-                    # opt-in. Workers listen only on loopback private ports.
-                    environment["VLLM_SERVER_DEV_MODE"] = "1"
+            if self.ram_weight_cache_enabled:
+                # vLLM gates its authenticated sleep/wake routes behind this
+                # opt-in. Workers listen only on loopback private ports.
+                environment["VLLM_SERVER_DEV_MODE"] = "1"
         return environment
 
     def _command(
@@ -324,11 +456,7 @@ class WorkerSupervisor:
                 )
             if parsers.reasoning_parser is not None:
                 command.extend(["--reasoning-parser", parsers.reasoning_parser])
-            if (
-                self.ram_weight_cache_enabled
-                and profile.memory_backend == "kvcached"
-                and not profile.launch_args.get("enable_sleep_mode")
-            ):
+            if self.ram_weight_cache_enabled and not profile.launch_args.get("enable_sleep_mode"):
                 command.append("--enable-sleep-mode")
         elif profile.engine is Engine.LLAMA_CPP and self.settings.engines.enable_llama_cpp:
             command = [
@@ -360,11 +488,7 @@ class WorkerSupervisor:
                 command.extend([flag, json.dumps(value, separators=(",", ":"), sort_keys=True)])
             elif value is not None:
                 command.extend([flag, str(value)])
-        if profile.memory_backend == "kvcached":
-            if not self.kvcached.enabled:
-                raise WorkerLaunchError(
-                    "kvcached placement profile cannot run while kvcached mode is disabled"
-                )
+        if profile.engine is Engine.VLLM and self.kvcached.enabled:
             add_kvcached_vllm_flags(command, self.kvcached)
         return command
 
@@ -434,6 +558,12 @@ class WorkerSupervisor:
             await _terminate_worker_process_tree(process, force=True)
         async with self._lock:
             worker.process_pid = None
+            worker.host_weights_cached = False
+            worker.host_cache_accounted_mib = 0.0
+            worker.host_cache_accounting_source = None
+            worker.process_rss_mib = 0.0
+            worker.process_pss_mib = 0.0
+            worker.process_swap_mib = 0.0
         await self._persist(worker)
         log_path = self._log_paths.get(worker.id)
         await self.database.record_event(
@@ -546,11 +676,33 @@ class WorkerSupervisor:
                 worker.sleeping_at = datetime.now(UTC)
                 worker.last_offload_seconds = elapsed
                 worker.host_weights_cached = True
+            retained = await self.enforce_host_cache_budget(incoming_worker_id=worker_id)
+            if not retained:
+                reason = worker.last_cache_eviction_reason or "ram_budget"
+                await self.database.record_event(
+                    "WORKER_CACHE_REJECTED",
+                    worker_id,
+                    {
+                        "reason": reason,
+                        "host_cache_accounted_mib": worker.host_cache_accounted_mib,
+                        "process_swap_mib": worker.process_swap_mib,
+                    },
+                )
+                await self._stop(worker_id, force=False)
+                return
+            async with self._lock:
+                if worker.state is not RuntimeState.SLEEPING:
+                    return
             await self._persist(worker)
             await self.database.record_event(
                 "WORKER_WEIGHTS_CACHED",
                 worker_id,
-                {"offload_seconds": elapsed, "storage": "host_ram"},
+                {
+                    "offload_seconds": elapsed,
+                    "storage": "host_ram",
+                    "host_cache_accounted_mib": worker.host_cache_accounted_mib,
+                    "accounting_source": worker.host_cache_accounting_source,
+                },
             )
             await self._emit(worker_id, "sleeping")
 
@@ -689,6 +841,11 @@ class WorkerSupervisor:
                 worker.outstanding_token_work = 0
                 worker.sleeping_at = None
                 worker.host_weights_cached = False
+                worker.host_cache_accounted_mib = 0.0
+                worker.host_cache_accounting_source = None
+                worker.process_rss_mib = 0.0
+                worker.process_pss_mib = 0.0
+                worker.process_swap_mib = 0.0
                 self._drain_to_sleep.discard(worker_id)
             try:
                 await self._persist(worker)
@@ -724,9 +881,18 @@ class WorkerSupervisor:
         await self.database.execute(
             """
             INSERT INTO workers
-                (id, model_id, profile_id, gpu_uuids_json, port, pid, state, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, model_id, profile_id, gpu_uuids_json, port, pid, state,
+                 host_cache_accounted_mib, host_cache_accounting_source,
+                 process_rss_mib, process_pss_mib, process_swap_mib,
+                 last_cache_eviction_reason, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET pid = excluded.pid, state = excluded.state,
+                host_cache_accounted_mib = excluded.host_cache_accounted_mib,
+                host_cache_accounting_source = excluded.host_cache_accounting_source,
+                process_rss_mib = excluded.process_rss_mib,
+                process_pss_mib = excluded.process_pss_mib,
+                process_swap_mib = excluded.process_swap_mib,
+                last_cache_eviction_reason = excluded.last_cache_eviction_reason,
                 updated_at = excluded.updated_at
             """,
             (
@@ -737,6 +903,12 @@ class WorkerSupervisor:
                 worker.port,
                 worker.process_pid,
                 worker.state.value,
+                worker.host_cache_accounted_mib,
+                worker.host_cache_accounting_source,
+                worker.process_rss_mib,
+                worker.process_pss_mib,
+                worker.process_swap_mib,
+                worker.last_cache_eviction_reason,
                 _now(),
                 _now(),
             ),

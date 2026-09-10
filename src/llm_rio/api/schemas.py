@@ -71,6 +71,21 @@ class RegisterModelRequest(BaseModel):
     )
 
 
+class ModelValidationOverrides(BaseModel):
+    """Per-registration launch limits used only while validating a failed model."""
+
+    max_model_len: int | None = Field(default=None, gt=0)
+    max_num_seqs: int | None = Field(default=None, gt=0)
+    max_num_batched_tokens: int | None = Field(default=None, gt=0)
+    gpu_memory_utilization: float | None = Field(default=None, gt=0, le=1)
+
+
+class ModelJobRetryRequest(BaseModel):
+    """Optional replacement validation limits for a requeued registration job."""
+
+    validation_overrides: ModelValidationOverrides | None = None
+
+
 class MaintenanceRequest(BaseModel):
     mode: Literal["drain", "active"]
 

@@ -1,0 +1,60 @@
+# Minimal LLM-RIO configuration
+# Copy this file to config.toml, then change the REQUIRED value.
+
+# =============================================================================
+# REQUIRED
+# =============================================================================
+machine_id = "aifo"
+
+# =============================================================================
+# REQUIRED REVIEW
+# These defaults are valid, but confirm them for the target HPC.
+# =============================================================================
+api_host = "0.0.0.0"
+api_port = 8002
+#api_port = 3737
+
+database_path = "./state/llm-rio.db"
+model_store = "/scratch2/ribeirob/models"
+log_dir = "./logs"
+log_level = "INFO"
+
+# Automatic: honor CUDA_VISIBLE_DEVICES, or use all NVML GPUs when it is unset.
+managed_gpu_uuids = []
+
+validation_idle_window_seconds = 0
+wait_duration_seconds = 3600
+minimum_residency_seconds = 0
+worker_request_timeout_seconds = 1800
+worker_stream_idle_timeout_seconds = 600
+
+
+prism_preload_models = [
+  "qwen3.8-27b-nvfp4",
+  "qwen3.8-27b-nvfp4",
+  "gemma-4-31b-it-nvfp4",
+  "laguna-s-2.1-nvfp4",
+]
+prism_weight_cache_mode = "ram"
+prism_idle_sleep_seconds = 45
+prism_max_workers_per_gpu = 2
+prism_max_cached_workers_per_gpu = 8
+prism_sleep_gpu_reserve_mib = 1536
+prism_transition_timeout_seconds = 180
+
+[engines]
+kvcached_mode = "required"
+# Per-worker GPU allocation fraction.
+gpu_memory_utilization = 0.92
+
+[engines.environment]
+#VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS = "fp4_gemm"
+NCCL_NET_PLUGIN = "none"
+NCCL_NET = "Socket"
+VLLM_USE_FLASHINFER_SAMPLER = "0"
+MAX_JOBS = "4"
+#NCCL_DEBUG = "INFO"
+CUDA_HOME = "/.gavea/store/song669/cuda-13.0"
+LIBRARY_PATH = "/.gavea/store/song669/cuda-13.0/targets/x86_64-linux/lib"
+LD_LIBRARY_PATH = "/.gavea/store/song669/cuda-13.0/targets/x86_64-linux/lib"
+CPLUS_INCLUDE_PATH = "/.gavea/store/song669/cuda-13.0/targets/x86_64-linux/include"

@@ -28,8 +28,9 @@ log_dir = "./logs"
 # or manages every NVML GPU when CUDA_VISIBLE_DEVICES is unset.
 managed_gpu_uuids = []
 
-# Per-GPU VRAM headroom retained for the driver/runtime while profiles are
-# validated. This is a fit-safety margin, not a request token restriction.
+# Global per-GPU VRAM reserve for the driver/runtime. Validation rejects a measured
+# incremental worker peak above physical-minus-reserve, and the scheduler subtracts
+# this value exactly once while composing active peaks and sleeping residuals.
 reserved_vram_mib = 2048
 
 # Maximum queued requests for one model. Omitted by default (unbounded).
@@ -61,23 +62,32 @@ validation_idle_window_seconds = 0
 # Repeat a nickname to warm multiple distinct placements, such as one TP=1 copy per GPU.
 prism_preload_models = []
 
-# "ram" keeps an idle vLLM worker and its weights in host memory using level-1
-# sleep, while kvcached releases its GPU KV pages. "disabled" retains the older
-# kvcached-only behavior that cold-starts a process after eviction.
+# "ram" keeps idle vLLM workers and their weights in host memory using level-1
+# sleep. "disabled" terminates an idle worker instead of retaining a warm process.
 prism_weight_cache_mode = "ram"
 
 # Seconds without real demand before READY weights are proactively copied to
 # host RAM. Queued incompatible demand can trigger the same offload immediately.
 prism_idle_sleep_seconds = 45
 
-# Maximum simultaneously GPU-resident kvcached engines per GPU.
+# Maximum simultaneously GPU-resident engines per GPU in kvcached required mode.
+# Native mode always permits only one GPU-resident engine per GPU.
 prism_max_workers_per_gpu = 2
 
-# Maximum total live engines per GPU, including host-RAM-cached workers whose
-# CUDA contexts retain a small residual allocation.
-prism_max_cached_workers_per_gpu = 8
+# Maximum PSS-accounted memory used by warm worker process groups. Omit for an
+# automatic ceiling based on effective host/cgroup RAM minus the reserve below.
+# prism_host_cache_max_gib = 300
 
-# Conservative per-GPU residual reservation for each SLEEPING worker.
+# Preserve at least this much effective host/cgroup RAM for the OS and other work.
+prism_host_cache_min_available_gib = 4
+
+# Evict sleeping workers when their measured process-group swap exceeds this value.
+# Swap must already be configured by the OS; it is a pressure ceiling, not
+# guaranteed cache capacity. Set above zero only when swap-backed latency is acceptable.
+prism_swap_max_used_gib = 0
+
+# Deprecated compatibility setting. Incremental-v2 RAM-cache profiles must contain
+# a measured sleeping residual; the scheduler refuses profiles where it is missing.
 prism_sleep_gpu_reserve_mib = 1536
 
 # HTTP deadline for a vLLM level-1 sleep or wake transition.
@@ -141,8 +151,9 @@ llama_cpp_executable = "llama-server"
 # profile. This never creates an automatic vLLM-to-llama.cpp fallback.
 enable_llama_cpp = false
 
-# Per-worker GPU allocation fraction. Omitted by default so LLM-RIO derives it
-# from reserved_vram_mib and detected VRAM.
+# Per-worker vLLM GPU allocation fraction. Omitted by default so LLM-RIO derives it
+# from reserved_vram_mib and detected VRAM. This affects engine allocation only;
+# the scheduler uses measured incremental peaks rather than applying it again.
 # gpu_memory_utilization = 0.95
 
 # Engine context-window ceiling. Omitted by default; the model maximum is used.
@@ -154,12 +165,12 @@ enable_llama_cpp = false
 # Engine batched-token ceiling. Omitted by default.
 # max_num_batched_tokens = 8192
 
-# kvcached KV co-residency mode (not full Prism). "auto" enables it when installed;
-# "required" also makes a missing kvcached/vLLM package fatal. Because
-# kvcached is only officially tested through vLLM 0.24.0. The prism extra pins
-# a newer source revision with 0.26/hybrid fixes; keep this disabled until the
-# compatibility runner passes on the deployment's exact model and GPU shape.
-kvcached_mode = "disabled"
+# Backend selection. "none" (or an empty value) uses native vLLM level-1
+# sleep/wake and one GPU-resident engine per GPU. "required" enables kvcached
+# multi-worker co-residency and refuses startup if the package set is unavailable.
+# Models are eligible only after the exact backend/configuration has compatible
+# incremental-v2 measurements from real validation on this machine.
+kvcached_mode = "none"
 
 [engines.environment]
 

@@ -15,8 +15,9 @@ from starlette.background import BackgroundTask
 
 from llm_rio.api.dependencies import CurrentPrincipal
 from llm_rio.api.schemas import ChatCompletionRequest
-from llm_rio.domain import CatalogState, Engine, PlacementProfile, Role, ServiceMode
+from llm_rio.domain import CatalogState, PlacementProfile, Role, ServiceMode
 from llm_rio.errors import MaintenanceError, RioError
+from llm_rio.profiles import profile_verified_for_mode
 from llm_rio.queueing import QueuedRequest
 from llm_rio.security import Principal, hash_idempotency_key
 
@@ -82,13 +83,20 @@ async def _available_models(request: Request, principal: Principal) -> list[dict
 def _routable_profiles(
     request: Request, profiles: list[PlacementProfile]
 ) -> list[PlacementProfile]:
-    runtime = getattr(getattr(request.app.state, "scheduler", None), "kvcached", None)
-    if not getattr(runtime, "enabled", False):
-        return profiles
+    scheduler = getattr(request.app.state, "scheduler", None)
+    runtime = getattr(scheduler, "kvcached", None)
+    kvcached_required = bool(getattr(runtime, "enabled", False))
+    ram_weight_cache_required = bool(
+        getattr(getattr(scheduler, "planner", None), "prism_weight_cache_enabled", False)
+    )
     return [
         profile
         for profile in profiles
-        if profile.engine is Engine.VLLM and profile.memory_backend == "kvcached"
+        if profile_verified_for_mode(
+            profile,
+            kvcached_required=kvcached_required,
+            ram_weight_cache_required=ram_weight_cache_required,
+        )
     ]
 
 
@@ -127,11 +135,18 @@ async def _resolve_model(request: Request, principal: Principal, nickname: str) 
             status_code=503,
         )
     if not _routable_profiles(request, profiles):
+        runtime = getattr(getattr(request.app.state, "scheduler", None), "kvcached", None)
+        backend = "kvcached" if getattr(runtime, "enabled", False) else "native"
+        error_code = (
+            "prism_profile_revalidation_required"
+            if backend == "kvcached"
+            else "model_backend_verification_required"
+        )
         raise RioError(
-            "prism_profile_revalidation_required",
-            "This model needs a vLLM placement profile validated with kvcached",
+            error_code,
+            f"This model needs a placement profile verified with {backend}",
             status_code=503,
-            details={"required_memory_backend": "kvcached"},
+            details={"required_memory_backend": backend},
         )
     return cast(dict[str, Any], model)
 
@@ -312,6 +327,7 @@ async def chat_completions(
         model_id=model["id"],
         reservation_id=reservation_id,
         estimated_tokens=reservation_estimate,
+        estimated_prompt_tokens=prompt_estimate,
         test_run_id=test_run_id,
         client_worker=client_worker,
     )

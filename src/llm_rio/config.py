@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -25,9 +25,16 @@ class EngineSettings(BaseModel):
     max_model_len: int | None = Field(default=None, gt=0)
     max_num_seqs: int | None = Field(default=None, gt=0)
     max_num_batched_tokens: int | None = Field(default=None, gt=0)
-    # disabled: ordinary exclusive vLLM workers; auto: use kvcached when installed;
+    # none: native vLLM sleep/swap; auto: use kvcached when installed;
     # required: refuse startup unless kvcached and vLLM are both importable.
-    kvcached_mode: KVCachedMode = "disabled"
+    kvcached_mode: KVCachedMode = "none"
+
+    @field_validator("kvcached_mode", mode="before")
+    @classmethod
+    def normalize_kvcached_mode(cls, value: object) -> object:
+        if value is None or str(value).strip().lower() in {"", "none", "disabled"}:
+            return "none"
+        return value
 
 
 class Settings(BaseSettings):
@@ -58,8 +65,10 @@ class Settings(BaseSettings):
     # sleep retains weights in RAM while releasing their GPU allocations.
     prism_weight_cache_mode: Literal["disabled", "ram"] = "ram"
     prism_idle_sleep_seconds: float = Field(default=45.0, ge=0)
-    prism_max_workers_per_gpu: int = Field(default=2, ge=1)
-    prism_max_cached_workers_per_gpu: int = Field(default=8, ge=1)
+    prism_max_workers_per_gpu: int = Field(default=1, ge=1)
+    prism_host_cache_max_gib: float | None = Field(default=None, gt=0)
+    prism_host_cache_min_available_gib: float = Field(default=4.0, gt=0)
+    prism_swap_max_used_gib: float = Field(default=0.0, ge=0)
     prism_sleep_gpu_reserve_mib: int = Field(default=1536, ge=0)
     prism_transition_timeout_seconds: float = Field(default=180.0, gt=0)
     worker_startup_timeout_seconds: float | None = Field(default=None, gt=0)
@@ -102,11 +111,6 @@ class Settings(BaseSettings):
             raise ValueError("prism_preload_models cannot contain blank nicknames")
         if "*" in preload and len(preload) != 1:
             raise ValueError("'*' must be the only prism_preload_models entry")
-        if self.prism_max_cached_workers_per_gpu < self.prism_max_workers_per_gpu:
-            raise ValueError(
-                "prism_max_cached_workers_per_gpu must be at least "
-                "prism_max_workers_per_gpu"
-            )
         self.prism_preload_models = preload
         return self
 

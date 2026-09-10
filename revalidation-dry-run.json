@@ -1,0 +1,157 @@
+{
+  "already_valid": [],
+  "failed": [],
+  "mode": "dry-run",
+  "skipped": [
+    {
+      "model": "qwen3.8-27b-nvfp4-ext",
+      "reason": "no registration job available to retry"
+    }
+  ],
+  "submitted": [
+    {
+      "job_id": "dab41206-d8f3-4d2a-8eee-dbf9328b5f70",
+      "model": "gemma-4-31b-it-int4"
+    },
+    {
+      "job_id": "d923d0a8-0fd1-4769-8c87-bc82c0ac14b8",
+      "model": "gemma-4-31b-it-nvfp4"
+    },
+    {
+      "job_id": "b7da890f-9d38-4df8-aa5e-6a1d02cef0a3",
+      "model": "glm-4.5-air-awq"
+    },
+    {
+      "job_id": "c1497fb5-d0e3-41ae-a8a2-47a267617ce5",
+      "model": "glm-4.5-air-fp8"
+    },
+    {
+      "job_id": "8afb4662-baa0-48b3-9a4f-ca17ba725680",
+      "model": "laguna-s-2.1-fp8"
+    },
+    {
+      "job_id": "d4f0289f-54d8-4241-b2bf-d249713328e9",
+      "model": "laguna-s-2.1-int4"
+    },
+    {
+      "job_id": "cf2cd17c-d296-40fa-be66-b9f7ac7af1e1",
+      "model": "laguna-s-2.1-nvfp4"
+    },
+    {
+      "job_id": "258ee67a-8365-444c-a5d4-a324811d6372",
+      "model": "llama-3.3-70b-instruct-awq"
+    },
+    {
+      "job_id": "f097de89-0ce7-4b34-aeb0-36e9ee5130e8",
+      "model": "olmo-3-32b-think-4bit"
+    },
+    {
+      "job_id": "cb1b8526-ab6c-402e-a40f-24f5a17e7c3d",
+      "model": "olmo-3-32b-think-8bit"
+    },
+    {
+      "job_id": "809e7a68-a45c-45e9-8401-b96d7b617e1b",
+      "model": "qwen3-1.7b-fp8"
+    },
+    {
+      "job_id": "31b48bb5-6c98-400d-a537-811f424a047b",
+      "model": "qwen3-1.7b-int4"
+    },
+    {
+      "job_id": "c06f62af-043e-4c54-bd75-8be8425fe778",
+      "model": "qwen3-14b-awq"
+    },
+    {
+      "job_id": "38d801f7-8259-470b-89f3-5117757f0a0f",
+      "model": "qwen3-14b-fp8"
+    },
+    {
+      "job_id": "beaa711c-4b23-4134-8ae6-c976694793b6",
+      "model": "qwen3-235b-a22b-int4"
+    },
+    {
+      "job_id": "73594f51-65db-47e8-ad7c-e795af04194f",
+      "model": "qwen3-30b-a3b-fp8"
+    },
+    {
+      "job_id": "00d81594-1abf-4e6a-92c3-90fe9aec1c28",
+      "model": "qwen3-30b-a3b-int4"
+    },
+    {
+      "job_id": "4d10032f-cb0f-49b5-a83e-58e6ac8f9baf",
+      "model": "qwen3-32b-awq"
+    },
+    {
+      "job_id": "1ea1753a-5243-4b5d-8af4-e2ec6ce98a97",
+      "model": "qwen3-32b-fp8"
+    },
+    {
+      "job_id": "e5866299-aa33-4657-9a22-4ad79524a52e",
+      "model": "qwen3-4b-awq"
+    },
+    {
+      "job_id": "6f026a04-1fd4-41ef-9625-e93d24a10004",
+      "model": "qwen3-4b-fp8"
+    },
+    {
+      "job_id": "cf01d99c-9536-4d52-ad0a-abdd5434fc0b",
+      "model": "qwen3-8b-awq"
+    },
+    {
+      "job_id": "114ddeb7-b303-483f-a6b7-83f4afd978f4",
+      "model": "qwen3-8b-fp8"
+    },
+    {
+      "job_id": "787a43cb-c243-4eb1-ae97-eaa565a876e3",
+      "model": "qwen3-next-80b-a3b-fp8"
+    },
+    {
+      "job_id": "60820d36-9884-4c92-a508-aef7f91c119f",
+      "model": "qwen3.5-122b-a10b-fp8"
+    },
+    {
+      "job_id": "6b14ee06-5b42-41d6-bc28-5771aa03a783",
+      "model": "qwen3.5-122b-a10b-int4"
+    },
+    {
+      "job_id": "657dab8a-f475-47ac-bcd4-9272757be154",
+      "model": "qwen3.5-27b-fp8"
+    },
+    {
+      "job_id": "aa7fbfba-143a-4148-ad37-b17aaeb29b8e",
+      "model": "qwen3.5-27b-int4"
+    },
+    {
+      "job_id": "1b00682f-a2e1-41fe-b122-d14b9c7cebfb",
+      "model": "qwen3.5-35b-a3b-int4"
+    },
+    {
+      "job_id": "b4081c09-0a0d-43b3-a4ca-cfc63af73d45",
+      "model": "qwen3.5-9b-int4"
+    },
+    {
+      "job_id": "ddb66f6e-a45d-4c8b-a1d9-22628e5fc140",
+      "model": "qwen3.6-27b-fp8"
+    },
+    {
+      "job_id": "cdc9556b-1f47-4d9e-b541-88ba67930807",
+      "model": "qwen3.6-27b-int4"
+    },
+    {
+      "job_id": "c7ab2e11-9501-4365-86f9-8e867c48a8f1",
+      "model": "qwen3.6-27b-nvfp4"
+    },
+    {
+      "job_id": "bb327677-6647-4158-b91a-faa2f1beaed6",
+      "model": "qwen3.6-35b-a3b-int4"
+    },
+    {
+      "job_id": "d4e4b08c-ecd2-468d-8f94-a4b3bb482028",
+      "model": "qwen3.8-27b-fp8"
+    },
+    {
+      "job_id": "dc962b79-3634-443e-81c4-f5d4767dcd31",
+      "model": "qwen3.8-27b-nvfp4"
+    }
+  ]
+}

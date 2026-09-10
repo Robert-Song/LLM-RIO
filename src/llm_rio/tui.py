@@ -346,7 +346,7 @@ class RioTui(App[Path | None]):
         background: $surface;
     }
 
-    #dashboard-models-table, #dashboard-gpus-table {
+    #dashboard-requests-table, #dashboard-models-table, #dashboard-gpus-table {
         height: 12;
         margin-bottom: 1;
     }
@@ -411,6 +411,10 @@ class RioTui(App[Path | None]):
                         )
                         yield Button("Start service", id="dashboard-start-service")
                     yield Static("Loading usage analytics…", id="dashboard-usage")
+                    yield Static("Live request queue", classes="page-title")
+                    yield DataTable(
+                        zebra_stripes=True, cursor_type="row", id="dashboard-requests-table"
+                    )
                     yield Static("Model popularity", classes="page-title")
                     yield DataTable(
                         zebra_stripes=True, cursor_type="row", id="dashboard-models-table"
@@ -475,6 +479,12 @@ class RioTui(App[Path | None]):
                         yield Button("Edit selected", id="profiles-edit", variant="warning")
                         yield Button("Enable selected", id="profiles-enable")
                         yield Button("Disable selected", id="profiles-disable", variant="warning")
+                        yield Button("Verify kvcached", id="profiles-verify-kvcached")
+                        yield Button("Validate model", id="profiles-toggle-normal-verification")
+                        yield Button(
+                            "Validate kvcached",
+                            id="profiles-toggle-kvcached-verification",
+                        )
                     yield DataTable(zebra_stripes=True, cursor_type="row", id="profiles-table")
                     yield Static(
                         "Select a profile to see its launch settings.",
@@ -519,10 +529,13 @@ class RioTui(App[Path | None]):
             "Nickname", "State", "Repository", "Job", "Stage"
         )
         self.query_one("#profiles-table", DataTable).add_columns(
-            "#", "Active", "Engine", "GPUs / TP", "Context", "Max sequences"
+            "#", "Active", "Engine", "GPUs / TP", "Context", "Max sequences", "Native", "kvcached"
         )
         self.query_one("#dashboard-models-table", DataTable).add_columns(
             "Model", "Current rank", "Current tokens", "Total rank", "Total tokens", "Share"
+        )
+        self.query_one("#dashboard-requests-table", DataTable).add_columns(
+            "State", "API key", "Model", "Input est.", "Reserved", "Queued at"
         )
         self.query_one("#dashboard-gpus-table", DataTable).add_columns(
             "GPU", "Util", "VRAM", "Temp", "Power", "Model", "State", "Weights", "Slots"
@@ -642,6 +655,31 @@ class RioTui(App[Path | None]):
             Panel(Pretty(usage_summary, expand_all=True), title="Token usage")
         )
 
+        raw_requests = payload.get("requests")
+        requests = (
+            [item for item in raw_requests if isinstance(item, dict)]
+            if isinstance(raw_requests, list)
+            else []
+        )
+        request_rows: list[tuple[tuple[Any, ...], str]] = []
+        for row_number, item in enumerate(requests, start=1):
+            request_rows.append(
+                (
+                    (
+                        str(item.get("state") or "-"),
+                        str(item.get("api_key") or "-"),
+                        str(item.get("model") or "-"),
+                        self._token_estimate(item.get("estimated_prompt_tokens")),
+                        self._token_estimate(item.get("estimated_tokens")),
+                        str(item.get("created_at") or "-"),
+                    ),
+                    str(item.get("request_id") or row_number),
+                )
+            )
+        self._replace_table_rows(
+            self.query_one("#dashboard-requests-table", DataTable), request_rows
+        )
+
         popularity = usage_payload.get("model_popularity")
         popularity_payload = popularity if isinstance(popularity, dict) else {}
         current_models = popularity_payload.get("current")
@@ -666,20 +704,26 @@ class RioTui(App[Path | None]):
                 int(current_by_id.get(model_id, {}).get("rank") or 10**9),
             )
         )
-        model_table = self.query_one("#dashboard-models-table", DataTable)
-        model_table.clear(columns=False)
+        model_rows: list[tuple[tuple[Any, ...], str]] = []
         for model_id in model_ids:
             current_item = current_by_id.get(model_id, {})
             total_item = total_by_id.get(model_id, {})
-            model_table.add_row(
-                str(total_item.get("model") or current_item.get("model") or model_id),
-                str(current_item.get("rank") or "-"),
-                f"{int(current_item.get('token_usage') or 0):,}",
-                str(total_item.get("rank") or "-"),
-                f"{int(total_item.get('token_usage') or 0):,}",
-                f"{float(total_item.get('share') or 0) * 100:.1f}%",
-                key=model_id,
+            model_rows.append(
+                (
+                    (
+                        str(total_item.get("model") or current_item.get("model") or model_id),
+                        str(current_item.get("rank") or "-"),
+                        f"{int(current_item.get('token_usage') or 0):,}",
+                        str(total_item.get("rank") or "-"),
+                        f"{int(total_item.get('token_usage') or 0):,}",
+                        f"{float(total_item.get('share') or 0) * 100:.1f}%",
+                    ),
+                    model_id,
+                )
             )
+        self._replace_table_rows(
+            self.query_one("#dashboard-models-table", DataTable), model_rows
+        )
 
         raw_gpus = payload.get("gpus")
         gpus = (
@@ -687,8 +731,7 @@ class RioTui(App[Path | None]):
             if isinstance(raw_gpus, list)
             else []
         )
-        gpu_table = self.query_one("#dashboard-gpus-table", DataTable)
-        gpu_table.clear(columns=False)
+        gpu_rows: list[tuple[tuple[Any, ...], str]] = []
         for gpu in gpus:
             raw_placements = gpu.get("placements")
             placements = (
@@ -714,20 +757,43 @@ class RioTui(App[Path | None]):
             total_vram = int(gpu.get("total_vram_mib") or 0)
             temperature = gpu.get("temperature_c")
             power = gpu.get("power_draw_w")
-            gpu_table.add_row(
-                f"{gpu.get('index', '?')}: {gpu.get('name', 'GPU')}",
-                f"{int(gpu.get('gpu_utilization_percent') or 0)}%"
-                if gpu.get("available")
-                else "N/A",
-                f"{used_vram:,}/{total_vram:,} MiB",
-                f"{temperature} degrees C" if temperature is not None else "-",
-                f"{float(power):.1f} W" if power is not None else "-",
-                models,
-                states,
-                weight_storage,
-                ", ".join(slot_values) or "0/?",
-                key=str(gpu.get("uuid") or gpu.get("index")),
+            gpu_rows.append(
+                (
+                    (
+                        f"{gpu.get('index', '?')}: {gpu.get('name', 'GPU')}",
+                        f"{int(gpu.get('gpu_utilization_percent') or 0)}%"
+                        if gpu.get("available")
+                        else "N/A",
+                        f"{used_vram:,}/{total_vram:,} MiB",
+                        f"{temperature} degrees C" if temperature is not None else "-",
+                        f"{float(power):.1f} W" if power is not None else "-",
+                        models,
+                        states,
+                        weight_storage,
+                        ", ".join(slot_values) or "0/?",
+                    ),
+                    str(gpu.get("uuid") or gpu.get("index")),
+                )
             )
+        self._replace_table_rows(
+            self.query_one("#dashboard-gpus-table", DataTable), gpu_rows
+        )
+
+    @staticmethod
+    def _token_estimate(value: Any) -> str:
+        return f"{int(value):,}" if value is not None else "-"
+
+    def _replace_table_rows(
+        self,
+        table: DataTable,
+        rows: Iterable[tuple[tuple[Any, ...], str]],
+    ) -> None:
+        """Refresh rows without resetting the user's table scroll position."""
+        scroll_x, scroll_y = table.scroll_offset
+        table.clear(columns=False)
+        for cells, key in rows:
+            table.add_row(*cells, key=key)
+        table.call_after_refresh(table.scroll_to, scroll_x, scroll_y, animate=False)
 
     async def refresh_keys(self, *, notify_error: bool = True) -> None:
         ok, records = await self._call(
@@ -847,13 +913,24 @@ class RioTui(App[Path | None]):
                 f"{profile.get('gpu_count') or 0} / {profile.get('tensor_parallel_size') or 0}",
                 f"{int(profile.get('max_model_len') or 0):,}",
                 str(profile.get("max_num_seqs") or "engine default"),
+                "yes" if profile.get("normal_verified") else "no",
+                "yes" if profile.get("kvcached_verified") else "no",
                 key=str(profile.get("id") or number),
             )
         gguf_files = payload.get("available_gguf_files")
         gguf_note = ""
         if isinstance(gguf_files, list) and gguf_files:
             gguf_note = "  •  GGUF: " + ", ".join(str(item) for item in gguf_files)
-        self.query_one("#profiles-description", Static).update(f"Model: {nickname}{gguf_note}")
+        verification_job = payload.get("kvcached_verification_job")
+        verification_note = ""
+        if isinstance(verification_job, dict):
+            verification_note = (
+                f"  •  kvcached job: {verification_job.get('state')} "
+                f"/ {verification_job.get('stage')}"
+            )
+        self.query_one("#profiles-description", Static).update(
+            f"Model: {nickname}{gguf_note}{verification_note}"
+        )
         if self.profile_records:
             self._show_profile_details(0)
         else:
@@ -900,6 +977,15 @@ class RioTui(App[Path | None]):
         record = self.profile_records[index]
         self.query_one("#profile-details", Static).update(
             Panel(Pretty(record, expand_all=True), title=str(record.get("id") or "Profile"))
+        )
+        self._sync_profile_verification_buttons(record)
+
+    def _sync_profile_verification_buttons(self, profile: dict[str, Any]) -> None:
+        self.query_one("#profiles-toggle-normal-verification", Button).label = (
+            "Invalidate model" if profile.get("normal_verified") else "Validate model"
+        )
+        self.query_one("#profiles-toggle-kvcached-verification", Button).label = (
+            "Invalidate kvcached" if profile.get("kvcached_verified") else "Validate kvcached"
         )
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
@@ -1730,6 +1816,46 @@ class RioTui(App[Path | None]):
                 )
             await self.refresh_profiles()
 
+    async def _verify_model_kvcached(self) -> None:
+        if self.profile_model is None:
+            return
+        ok, job = await self._call(
+            "Starting manual kvcached verification",
+            lambda: cli_api._request(
+                "POST",
+                f"/admin/models/{self.profile_model['id']}/verify-kvcached",
+            ),
+        )
+        if ok and isinstance(job, dict):
+            self.notify(
+                f"kvcached verification job {job.get('id')} queued.",
+                timeout=10,
+            )
+            await self.refresh_profiles()
+
+    async def _set_profile_backend_verification(
+        self, profile: dict[str, Any], *, backend: str, verified: bool
+    ) -> None:
+        if self.profile_model is None:
+            return
+        action = "validate" if verified else "invalidate"
+        ok, result = await self._call(
+            f"{action.title()} {backend} profile",
+            lambda: cli_api._request(
+                "POST",
+                "/admin/models/"
+                f"{self.profile_model['id']}/profiles/{profile['id']}/verification/"
+                f"{backend}/{action}",
+            ),
+        )
+        if ok and isinstance(result, dict):
+            self.notify(
+                f"{backend} verification {'enabled' if verified else 'cleared'} for the "
+                "selected profile.",
+                timeout=10,
+            )
+            await self.refresh_profiles()
+
     async def _summarize_usage(self) -> None:
         ok, payload = await self._call(
             "Summarizing usage",
@@ -1888,6 +2014,35 @@ class RioTui(App[Path | None]):
         elif button_id == "profiles-edit":
             if (profile := self._selected_profile()) is not None:
                 self._open_profile_edit(profile)
+        elif button_id == "profiles-verify-kvcached":
+            self._confirm(
+                "Verify with kvcached",
+                "Launch measured kvcached probes for this model when validation GPUs are idle?",
+                "Verify",
+                self._verify_model_kvcached,
+            )
+        elif button_id in {
+            "profiles-toggle-normal-verification",
+            "profiles-toggle-kvcached-verification",
+        }:
+            if (profile := self._selected_profile()) is not None:
+                backend = (
+                    "native"
+                    if button_id == "profiles-toggle-normal-verification"
+                    else "kvcached"
+                )
+                field = "normal_verified" if backend == "native" else "kvcached_verified"
+                verified = not bool(profile.get(field))
+                action = "Validate" if verified else "Invalidate"
+                self._confirm(
+                    f"{action} {backend}",
+                    f"{action} this selected profile for {backend} launches on this machine "
+                    "without running probes?",
+                    action,
+                    lambda: self._set_profile_backend_verification(
+                        profile, backend=backend, verified=verified
+                    ),
+                )
         elif button_id in {"profiles-enable", "profiles-disable"}:
             if (profile := self._selected_profile()) is not None:
                 active = button_id == "profiles-enable"

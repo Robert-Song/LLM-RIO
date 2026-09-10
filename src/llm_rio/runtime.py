@@ -19,7 +19,7 @@ from llm_rio.planner import (
     WakePlacement,
 )
 from llm_rio.prism import detect_kvcached
-from llm_rio.profiles import ProfileRepository
+from llm_rio.profiles import ProfileRepository, profile_verified_for_mode
 from llm_rio.queueing import ModelQueues, QueuedRequest
 from llm_rio.storage import Database
 from llm_rio.workers import WorkerSupervisor
@@ -65,11 +65,11 @@ class ResidencyScheduler:
             wait_duration_seconds=settings.wait_duration_seconds,
             minimum_residency_seconds=settings.minimum_residency_seconds,
             fair_share_seconds=settings.fair_share_seconds,
-            prism_enabled=self.kvcached.enabled,
+            prism_enabled=self.kvcached.enabled or supervisor.ram_weight_cache_enabled,
+            kvcached_required=self.kvcached.enabled,
             gpu_vram_mib={device.uuid: device.total_vram_mib for device in inventory.gpus},
             reserved_vram_mib=settings.reserved_vram_mib,
             prism_max_workers_per_gpu=settings.prism_max_workers_per_gpu,
-            prism_max_cached_workers_per_gpu=settings.prism_max_cached_workers_per_gpu,
             prism_sleep_gpu_reserve_mib=settings.prism_sleep_gpu_reserve_mib,
             prism_idle_sleep_seconds=settings.prism_idle_sleep_seconds,
             prism_weight_cache_enabled=getattr(
@@ -103,28 +103,34 @@ class ResidencyScheduler:
         self._prism_configured = True
         runtime = self.kvcached
         if not runtime.enabled:
-            if self.settings.engines.kvcached_mode != "disabled":
+            if self.settings.engines.kvcached_mode == "auto":
                 await self.database.record_event(
                     "PRISM_UNAVAILABLE",
                     payload={"reason": runtime.reason},
                 )
-            return
+            event_type = (
+                "PRISM_NATIVE_SLEEP_ENABLED"
+                if self.supervisor.ram_weight_cache_enabled
+                else "PRISM_DISABLED"
+            )
+        else:
+            event_type = "PRISM_ENABLED"
         await self.database.record_event(
-            "PRISM_ENABLED",
+            event_type,
             payload={
                 "kvcached_version": runtime.package_version,
                 "kvcached_revision": runtime.source_revision,
                 "vllm_version": runtime.vllm_version,
                 "officially_tested": runtime.officially_tested,
-                "max_workers_per_gpu": self.settings.prism_max_workers_per_gpu,
+                "max_workers_per_gpu": (
+                    self.settings.prism_max_workers_per_gpu if runtime.enabled else 1
+                ),
                 "weight_cache": (
-                    "vllm_sleep_level_1"
-                    if self.supervisor.ram_weight_cache_enabled
-                    else "disabled"
+                    "vllm_sleep_level_1" if self.supervisor.ram_weight_cache_enabled else "disabled"
                 ),
-                "max_cached_workers_per_gpu": (
-                    self.settings.prism_max_cached_workers_per_gpu
-                ),
+                "host_cache_max_gib": self.settings.prism_host_cache_max_gib,
+                "host_cache_min_available_gib": (self.settings.prism_host_cache_min_available_gib),
+                "swap_max_used_gib": self.settings.prism_swap_max_used_gib,
                 "idle_sleep_seconds": self.settings.prism_idle_sleep_seconds,
             },
         )
@@ -198,7 +204,7 @@ class ResidencyScheduler:
 
     async def warm_model_once(self, model_id: str) -> None:
         """Populate one newly validated model into the host-RAM weight cache."""
-        if not self.kvcached.enabled or not self.planner.prism_weight_cache_enabled:
+        if not self.planner.prism_weight_cache_enabled:
             return
         async with self._state_lock:
             self._prism_one_time_warm_model_ids.add(model_id)
@@ -235,9 +241,7 @@ class ResidencyScheduler:
 
     async def acquire_validation_gpus(self, gpu_uuids: tuple[str, ...]) -> bool:
         worker_ids: list[str] = []
-        preserve_weight_cache = bool(
-            getattr(self.supervisor, "ram_weight_cache_enabled", False)
-        )
+        preserve_weight_cache = bool(getattr(self.supervisor, "ram_weight_cache_enabled", False))
         async with self._state_lock:
             idle_for = (datetime.now(UTC) - self._last_arrival_at).total_seconds()
             overlapping = [
@@ -272,10 +276,7 @@ class ResidencyScheduler:
             )
         else:
             results = await asyncio.gather(
-                *(
-                    self.supervisor.stop(worker_id, force=False)
-                    for worker_id in worker_ids
-                ),
+                *(self.supervisor.stop(worker_id, force=False) for worker_id in worker_ids),
                 return_exceptions=True,
             )
         failures = [result for result in results if isinstance(result, BaseException)]
@@ -317,9 +318,7 @@ class ResidencyScheduler:
             payload={
                 "gpu_uuids": gpu_uuids,
                 "preserved_cached_worker_ids": retained_worker_ids,
-                "evicted_cached_worker_ids": (
-                    [] if preserve_weight_cache else worker_ids
-                ),
+                "evicted_cached_worker_ids": ([] if preserve_weight_cache else worker_ids),
             },
         )
         return True
@@ -384,6 +383,7 @@ class ResidencyScheduler:
                 if lease:
                     await self.database.release_reservation(lease.reservation_id, "drain_watchdog")
 
+        await self.supervisor.enforce_host_cache_budget()
         mode = await self.database.service_mode()
         if mode is ServiceMode.DRAINING:
             if not self._validation_gpu_uuids and all(
@@ -429,9 +429,16 @@ class ResidencyScheduler:
             pressure.model_id: await self.profiles.for_model(pressure.model_id)
             for pressure in pressures
         }
-        if self.kvcached.enabled:
+        if self.kvcached.enabled or self.planner.prism_weight_cache_enabled:
             for model_id, model_profiles in profile_map.items():
-                compatible = any(profile.memory_backend == "kvcached" for profile in model_profiles)
+                compatible = any(
+                    profile_verified_for_mode(
+                        profile,
+                        kvcached_required=self.kvcached.enabled,
+                        ram_weight_cache_required=(self.planner.prism_weight_cache_enabled),
+                    )
+                    for profile in model_profiles
+                )
                 if (
                     model_profiles
                     and not compatible
@@ -450,9 +457,7 @@ class ResidencyScheduler:
             pressures=pressures,
             profiles=profile_map,
         )
-        sleep_actions = [
-            action for action in actions if isinstance(action, SleepPlacement)
-        ]
+        sleep_actions = [action for action in actions if isinstance(action, SleepPlacement)]
         if sleep_actions:
             await asyncio.gather(
                 *(self.supervisor.sleep(action.worker_id) for action in sleep_actions)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -11,7 +12,6 @@ from llm_rio.kvcached_vllm_compat import (
     _install_persistent_weight_backup_shim,
 )
 from llm_rio.planner import (
-    DrainPlacement,
     GreedyPlacementPlanner,
     QueuePressure,
     StartPlacement,
@@ -124,9 +124,7 @@ def test_hybrid_fp8_sleep_wake_zeroes_nested_cache_groups() -> None:
     assert [tensor.zero_calls for tensor in original_nested_group] == [1, 1]
     assert runner.kv_caches[1].zero_calls == 1
     assert runner.scales_reset
-    assert logger.messages == [
-        "Installed LLM-RIO hybrid FP8 KV-cache wake compatibility shim"
-    ]
+    assert logger.messages == ["Installed LLM-RIO hybrid FP8 KV-cache wake compatibility shim"]
 
 
 def test_host_weight_backup_survives_wake_and_is_reused_on_next_sleep() -> None:
@@ -145,7 +143,9 @@ def test_host_weight_backup_survives_wake_and_is_reused_on_next_sleep() -> None:
             selected = (
                 (self.default_tag,)
                 if offload_tags is None
-                else (offload_tags,) if isinstance(offload_tags, str) else offload_tags
+                else (offload_tags,)
+                if isinstance(offload_tags, str)
+                else offload_tags
             )
             for data in self.pointer_to_data.values():
                 if data.tag in selected:
@@ -175,8 +175,11 @@ def _profile(
     *,
     utilization: float = 0.92,
     peak_mib: tuple[int, ...] | None = None,
-    headroom_mib: int = 2048,
+    sleep_mib: tuple[int, ...] | None = None,
+    wake_peak_mib: tuple[int, ...] | None = None,
+    backend: str = "native",
 ) -> PlacementProfile:
+    measured_peak = peak_mib or idle_mib
     return PlacementProfile(
         id=f"profile-{model_id}-{len(gpu_set)}",
         model_id=model_id,
@@ -196,18 +199,24 @@ def _profile(
         predicted_tokens_per_second=10.0,
         load_and_warmup_seconds=1.0,
         idle_vram_mib_per_gpu=idle_mib,
-        peak_vram_mib_per_gpu=peak_mib or idle_mib,
-        gpu_headroom_mib_per_gpu=(headroom_mib,) * len(gpu_set),
+        peak_vram_mib_per_gpu=measured_peak,
+        gpu_headroom_mib_per_gpu=(0,) * len(gpu_set),
         capabilities=frozenset({"chat"}),
         launch_args={},
         gpu_memory_utilization=utilization,
         kv_cache_capacity_tokens=4096,
         max_full_length_concurrency=1.0,
-        memory_backend="kvcached",
+        memory_backend=backend,
+        sleep_vram_mib_per_gpu=(1536,) * len(gpu_set) if sleep_mib is None else sleep_mib,
+        normal_verified=backend == "native",
+        kvcached_verified=backend == "kvcached",
+        vram_measurement_version=2,
+        vram_baseline_mib_per_gpu=(0,) * len(gpu_set),
+        wake_peak_vram_mib_per_gpu=wake_peak_mib or measured_peak,
     )
 
 
-def test_prism_cache_pressure_evicts_least_recently_used_sleeping_worker() -> None:
+def test_prism_has_no_fixed_sleeping_worker_count_limit() -> None:
     now = datetime.now(UTC)
     planner = GreedyPlacementPlanner(
         wait_duration_seconds=1,
@@ -217,7 +226,6 @@ def test_prism_cache_pressure_evicts_least_recently_used_sleeping_worker() -> No
         gpu_vram_mib={"GPU-0": 97_887},
         reserved_vram_mib=2048,
         prism_max_workers_per_gpu=2,
-        prism_max_cached_workers_per_gpu=2,
     )
     older = WorkerPlacement(
         id="older-cache-entry",
@@ -253,12 +261,85 @@ def test_prism_cache_pressure_evicts_least_recently_used_sleeping_worker() -> No
     )
 
     assert len(actions) == 1
-    assert isinstance(actions[0], DrainPlacement)
-    assert actions[0].worker_id == older.id
-    assert actions[0].reason == "prism_ram_cache_lru"
+    assert isinstance(actions[0], StartPlacement)
+    assert actions[0].reason == "prism_cold_backlog"
 
 
-def test_prism_falls_back_to_tp_profile_that_preserves_elastic_headroom() -> None:
+def test_native_sleep_uses_incremental_peak_and_applies_global_reserve_once() -> None:
+    planner = GreedyPlacementPlanner(
+        wait_duration_seconds=1,
+        minimum_residency_seconds=0,
+        fair_share_seconds=60,
+        prism_enabled=True,
+        kvcached_required=False,
+        gpu_vram_mib={"GPU-0": 97_249},
+        reserved_vram_mib=2048,
+    )
+    # The per-device budget is physical VRAM minus the global reserve exactly once.
+    # Neither gpu_memory_utilization nor the legacy per-profile headroom is reapplied.
+    fitting = _profile(
+        "fitting",
+        ("GPU-0",),
+        (95_201,),
+        peak_mib=(95_201,),
+        utilization=0.92,
+    )
+    assert planner._cached_prism_fits(fitting, ("GPU-0",), [])
+
+    too_large = _profile(
+        "too-large",
+        ("GPU-0",),
+        (95_202,),
+        peak_mib=(95_202,),
+        utilization=0.92,
+    )
+
+    assert not planner._cached_prism_fits(too_large, ("GPU-0",), [])
+
+
+def test_cached_fit_composes_active_peak_and_sleep_residual() -> None:
+    planner = GreedyPlacementPlanner(
+        wait_duration_seconds=1,
+        minimum_residency_seconds=0,
+        fair_share_seconds=60,
+        prism_enabled=True,
+        kvcached_required=False,
+        gpu_vram_mib={"GPU-0": 97_249},
+        reserved_vram_mib=2048,
+    )
+    sleeping_profile = _profile("sleeping", ("GPU-0",), (30_000,), sleep_mib=(5_201,))
+    sleeping = WorkerPlacement(
+        id="sleeping-worker",
+        profile=sleeping_profile,
+        gpu_uuids=("GPU-0",),
+        port=18000,
+        state=RuntimeState.SLEEPING,
+    )
+    fitting = _profile("incoming", ("GPU-0",), (90_000,))
+    assert planner._cached_prism_fits(fitting, ("GPU-0",), [sleeping])
+
+    sleeping.profile = replace(sleeping_profile, sleep_vram_mib_per_gpu=(5_202,))
+    assert not planner._cached_prism_fits(fitting, ("GPU-0",), [sleeping])
+
+
+def test_cached_fit_rejects_legacy_absolute_vram_profile() -> None:
+    planner = GreedyPlacementPlanner(
+        wait_duration_seconds=1,
+        minimum_residency_seconds=0,
+        fair_share_seconds=60,
+        prism_enabled=True,
+        gpu_vram_mib={"GPU-0": 97_249},
+        reserved_vram_mib=2048,
+    )
+    legacy = replace(
+        _profile("legacy", ("GPU-0",), (30_000,)),
+        vram_measurement_version=1,
+        vram_baseline_mib_per_gpu=None,
+    )
+    assert not planner._cached_prism_fits(legacy, ("GPU-0",), [])
+
+
+def test_prism_falls_back_to_tp_profile_that_uses_composed_measured_peaks() -> None:
     gpu_set = ("GPU-0", "GPU-1")
     planner = GreedyPlacementPlanner(
         wait_duration_seconds=1,
@@ -269,7 +350,7 @@ def test_prism_falls_back_to_tp_profile_that_preserves_elastic_headroom() -> Non
         reserved_vram_mib=2048,
         prism_max_workers_per_gpu=2,
     )
-    resident_profile = _profile("resident", gpu_set, (56_085, 55_529))
+    resident_profile = _profile("resident", gpu_set, (65_000, 65_000), backend="kvcached")
     resident = WorkerPlacement(
         id="resident-worker",
         profile=resident_profile,
@@ -277,10 +358,16 @@ def test_prism_falls_back_to_tp_profile_that_preserves_elastic_headroom() -> Non
         port=18000,
         state=RuntimeState.READY,
     )
-    # Idle-only accounting fits TP1 on GPU-1 by just 250 MiB. Its measured
-    # inference peak does not, while the validated TP2 profile fits comfortably.
-    tp1 = _profile("incoming", ("GPU-1",), (30_181,), peak_mib=(31_019,))
-    tp2 = _profile("incoming", gpu_set, (19_977, 19_421), peak_mib=(20_107, 19_551))
+    # TP1 exceeds the physical-minus-reserve budget on GPU-1 once its measured
+    # peak is composed with the resident peak; the measured TP2 shape fits.
+    tp1 = _profile("incoming", ("GPU-1",), (30_181,), peak_mib=(31_019,), backend="kvcached")
+    tp2 = _profile(
+        "incoming",
+        gpu_set,
+        (19_977, 19_421),
+        peak_mib=(20_107, 19_551),
+        backend="kvcached",
+    )
 
     assert not planner._prism_fits(tp1, ("GPU-1",), [resident])
     assert planner._prism_fits(tp2, gpu_set, [resident])
@@ -341,9 +428,7 @@ def test_prism_replica_scaling_does_not_add_tp2_after_both_tp1_copies() -> None:
     )
     gpu0_profile = _profile("hot-model", ("GPU-0",), (30_000,))
     gpu1_profile = _profile("hot-model", ("GPU-1",), (30_000,))
-    tp2_profile = _profile(
-        "hot-model", ("GPU-0", "GPU-1"), (20_000, 20_000)
-    )
+    tp2_profile = _profile("hot-model", ("GPU-0", "GPU-1"), (20_000, 20_000))
     workers = [
         WorkerPlacement(
             id="hot-gpu-0",
@@ -567,9 +652,7 @@ def test_duplicate_preload_never_substitutes_one_tp2_worker() -> None:
         reserved_vram_mib=2048,
         prism_max_workers_per_gpu=2,
     )
-    resident_profile = _profile(
-        "resident", ("GPU-0", "GPU-1"), (60_000, 60_000)
-    )
+    resident_profile = _profile("resident", ("GPU-0", "GPU-1"), (60_000, 60_000))
     resident = WorkerPlacement(
         id="resident",
         profile=resident_profile,
@@ -579,9 +662,7 @@ def test_duplicate_preload_never_substitutes_one_tp2_worker() -> None:
     )
     gpu0_profile = _profile("hot-model", ("GPU-0",), (32_000,))
     gpu1_profile = _profile("hot-model", ("GPU-1",), (32_000,))
-    tp2_profile = _profile(
-        "hot-model", ("GPU-0", "GPU-1"), (20_000, 20_000)
-    )
+    tp2_profile = _profile("hot-model", ("GPU-0", "GPU-1"), (20_000, 20_000))
 
     actions = planner.plan(
         now=datetime.now(UTC),
@@ -602,3 +683,84 @@ def test_duplicate_preload_never_substitutes_one_tp2_worker() -> None:
 
     assert actions
     assert not any(isinstance(action, StartPlacement) for action in actions)
+
+
+def test_required_kvcached_mode_filters_unverified_profiles() -> None:
+    now = datetime.now(UTC)
+    planner = GreedyPlacementPlanner(
+        wait_duration_seconds=1,
+        minimum_residency_seconds=0,
+        fair_share_seconds=60,
+        prism_enabled=True,
+        kvcached_required=True,
+        gpu_vram_mib={"GPU-0": 97_887},
+        reserved_vram_mib=2048,
+    )
+    unverified = replace(
+        _profile("model-a", ("GPU-0",), (30_000,), backend="kvcached"),
+        kvcached_verified=False,
+    )
+    pressure = QueuePressure(
+        model_id="model-a",
+        requests=1,
+        estimated_tokens=128,
+        oldest_enqueued_at=now - timedelta(seconds=2),
+    )
+
+    assert (
+        planner.plan(
+            now=now,
+            all_gpu_uuids={"GPU-0"},
+            workers=[],
+            pressures=[pressure],
+            profiles={"model-a": [unverified]},
+        )
+        == []
+    )
+
+    verified = replace(unverified, kvcached_verified=True)
+    actions = planner.plan(
+        now=now,
+        all_gpu_uuids={"GPU-0"},
+        workers=[],
+        pressures=[pressure],
+        profiles={"model-a": [verified]},
+    )
+    assert len(actions) == 1
+    assert isinstance(actions[0], StartPlacement)
+
+
+def test_native_sleep_planner_rejects_llama_cpp_profiles() -> None:
+    now = datetime.now(UTC)
+    planner = GreedyPlacementPlanner(
+        wait_duration_seconds=1,
+        minimum_residency_seconds=0,
+        fair_share_seconds=60,
+        prism_enabled=True,
+        kvcached_required=False,
+        gpu_vram_mib={"GPU-0": 97_887},
+        reserved_vram_mib=2048,
+    )
+    llama_profile = replace(
+        _profile("model-a", ("GPU-0",), (30_000,)),
+        engine=Engine.LLAMA_CPP,
+        memory_backend="native",
+        kvcached_verified=False,
+    )
+
+    actions = planner.plan(
+        now=now,
+        all_gpu_uuids={"GPU-0"},
+        workers=[],
+        pressures=[
+            QueuePressure(
+                model_id="model-a",
+                requests=1,
+                estimated_tokens=128,
+                oldest_enqueued_at=now - timedelta(seconds=2),
+            )
+        ],
+        profiles={"model-a": [llama_profile]},
+    )
+
+    assert actions == []

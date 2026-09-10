@@ -94,9 +94,24 @@ CREATE TABLE IF NOT EXISTS model_jobs (
     progress_json TEXT NOT NULL DEFAULT '{}',
     failure_json TEXT,
     requested_grants_json TEXT NOT NULL DEFAULT '[]',
+    validation_overrides_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS model_verification_jobs (
+    id TEXT PRIMARY KEY,
+    model_id TEXT NOT NULL REFERENCES model_catalog(id),
+    backend TEXT NOT NULL CHECK (backend IN ('kvcached')),
+    state TEXT NOT NULL CHECK (state IN ('QUEUED', 'RUNNING', 'COMPLETED', 'FAILED')),
+    stage TEXT NOT NULL,
+    progress_json TEXT NOT NULL DEFAULT '{}',
+    failure_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_model_verification_jobs_model
+ON model_verification_jobs(model_id, created_at DESC);
+
 
 CREATE TABLE IF NOT EXISTS model_profiles (
     id TEXT PRIMARY KEY,
@@ -144,6 +159,7 @@ CREATE TABLE IF NOT EXISTS inference_requests (
     worker_id TEXT,
     state TEXT NOT NULL,
     estimated_tokens INTEGER NOT NULL,
+    estimated_prompt_tokens INTEGER,
     actual_prompt_tokens INTEGER,
     actual_completion_tokens INTEGER,
     error_code TEXT,
@@ -227,6 +243,12 @@ CREATE TABLE IF NOT EXISTS workers (
     port INTEGER NOT NULL,
     pid INTEGER,
     state TEXT NOT NULL,
+    host_cache_accounted_mib REAL NOT NULL DEFAULT 0,
+    host_cache_accounting_source TEXT,
+    process_rss_mib REAL NOT NULL DEFAULT 0,
+    process_pss_mib REAL NOT NULL DEFAULT 0,
+    process_swap_mib REAL NOT NULL DEFAULT 0,
+    last_cache_eviction_reason TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -298,6 +320,7 @@ class Database:
             ("client_worker", "TEXT"),
             ("accepted_count", "INTEGER NOT NULL DEFAULT 0"),
             ("completion_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("estimated_prompt_tokens", "INTEGER"),
         ):
             if column not in request_columns:
                 await self.execute(
@@ -306,6 +329,10 @@ class Database:
         await self.execute(
             "CREATE INDEX IF NOT EXISTS idx_inference_requests_test_run "
             "ON inference_requests(test_run_id, created_at)"
+        )
+        await self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_inference_requests_live "
+            "ON inference_requests(state, created_at)"
         )
         model_rows = await self.fetchall("PRAGMA table_info(model_catalog)")
         model_columns = {row["name"] for row in model_rows}
@@ -316,6 +343,26 @@ class Database:
             )
         if "source_model_id" not in model_columns:
             await self.execute("ALTER TABLE model_catalog ADD COLUMN source_model_id TEXT")
+        model_job_rows = await self.fetchall("PRAGMA table_info(model_jobs)")
+        model_job_columns = {row["name"] for row in model_job_rows}
+        if "validation_overrides_json" not in model_job_columns:
+            await self.execute(
+                "ALTER TABLE model_jobs "
+                "ADD COLUMN validation_overrides_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        worker_rows = await self.fetchall("PRAGMA table_info(workers)")
+        worker_columns = {row["name"] for row in worker_rows}
+        for column, definition in (
+            ("host_cache_accounted_mib", "REAL NOT NULL DEFAULT 0"),
+            ("host_cache_accounting_source", "TEXT"),
+            ("process_rss_mib", "REAL NOT NULL DEFAULT 0"),
+            ("process_pss_mib", "REAL NOT NULL DEFAULT 0"),
+            ("process_swap_mib", "REAL NOT NULL DEFAULT 0"),
+            ("last_cache_eviction_reason", "TEXT"),
+        ):
+            if column not in worker_columns:
+                await self.execute(f"ALTER TABLE workers ADD COLUMN {column} {definition}")
+
 
     async def close(self) -> None:
         if self._connection is not None:
@@ -775,9 +822,27 @@ class Database:
         if row is None:
             return None
         result = dict(row)
-        for key in ("progress_json", "failure_json", "requested_grants_json"):
+        for key in (
+            "progress_json",
+            "failure_json",
+            "requested_grants_json",
+            "validation_overrides_json",
+        ):
             result[key.removesuffix("_json")] = json.loads(result.pop(key) or "null")
         return result
+
+    async def set_model_job_validation_overrides(
+        self, job_id: str, overrides: dict[str, Any]
+    ) -> bool:
+        cursor = await self.execute(
+            """
+            UPDATE model_jobs
+               SET validation_overrides_json = ?, updated_at = ?
+             WHERE id = ?
+            """,
+            (json.dumps(overrides), _now(), job_id),
+        )
+        return cursor.rowcount > 0
 
     async def model_by_nickname(self, nickname: str) -> dict[str, Any] | None:
         row = await self.fetchone("SELECT * FROM model_catalog WHERE nickname = ?", (nickname,))
@@ -1058,13 +1123,14 @@ class Database:
         estimated_tokens: int,
         test_run_id: str | None,
         client_worker: str | None,
+        estimated_prompt_tokens: int | None = None,
     ) -> None:
         await self.execute(
             """
             INSERT OR IGNORE INTO inference_requests
                 (id, key_id, account_id, model_id, reservation_id, state,
-                 estimated_tokens, test_run_id, client_worker, created_at)
-            VALUES (?, ?, ?, ?, ?, 'QUEUED', ?, ?, ?, ?)
+                 estimated_tokens, estimated_prompt_tokens, test_run_id, client_worker, created_at)
+            VALUES (?, ?, ?, ?, ?, 'QUEUED', ?, ?, ?, ?, ?)
             """,
             (
                 request_id,
@@ -1073,11 +1139,29 @@ class Database:
                 model_id,
                 reservation_id,
                 estimated_tokens,
+                estimated_prompt_tokens,
                 test_run_id,
                 client_worker,
                 _now(),
             ),
         )
+
+    async def live_requests(self) -> list[dict[str, Any]]:
+        """Return requests that are still waiting for or using a worker."""
+        rows = await self.fetchall(
+            """
+            SELECT r.id AS request_id, r.state, k.nickname AS api_key,
+                   m.nickname AS model, r.estimated_prompt_tokens,
+                   r.estimated_tokens, r.created_at, r.admitted_at, r.worker_id
+              FROM inference_requests r
+              JOIN api_keys k ON k.id = r.key_id
+              JOIN model_catalog m ON m.id = r.model_id
+             WHERE r.state IN ('QUEUED', 'ADMITTED')
+             ORDER BY CASE r.state WHEN 'QUEUED' THEN 0 ELSE 1 END,
+                      r.created_at, r.id
+            """
+        )
+        return [dict(row) for row in rows]
 
     async def mark_request_admitted(self, request_id: str, worker_id: str) -> bool:
         async with (
@@ -1271,7 +1355,10 @@ class Database:
             await self.release_reservation(reservation["id"], "service_restarted")
         await self.execute(
             """
-            UPDATE workers SET state = 'COLD', pid = NULL, updated_at = ?
+            UPDATE workers SET state = 'COLD', pid = NULL,
+                host_cache_accounted_mib = 0, host_cache_accounting_source = NULL,
+                process_rss_mib = 0, process_pss_mib = 0, process_swap_mib = 0,
+                updated_at = ?
              WHERE state != 'COLD' OR pid IS NOT NULL
             """,
             (_now(),),
