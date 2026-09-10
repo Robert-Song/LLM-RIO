@@ -42,6 +42,30 @@ number of additional admin keys. Local `llmctl` management commands automaticall
 active admin credential from the protected host database, so they do not require
 `LLMRIO_API_KEY`. Remote management still requires an explicitly supplied admin key.
 
+### Serving modes
+
+Select a mode with `./llmctl serve --mode queue`, `LLMRIO_SERVING_MODE=queue` for other
+launchers, or top-level `serving_mode = "queue"` in TOML. Explicit mode selection overrides
+the legacy kvcached and weight-cache switches. Omit it to preserve existing launch behavior;
+the built-in default remains `vllm-sleep`.
+
+| Mode | Switching | GPU ownership | Validation |
+| --- | --- | --- | --- |
+| `queue` | Drain admitted work, fully unload, then cold-start | One worker per GPU; independent replicas on free GPUs | Maintenance; no sleep; configured/hardware-derived GPU utilization |
+| `vllm-sleep` | Level-1 sleep in RAM, then wake | One active worker per GPU; sleeping contexts may remain | Maintenance; verifies sleep/wake; initial utilization capped at 0.80 |
+| `kv-cached` | Experimental elastic KV and optional RAM weight caching | Measured co-residency | Experimental validation policy |
+
+Queue mode prioritizes older model backlogs while retaining tenant fairness, smallest viable
+GPU placements, TP fallback, and replica scaling. Admitted requests finish before a blocking
+worker unloads. New workers cannot reuse its GPUs until process and GPU teardown is verified.
+Queued TP models keep priority over younger work on a partially released GPU group.
+`minimum_residency_seconds` still applies. Queue mode ignores `prism_preload_models` and
+sleep/cache settings; it loads on demand and fully unloads idle workers after the usual idle wait.
+
+Queue mode requires fresh measurements with sleep explicitly disabled. Old sleep-mode profiles
+are not routable in queue mode; run the revalidation script after switching. Both scripts report
+the server's actual serving mode, also visible through maintenance status in the API, CLI, and TUI.
+
 ### Prism scheduling: elastic KV plus a host-RAM weight cache
 
 LLM-RIO can keep multiple vLLM engines ready on the same GPU set while kvcached allocates physical
@@ -61,11 +85,17 @@ multi-worker GPU co-residency.
 verified model requested later can cold-start, displace an idle resident to RAM, and remain cached
 after its request drains. Repeat a nickname to prepare distinct placements before a burst.
 
-Normal registration performs fail-closed native validation. Independent GPU placements for a
+Normal registration performs fail-closed native validation only after maintenance has fully
+drained the host (`MAINTENANCE_READY`). Downloads and inspection can proceed while serving;
+GPU validation jobs then report `waiting_for_maintenance`. Enter maintenance through the TUI's
+Drain button or `./llmctl maintenance drain`. All production workers, including sleeping cached
+processes, are fully unloaded before normal-mode probes run. Independent GPU placements for a
 candidate shape are probed concurrently. When any TP=1 placement passes, its verified one-GPU
 profiles are registered and larger TP shapes are not probed automatically; create and validate a
 larger profile explicitly in the TUI if needed. In RAM weight-cache mode, every probe must pass
-generation, level-1 sleep, wake, and post-wake generation.
+generation, level-1 sleep, wake, and post-wake generation. Each validation worker is terminated after the probe,
+and successful normal-mode registration does not request an automatic warm load. Resume is
+blocked while validation workers own GPUs. Experimental kvcached mode retains idle-time validation.
 
 VRAM measurement format v2 captures one per-GPU baseline immediately before launch, samples
 continuously through post-wake generation, and stores incremental idle, active-peak, sleeping
@@ -87,6 +117,16 @@ reserved_vram_mib`. Active footprint is the maximum measured initial/wake peak; 
 is the measured level-1 residual. The global reserve is subtracted exactly once, and
 `gpu_memory_utilization` is not applied again as a scheduler ceiling. `prism_max_workers_per_gpu`
 applies only to simultaneously GPU-resident kvcached engines; native mode permits one.
+
+In normal mode, the planner can propose a launch or wake that requires reclaiming sleeping
+contexts. Before executing it, the service compares the stored per-GPU active/wake peak plus the
+global reserve against **live NVML free VRAM**. Cold launches also respect native vLLM's configured
+startup memory fraction. Sleeping workers on deficient GPUs are fully stopped in LRU order;
+VRAM is sampled again after each stop. Active requests are never evicted. A wake credits only
+its own measured residual that is also visible in the process group's current NVML allocation.
+If a safe wake remains impossible, its cached process can be unloaded for a later cold start.
+Missing telemetry or remaining external allocations defer admission rather than launch into OOM.
+External processes can still allocate memory after a sample, so this is not an exclusive GPU lock.
 
 On the target RTX PRO 6000 host, the first Qwen3-8B validation measured 4.25-8.07 seconds to
 offload, 0.25-0.34 seconds to restore, and roughly 2.3-3.0 GiB sleeping VRAM. A routed cache-hit
@@ -144,8 +184,9 @@ All command-oriented workflows remain available for scripts and runbooks. For ex
 `./llmctl doctor`, and `./llmctl serve` behave as before. `./llmctl interactive` is an explicit
 alias for opening the TUI.
 
-New model registration automatically resolves, downloads, inspects, and hardware-validates the
-model. Add `--wait` to print each state transition until the model is available or fails:
+New model registration automatically resolves, downloads, and inspects the model. In normal
+mode, hardware validation waits for maintenance. Add `--wait` to print each state transition
+until the model is available or fails (enter maintenance from another terminal if needed):
 
 ```bash
 ./llmctl models add qwen3-8b Qwen/Qwen3-8B --grant-to teamA --wait
@@ -153,6 +194,54 @@ model. Add `--wait` to print each state transition until the model is available 
 
 The same asynchronous workflow starts with `POST /staff/models` and is observed with
 `GET /staff/model-jobs/{job_id}`.
+
+For normal-mode deployment:
+
+1. Queue new registrations or retry failed registrations using the API, CLI, or TUI.
+2. Run `./llmctl maintenance drain` (or choose **Maintenance → Drain** in the TUI).
+3. Use `./llmctl maintenance status` and `./llmctl models review MODEL` to follow draining and
+   validation. Waiting jobs start automatically when the service reaches `MAINTENANCE_READY`.
+   A previous failed job needs `./llmctl models retry MODEL` to be queued again.
+4. Once validation completes, run `./llmctl maintenance resume` or choose **Resume** in the TUI.
+   Models load on demand or under an explicitly configured preload policy.
+
+The equivalent API operations are `POST /admin/maintenance` with `{"mode":"drain"}` or
+`{"mode":"active"}`, and `GET /admin/maintenance` for status. The status includes whether
+validation requires maintenance and the GPUs currently held by probes. `gpu_memory_wait`
+means validation is waiting for live memory availability; it retries automatically.
+
+To revalidate the entire enabled catalog in queue mode, restart the updated server with
+`./llmctl serve --mode queue` (or set `LLMRIO_SERVING_MODE=queue` in your launcher), then run:
+
+```bash
+.venv/bin/python fire_all_native_revalidations.py --report revalidation-submit.json
+# Follow jobs with llmctl / TUI; leave the server in maintenance until they finish.
+.venv/bin/python final_deployment_test.py --continue --report deployment-results.json
+```
+
+The first script requests maintenance and retries all enabled models, including failed models
+and models with existing measurements. `--dry-run` makes no changes; `--only-invalid` restores
+selective revalidation. Already queued/running jobs are left running. Disabled models are skipped.
+The second script requires an admin `LLMRIO_API_KEY`, or an inference `--api-key` with the
+environment key unset so local `llmctl` can recover admin credentials. Its default target is the
+entire enabled catalog, including NVFP4. `--continue` checks registration completion, routability,
+and GPU reservations before resuming. Pending/failed registrations block the full-catalog test;
+it does not wait for them automatically. `--model NAME` tests an explicit subset;
+`--all-available` tests only routable models and therefore provides partial coverage.
+A pass requires completed assistant text matching the test prompt and positive token usage.
+This is a sequential inference smoke test, not a concurrency or long-context load test.
+
+`vllm-sleep` validation caps initial `gpu_memory_utilization` at **0.80**, including higher
+configured overrides. Confirmed CUDA OOM or measured-capacity failures retry at 0.10 and 0.20
+below that initial fraction (never below 0.40). Lower explicit fractions remain lower. Each
+attempt must fully tear down before retrying; the passing fraction is stored in the profile
+and used for serving. Unsupported-model and configuration errors are not retried as memory
+failures. Queue mode removes the 0.80 cap: the first attempt uses the configured fraction,
+or the hardware-derived fraction if none is configured. Confirmed memory failures retry in
+0.02 decrements, up to five retries (never below 0.40), before trying a larger TP shape.
+An explicit utilization remains an upper bound; adjust it if a model needs a higher fraction.
+Both native modes retain live VRAM admission and the global reserve. Experimental Prism
+validation keeps its existing allocation policy.
 
 Settled per-call usage can be compacted from the TUI Maintenance page or with:
 
@@ -246,13 +335,20 @@ Both remote URLs and base64 data URLs can be supplied using an `image_url` conte
 
 ## Development
 
-The repository is managed with `uv`. On a non-GPU development machine, edit and inspect without
-starting the service or running the hardware acceptance suite. On the target host:
+The repository is managed with `uv`. The automated suite uses temporary databases and mocked
+workers and can run without starting the service or loading models:
 
 ```bash
-uv sync --extra dev --extra engine
+uv sync --extra dev
 uv run pytest
+uv run ruff check src tests
+uv run ruff format --check src tests
+uv run mypy src/llm_rio
 ```
+
+Install `--extra engine` to include the optional Torch compatibility tests. Hardware demos and
+acceptance scripts are separate, explicit operations. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for module responsibilities, test isolation, configuration selection, and request accounting.
 
 No scheduler branch or acceptance test assumes a two-GPU host; simulated planner tests cover
 1, 2, 4, and 8 GPU inventories, while real capacity and performance are always established by

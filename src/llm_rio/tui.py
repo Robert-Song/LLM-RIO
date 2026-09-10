@@ -494,7 +494,8 @@ class RioTui(App[Path | None]):
                 with VerticalScroll(id="maintenance", classes="page"):
                     yield Static("Maintenance", classes="page-title")
                     yield Static(
-                        "Drain the host safely before maintenance, or resume request scheduling.",
+                        "Drain to validate pending models in normal mode. "
+                        "Resume after validation finishes.",
                         classes="page-description",
                     )
                     with Grid(classes="toolbar"):
@@ -721,9 +722,7 @@ class RioTui(App[Path | None]):
                     model_id,
                 )
             )
-        self._replace_table_rows(
-            self.query_one("#dashboard-models-table", DataTable), model_rows
-        )
+        self._replace_table_rows(self.query_one("#dashboard-models-table", DataTable), model_rows)
 
         raw_gpus = payload.get("gpus")
         gpus = (
@@ -742,8 +741,7 @@ class RioTui(App[Path | None]):
             models = ", ".join(str(item.get("model") or "-") for item in placements) or "idle"
             states = ", ".join(str(item.get("state") or "-") for item in placements) or "idle"
             weight_storage = (
-                ", ".join(str(item.get("weight_storage") or "-") for item in placements)
-                or "none"
+                ", ".join(str(item.get("weight_storage") or "-") for item in placements) or "none"
             )
             slot_values: list[str] = []
             for placement in placements:
@@ -775,9 +773,7 @@ class RioTui(App[Path | None]):
                     str(gpu.get("uuid") or gpu.get("index")),
                 )
             )
-        self._replace_table_rows(
-            self.query_one("#dashboard-gpus-table", DataTable), gpu_rows
-        )
+        self._replace_table_rows(self.query_one("#dashboard-gpus-table", DataTable), gpu_rows)
 
     @staticmethod
     def _token_estimate(value: Any) -> str:
@@ -785,7 +781,7 @@ class RioTui(App[Path | None]):
 
     def _replace_table_rows(
         self,
-        table: DataTable,
+        table: DataTable[Any],
         rows: Iterable[tuple[tuple[Any, ...], str]],
     ) -> None:
         """Refresh rows without resetting the user's table scroll position."""
@@ -1269,7 +1265,7 @@ class RioTui(App[Path | None]):
     def _open_edit_model(self, record: dict[str, Any]) -> None:
         defaults = record.get("request_defaults")
         stored_defaults = defaults if isinstance(defaults, dict) else {}
-        numeric_fields = (
+        numeric_fields: tuple[tuple[str, str, Literal["integer", "number"]], ...] = (
             ("temperature", "Default temperature (blank clears)", "number"),
             ("top_p", "Default top-p (blank clears)", "number"),
             ("top_k", "Default top-k (blank clears)", "integer"),
@@ -1800,12 +1796,13 @@ class RioTui(App[Path | None]):
     async def _set_profile_active(self, profile: dict[str, Any], active: bool) -> None:
         if self.profile_model is None:
             return
+        model_id = self.profile_model["id"]
         action = "enable" if active else "disable"
         ok, result = await self._call(
             f"{action.title()} placement profile",
             lambda: cli_api._request(
                 "POST",
-                f"/admin/models/{self.profile_model['id']}/profiles/{profile['id']}/{action}",
+                f"/admin/models/{model_id}/profiles/{profile['id']}/{action}",
             ),
         )
         if ok:
@@ -1819,11 +1816,12 @@ class RioTui(App[Path | None]):
     async def _verify_model_kvcached(self) -> None:
         if self.profile_model is None:
             return
+        model_id = self.profile_model["id"]
         ok, job = await self._call(
             "Starting manual kvcached verification",
             lambda: cli_api._request(
                 "POST",
-                f"/admin/models/{self.profile_model['id']}/verify-kvcached",
+                f"/admin/models/{model_id}/verify-kvcached",
             ),
         )
         if ok and isinstance(job, dict):
@@ -1838,13 +1836,14 @@ class RioTui(App[Path | None]):
     ) -> None:
         if self.profile_model is None:
             return
+        model_id = self.profile_model["id"]
         action = "validate" if verified else "invalidate"
         ok, result = await self._call(
             f"{action.title()} {backend} profile",
             lambda: cli_api._request(
                 "POST",
                 "/admin/models/"
-                f"{self.profile_model['id']}/profiles/{profile['id']}/verification/"
+                f"{model_id}/profiles/{profile['id']}/verification/"
                 f"{backend}/{action}",
             ),
         )
@@ -2017,7 +2016,7 @@ class RioTui(App[Path | None]):
         elif button_id == "profiles-verify-kvcached":
             self._confirm(
                 "Verify with kvcached",
-                "Launch measured kvcached probes for this model when validation GPUs are idle?",
+                "Queue kvcached probes? Normal mode requires maintenance before probes can run.",
                 "Verify",
                 self._verify_model_kvcached,
             )
@@ -2027,11 +2026,10 @@ class RioTui(App[Path | None]):
         }:
             if (profile := self._selected_profile()) is not None:
                 backend = (
-                    "native"
-                    if button_id == "profiles-toggle-normal-verification"
-                    else "kvcached"
+                    "native" if button_id == "profiles-toggle-normal-verification" else "kvcached"
                 )
                 field = "normal_verified" if backend == "native" else "kvcached_verified"
+                selected_profile = profile
                 verified = not bool(profile.get(field))
                 action = "Validate" if verified else "Invalidate"
                 self._confirm(
@@ -2040,7 +2038,7 @@ class RioTui(App[Path | None]):
                     "without running probes?",
                     action,
                     lambda: self._set_profile_backend_verification(
-                        profile, backend=backend, verified=verified
+                        selected_profile, backend=backend, verified=verified
                     ),
                 )
         elif button_id in {"profiles-enable", "profiles-disable"}:

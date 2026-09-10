@@ -12,7 +12,7 @@ from typing import Any
 from huggingface_hub import HfApi, snapshot_download
 
 from llm_rio.config import Settings
-from llm_rio.domain import CatalogState, Engine, MachineInventory
+from llm_rio.domain import CatalogState, Engine, MachineInventory, ServiceMode
 from llm_rio.profiles import ProfileRepository, profile_key, profile_to_dict
 from llm_rio.storage import Database, _now
 from llm_rio.validation import (
@@ -132,9 +132,7 @@ class RegistrationManager:
         result["failure"] = json.loads(failure) if failure else None
         return result
 
-    async def latest_kvcached_verification_job(
-        self, model_id: str
-    ) -> dict[str, Any] | None:
+    async def latest_kvcached_verification_job(self, model_id: str) -> dict[str, Any] | None:
         row = await self.database.fetchone(
             """
             SELECT id FROM model_verification_jobs
@@ -143,11 +141,7 @@ class RegistrationManager:
             """,
             (model_id,),
         )
-        return (
-            None
-            if row is None
-            else await self.kvcached_verification_job(str(row["id"]))
-        )
+        return None if row is None else await self.kvcached_verification_job(str(row["id"]))
 
     async def _update_kvcached_verification_job(
         self,
@@ -189,6 +183,33 @@ class RegistrationManager:
             eligible_gpu_sets=profile.eligible_gpu_sets,
         )
 
+    async def _wait_for_validation_window(self, job_id: str, *, verification: bool = False) -> None:
+        """Downloads may run during serving; native-mode GPU probes require maintenance."""
+        if not self.validator.scheduler.validation_requires_maintenance:
+            return
+        reported = False
+        while await self.database.service_mode() is not ServiceMode.MAINTENANCE_READY:
+            if not reported:
+                progress = {
+                    "message": (
+                        "Waiting for maintenance to finish draining; use llmctl maintenance drain"
+                    )
+                }
+                if verification:
+                    await self._update_kvcached_verification_job(
+                        job_id, state="QUEUED", stage="waiting_for_maintenance", progress=progress
+                    )
+                else:
+                    await self.database.update_model_job(
+                        job_id,
+                        job_state="QUEUED",
+                        stage="waiting_for_maintenance",
+                        catalog_state=CatalogState.VALIDATION_PENDING,
+                        progress=progress,
+                    )
+                reported = True
+            await asyncio.sleep(1.0)
+
     async def _run_kvcached_verification(self, job_id: str) -> None:
         try:
             job = await self.kvcached_verification_job(job_id)
@@ -202,9 +223,7 @@ class RegistrationManager:
                 )
             records = [
                 record
-                for record in await self.profile_repository.records_for_model(
-                    str(job["model_id"])
-                )
+                for record in await self.profile_repository.records_for_model(str(job["model_id"]))
                 if record.active and record.profile.engine is Engine.VLLM
             ]
             if not records:
@@ -217,6 +236,7 @@ class RegistrationManager:
             last_error: ValidationError | None = None
             for index, record in enumerate(records, 1):
                 while True:
+                    await self._wait_for_validation_window(job_id, verification=True)
                     await self._update_kvcached_verification_job(
                         job_id,
                         state="RUNNING",
@@ -253,9 +273,7 @@ class RegistrationManager:
             if not accepted:
                 if last_error is not None:
                     raise last_error
-                raise ValidationError(
-                    "validation", "no kvcached placement passed validation"
-                )
+                raise ValidationError("validation", "no kvcached placement passed validation")
 
             async with self.database.transaction() as connection:
                 for profile in accepted:
@@ -586,6 +604,7 @@ class RegistrationManager:
         last_validation_error: ValidationError | None = None
         for candidate in candidates:
             while True:
+                await self._wait_for_validation_window(job_id)
                 await self.database.update_model_job(
                     job_id,
                     job_state="RUNNING",
@@ -607,12 +626,15 @@ class RegistrationManager:
                         )
                     accepted.extend(candidate_profiles)
                     break
-                except ValidationPreempted:
+                except ValidationPreempted as exc:
                     await self.database.update_model_job(
                         job_id,
                         job_state="QUEUED",
-                        stage="validation_requeued",
+                        stage="gpu_memory_wait"
+                        if exc.stage == "gpu_memory_wait"
+                        else "validation_requeued",
                         catalog_state=CatalogState.VALIDATION_PENDING,
+                        progress={"message": str(exc), **exc.details},
                     )
                     await asyncio.sleep(5.0)
                     continue

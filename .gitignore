@@ -19,15 +19,15 @@ config.toml
 config.barra.toml
 
 docs/
-scripts/
-tests/*
-!tests/test_cli_model_registration.py
-!tests/test_prism_runtime.py
-!tests/test_prism_demo_preflight.py
-!tests/test_prism_worker_transitions.py
-!tests/test_validation_cleanup.py
+scripts/*
+!scripts/yarn_context_demo.py
 uv.lock
 logs_barra/
 db_backup/
 db_salvage/
 state_barra/
+
+# Local credentials and copied configuration
+config*.toml
+!config.example.toml
+.*-api-key-vault

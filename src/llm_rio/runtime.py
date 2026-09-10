@@ -57,7 +57,7 @@ class ResidencyScheduler:
         self.inventory = inventory
         self.profiles = profiles
         self.supervisor = supervisor
-        self.kvcached = detect_kvcached(settings.engines.kvcached_mode)
+        self.kvcached = detect_kvcached(settings.effective_kvcached_mode)
         self.queues = ModelQueues(
             settings.queue_capacity_per_model, settings.queue_capacity_per_tenant
         )
@@ -66,6 +66,7 @@ class ResidencyScheduler:
             minimum_residency_seconds=settings.minimum_residency_seconds,
             fair_share_seconds=settings.fair_share_seconds,
             prism_enabled=self.kvcached.enabled or supervisor.ram_weight_cache_enabled,
+            queue_mode=settings.queue_mode_enabled,
             kvcached_required=self.kvcached.enabled,
             gpu_vram_mib={device.uuid: device.total_vram_mib for device in inventory.gpus},
             reserved_vram_mib=settings.reserved_vram_mib,
@@ -92,8 +93,25 @@ class ResidencyScheduler:
         self._prism_configured = False
         supervisor.set_event_callback(self.worker_event)
 
+    @property
+    def serving_mode(self) -> str:
+        if self.kvcached.enabled:
+            return "kv-cached"
+        return "vllm-sleep" if self.supervisor.ram_weight_cache_enabled else "queue"
+
+    @property
+    def validation_requires_maintenance(self) -> bool:
+        return not self.kvcached.enabled
+
+    @property
+    def validation_gpu_uuids(self) -> tuple[str, ...]:
+        return tuple(sorted(self._validation_gpu_uuids))
+
     async def start(self) -> None:
         if self._task is None:
+            self._maintenance_requested = (
+                await self.database.service_mode() is not ServiceMode.ACTIVE
+            )
             await self._configure_prism()
             self._task = asyncio.create_task(self._run(), name="residency-scheduler")
 
@@ -103,7 +121,7 @@ class ResidencyScheduler:
         self._prism_configured = True
         runtime = self.kvcached
         if not runtime.enabled:
-            if self.settings.engines.kvcached_mode == "auto":
+            if self.settings.effective_kvcached_mode == "auto":
                 await self.database.record_event(
                     "PRISM_UNAVAILABLE",
                     payload={"reason": runtime.reason},
@@ -111,6 +129,8 @@ class ResidencyScheduler:
             event_type = (
                 "PRISM_NATIVE_SLEEP_ENABLED"
                 if self.supervisor.ram_weight_cache_enabled
+                else "QUEUE_ENABLED"
+                if self.settings.queue_mode_enabled
                 else "PRISM_DISABLED"
             )
         else:
@@ -118,6 +138,7 @@ class ResidencyScheduler:
         await self.database.record_event(
             event_type,
             payload={
+                "serving_mode": self.serving_mode,
                 "kvcached_version": runtime.package_version,
                 "kvcached_revision": runtime.source_revision,
                 "vllm_version": runtime.vllm_version,
@@ -134,6 +155,8 @@ class ResidencyScheduler:
                 "idle_sleep_seconds": self.settings.prism_idle_sleep_seconds,
             },
         )
+        if self.settings.queue_mode_enabled:
+            return  # Queue mode loads only in response to real queued requests.
         selectors = self.settings.prism_preload_models
         if not selectors:
             return
@@ -204,7 +227,7 @@ class ResidencyScheduler:
 
     async def warm_model_once(self, model_id: str) -> None:
         """Populate one newly validated model into the host-RAM weight cache."""
-        if not self.planner.prism_weight_cache_enabled:
+        if self.validation_requires_maintenance or not self.planner.prism_weight_cache_enabled:
             return
         async with self._state_lock:
             self._prism_one_time_warm_model_ids.add(model_id)
@@ -241,8 +264,15 @@ class ResidencyScheduler:
 
     async def acquire_validation_gpus(self, gpu_uuids: tuple[str, ...]) -> bool:
         worker_ids: list[str] = []
-        preserve_weight_cache = bool(getattr(self.supervisor, "ram_weight_cache_enabled", False))
+        maintenance_only = self.validation_requires_maintenance
+        preserve_weight_cache = not maintenance_only and self.supervisor.ram_weight_cache_enabled
         async with self._state_lock:
+            mode = await self.database.service_mode()
+            window_open = (
+                mode is ServiceMode.MAINTENANCE_READY
+                if maintenance_only
+                else mode is ServiceMode.ACTIVE and not self._maintenance_requested
+            )
             idle_for = (datetime.now(UTC) - self._last_arrival_at).total_seconds()
             overlapping = [
                 worker
@@ -251,10 +281,12 @@ class ResidencyScheduler:
                 and bool(set(worker.gpu_uuids) & set(gpu_uuids))
             ]
             if (
-                await self.database.service_mode() is not ServiceMode.ACTIVE
-                or self._maintenance_requested
+                not window_open
+                or self._closed
                 or self.queues.pending_models()
-                or idle_for < self.settings.validation_idle_window_seconds
+                or (
+                    not maintenance_only and idle_for < self.settings.validation_idle_window_seconds
+                )
                 or set(gpu_uuids) & self._validation_gpu_uuids
                 or any(worker.admitted_request_ids for worker in overlapping)
                 or any(
@@ -265,63 +297,73 @@ class ResidencyScheduler:
                 return False
             self._validation_gpu_uuids.update(gpu_uuids)
             worker_ids = [worker.id for worker in overlapping]
-        if preserve_weight_cache:
-            results = await asyncio.gather(
-                *(
-                    self.supervisor.sleep(worker.id)
-                    for worker in overlapping
-                    if worker.state is RuntimeState.READY
-                ),
-                return_exceptions=True,
-            )
-        else:
-            results = await asyncio.gather(
-                *(self.supervisor.stop(worker_id, force=False) for worker_id in worker_ids),
-                return_exceptions=True,
-            )
-        failures = [result for result in results if isinstance(result, BaseException)]
-        async with self._state_lock:
-            retained_worker_ids = [
-                worker_id
-                for worker_id in worker_ids
-                if (worker := self.supervisor.workers.get(worker_id)) is not None
-                and worker.state is RuntimeState.SLEEPING
-            ]
-            unresolved_worker_ids = [
-                worker_id
-                for worker_id in worker_ids
-                if (worker := self.supervisor.workers.get(worker_id)) is not None
-                and worker.state not in {RuntimeState.COLD, RuntimeState.SLEEPING}
-            ]
-            demand_arrived = bool(self.queues.pending_models())
+        try:
+            if preserve_weight_cache:
+                results = await asyncio.gather(
+                    *(
+                        self.supervisor.sleep(worker.id)
+                        for worker in overlapping
+                        if worker.state is RuntimeState.READY
+                    ),
+                    return_exceptions=True,
+                )
+            else:
+                results = await asyncio.gather(
+                    *(self.supervisor.stop(worker_id, force=False) for worker_id in worker_ids),
+                    return_exceptions=True,
+                )
+            failures = [result for result in results if isinstance(result, BaseException)]
+            async with self._state_lock:
+                retained_worker_ids = [
+                    worker_id
+                    for worker_id in worker_ids
+                    if (worker := self.supervisor.workers.get(worker_id)) is not None
+                    and worker.state is RuntimeState.SLEEPING
+                ]
+                unresolved_worker_ids = [
+                    worker_id
+                    for worker_id in worker_ids
+                    if (worker := self.supervisor.workers.get(worker_id)) is not None
+                    and (
+                        worker.state is not RuntimeState.COLD
+                        if maintenance_only
+                        else worker.state not in {RuntimeState.COLD, RuntimeState.SLEEPING}
+                    )
+                ]
+                demand_arrived = bool(self.queues.pending_models())
+                if failures or unresolved_worker_ids or demand_arrived:
+                    self._validation_gpu_uuids.difference_update(gpu_uuids)
             if failures or unresolved_worker_ids or demand_arrived:
-                self._validation_gpu_uuids.difference_update(gpu_uuids)
-        if failures or unresolved_worker_ids or demand_arrived:
+                await self.database.record_event(
+                    (
+                        "VALIDATION_GPUS_DEFERRED"
+                        if demand_arrived and not failures and not unresolved_worker_ids
+                        else "VALIDATION_GPUS_ACQUIRE_FAILED"
+                    ),
+                    payload={
+                        "gpu_uuids": gpu_uuids,
+                        "transition_failures": len(failures),
+                        "unresolved_worker_ids": unresolved_worker_ids,
+                        "production_demand": demand_arrived,
+                        "preserved_cached_worker_ids": retained_worker_ids,
+                    },
+                )
+                self._event.set()
+                return False
             await self.database.record_event(
-                (
-                    "VALIDATION_GPUS_DEFERRED"
-                    if demand_arrived and not failures and not unresolved_worker_ids
-                    else "VALIDATION_GPUS_ACQUIRE_FAILED"
-                ),
+                "VALIDATION_GPUS_ACQUIRED",
                 payload={
                     "gpu_uuids": gpu_uuids,
-                    "transition_failures": len(failures),
-                    "unresolved_worker_ids": unresolved_worker_ids,
-                    "production_demand": demand_arrived,
                     "preserved_cached_worker_ids": retained_worker_ids,
+                    "evicted_cached_worker_ids": ([] if preserve_weight_cache else worker_ids),
                 },
             )
+            return True
+        except BaseException:
+            async with self._state_lock:
+                self._validation_gpu_uuids.difference_update(gpu_uuids)
             self._event.set()
-            return False
-        await self.database.record_event(
-            "VALIDATION_GPUS_ACQUIRED",
-            payload={
-                "gpu_uuids": gpu_uuids,
-                "preserved_cached_worker_ids": retained_worker_ids,
-                "evicted_cached_worker_ids": ([] if preserve_weight_cache else worker_ids),
-            },
-        )
-        return True
+            raise
 
     async def release_validation_gpus(self, gpu_uuids: tuple[str, ...]) -> None:
         async with self._state_lock:
@@ -332,10 +374,17 @@ class ResidencyScheduler:
         self._event.set()
 
     def validation_should_yield(self) -> bool:
-        return bool(self.queues.pending_models()) or self._closed or self._maintenance_requested
+        wrong_mode = (
+            not self._maintenance_requested
+            if self.validation_requires_maintenance
+            else self._maintenance_requested
+        )
+        return bool(self.queues.pending_models()) or self._closed or wrong_mode
 
     async def enter_maintenance(self) -> None:
         async with self._state_lock:
+            if await self.database.service_mode() is not ServiceMode.ACTIVE:
+                return
             self._maintenance_requested = True
             await self.database.set_service_mode(ServiceMode.DRAINING)
             rejected = self.queues.drain_all()
@@ -349,6 +398,13 @@ class ResidencyScheduler:
 
     async def resume(self) -> None:
         async with self._state_lock:
+            if self._validation_gpu_uuids:
+                raise RioError(
+                    "validation_in_progress",
+                    "Wait for model validation to finish before resuming service",
+                    status_code=409,
+                    details={"gpu_uuids": sorted(self._validation_gpu_uuids)},
+                )
             if any(
                 worker.state is not RuntimeState.COLD for worker in self.supervisor.workers.values()
             ):
@@ -386,10 +442,16 @@ class ResidencyScheduler:
         await self.supervisor.enforce_host_cache_budget()
         mode = await self.database.service_mode()
         if mode is ServiceMode.DRAINING:
-            if not self._validation_gpu_uuids and all(
-                worker.state is RuntimeState.COLD for worker in self.supervisor.workers.values()
-            ):
-                await self.database.set_service_mode(ServiceMode.MAINTENANCE_READY)
+            async with self._state_lock:
+                if (
+                    await self.database.service_mode() is ServiceMode.DRAINING
+                    and not self._validation_gpu_uuids
+                    and all(
+                        worker.state is RuntimeState.COLD
+                        for worker in self.supervisor.workers.values()
+                    )
+                ):
+                    await self.database.set_service_mode(ServiceMode.MAINTENANCE_READY)
             return
         if mode is ServiceMode.MAINTENANCE_READY:
             return
@@ -429,6 +491,17 @@ class ResidencyScheduler:
             pressure.model_id: await self.profiles.for_model(pressure.model_id)
             for pressure in pressures
         }
+        if self.settings.queue_mode_enabled:
+            profile_map = {
+                model_id: [
+                    profile
+                    for profile in model_profiles
+                    if profile_verified_for_mode(
+                        profile, kvcached_required=False, queue_mode_required=True
+                    )
+                ]
+                for model_id, model_profiles in profile_map.items()
+            }
         if self.kvcached.enabled or self.planner.prism_weight_cache_enabled:
             for model_id, model_profiles in profile_map.items():
                 compatible = any(
@@ -525,6 +598,10 @@ class ResidencyScheduler:
                     {"reason": "artifact_path_missing"},
                 )
                 return
+            if not self.kvcached.enabled and not await self.supervisor.ensure_gpu_capacity(
+                action.profile, action.gpu_uuids
+            ):
+                return
             await self.supervisor.launch(
                 profile=action.profile,
                 gpu_uuids=action.gpu_uuids,
@@ -537,12 +614,17 @@ class ResidencyScheduler:
             worker = self.supervisor.workers.get(action.worker_id)
             if (
                 worker is None
+                or worker.state is not RuntimeState.SLEEPING
                 or self._maintenance_requested
                 or await self.database.service_mode() is not ServiceMode.ACTIVE
                 or bool(set(worker.gpu_uuids) & self._validation_gpu_uuids)
             ):
                 return
-        await self.supervisor.wake(action.worker_id)
+            if not self.kvcached.enabled and not await self.supervisor.ensure_gpu_capacity(
+                worker.profile, worker.gpu_uuids, waking_worker_id=worker.id
+            ):
+                return
+            await self.supervisor.wake(action.worker_id)
 
     async def _route_ready_work(self) -> None:
         async with self._state_lock:

@@ -260,8 +260,7 @@ def _install_persistent_weight_backup_shim(cumem_module: Any, logger: Any) -> No
             backups = [
                 (data, data.cpu_backup_tensor)
                 for data in allocator.pointer_to_data.values()
-                if data.cpu_backup_tensor is not None
-                and (tags is None or data.tag in tags)
+                if data.cpu_backup_tensor is not None and (tags is None or data.tag in tags)
             ]
             try:
                 return original_wake(allocator, tags)

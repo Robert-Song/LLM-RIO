@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-"""Requeue every catalog model that needs native v2 measurement revalidation.
+"""Drain the normal-mode server and requeue all enabled catalog registrations.
 
-Run after the LLM-RIO server has restarted:
-
-    .venv/bin/python fire_all_native_revalidations.py
-
-The script deliberately uses the local ``llmctl`` credential recovery path rather
-than requiring an API key. It only retries the model's existing registration job,
-so it does not submit a new download request or enable kvcached validation.
+Run with the server's Python environment after restarting the updated server.
+This submits work; maintenance remains enabled until validation completes and
+final_deployment_test.py --continue explicitly resumes serving.
 """
 
 from __future__ import annotations
@@ -19,7 +15,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-
 PROJECT_DIR = Path(__file__).resolve().parent
 LLMCTL = PROJECT_DIR / "llmctl"
 CURRENT_VRAM_MEASUREMENT_VERSION = 2
@@ -27,6 +22,11 @@ CURRENT_VRAM_MEASUREMENT_VERSION = 2
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--only-invalid",
+        action="store_true",
+        help="Skip models with an existing valid native measurement.",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -60,7 +60,7 @@ def llmctl_json(*args: str) -> dict[str, Any]:
     return payload
 
 
-def is_valid_native_v2(profile: dict[str, Any]) -> bool:
+def is_valid_native_v2(profile: dict[str, Any], *, queue_mode: bool = False) -> bool:
     """Mirror the native portion of the routability invariant without kvcached."""
     if not profile.get("active"):
         return False
@@ -91,8 +91,13 @@ def is_valid_native_v2(profile: dict[str, Any]) -> bool:
     if any(vectors[2]):  # v2 profiles never retain legacy per-profile headroom.
         return False
 
-    # config.toml uses RAM level-1 sleep, so routability also requires this
-    # profile's measured residual and wake peak.
+    if queue_mode:
+        return (
+            profile.get("engine") == "vllm"
+            and profile.get("launch_args", {}).get("enable_sleep_mode") is False
+        )
+
+    # Sleep mode additionally requires measured residual and wake peak.
     if profile.get("engine") != "vllm":
         return False
     for name in ("sleep_vram_mib_per_gpu", "wake_peak_vram_mib_per_gpu"):
@@ -132,23 +137,39 @@ def main() -> int:
         print("llmctl models list returned no model data", file=sys.stderr)
         return 2
 
+    try:
+        status = llmctl_json("maintenance", "status")
+        if not status.get("validation", {}).get("requires_maintenance"):
+            raise RuntimeError("This script requires normal mode; Prism is enabled.")
+        report["serving_mode"] = status.get("serving_mode", "vllm-sleep")
+        print(f"Server mode: {report['serving_mode']}")
+        if not args.dry_run:
+            llmctl_json("maintenance", "drain")
+            print("Maintenance requested; validation waits for draining to finish.")
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
     for model in models:
-        if not isinstance(model, dict) or model.get("state") != "AVAILABLE":
+        if not isinstance(model, dict) or model.get("state") == "DISABLED":
             continue
         nickname = model.get("nickname")
         if not isinstance(nickname, str):
             continue
-        try:
-            profiles_payload = llmctl_json("models", "profiles", nickname, "--json")
-        except RuntimeError as exc:
-            report["failed"].append({"model": nickname, "reason": str(exc)})
-            continue
-        profiles = profiles_payload.get("data")
-        if isinstance(profiles, list) and any(
-            isinstance(profile, dict) and is_valid_native_v2(profile) for profile in profiles
-        ):
-            report["already_valid"].append(nickname)
-            continue
+        if args.only_invalid:
+            try:
+                profiles_payload = llmctl_json("models", "profiles", nickname, "--json")
+            except RuntimeError as exc:
+                report["failed"].append({"model": nickname, "reason": str(exc)})
+                continue
+            profiles = profiles_payload.get("data")
+            if isinstance(profiles, list) and any(
+                isinstance(profile, dict)
+                and is_valid_native_v2(profile, queue_mode=report["serving_mode"] == "queue")
+                for profile in profiles
+            ):
+                report["already_valid"].append(nickname)
+                continue
 
         job = model.get("registration_job")
         if not isinstance(job, dict) or not isinstance(job.get("id"), str):
@@ -190,7 +211,16 @@ def main() -> int:
         f"skipped={len(report['skipped'])} "
         f"failed={len(report['failed'])}"
     )
-    return 1 if report["failed"] else 0
+    if not args.dry_run:
+        print("After jobs finish, run: .venv/bin/python final_deployment_test.py --continue")
+    return (
+        1
+        if report["failed"]
+        or any(
+            item["reason"] == "no registration job available to retry" for item in report["skipped"]
+        )
+        else 0
+    )
 
 
 if __name__ == "__main__":

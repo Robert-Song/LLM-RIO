@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Final OpenAI-compatible smoke test for the non-NVFP4 LLM-RIO catalog.
+"""Test the normal-mode catalog after native revalidation.
 
-Run after every expected profile has reached AVAILABLE:
-
-    LLMRIO_API_KEY='...' .venv/bin/python final_deployment_test.py
-
-Use --model to test one or more explicit names, or --all-available only when
-you intentionally want to include profiles outside this registration batch.
+Use --continue to check all selected registration jobs, resume the server, and
+run inference. Pending or failed registrations block resumption. Without this
+flag, the server must already be ACTIVE. Set LLMRIO_API_KEY for inference;
+administrative checks require an admin LLMRIO_API_KEY, or use --api-key for
+inference while leaving LLMRIO_API_KEY unset to recover local admin credentials.
 """
 
 from __future__ import annotations
@@ -21,48 +20,9 @@ from typing import Any
 
 from openai import OpenAI
 
+from fire_all_native_revalidations import llmctl_json
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8003/v1"
-
-# These are the non-gated, non-NVFP4 profiles submitted on 2026-09-09.  Do
-# not add the legacy *-nvfp4 profiles here: this is the final experiment gate.
-EXPECTED_MODELS = (
-    "qwen3.8-27b-fp8",
-    #"qwen3.8-27b-int4",
-    #"qwen3.6-35b-a3b-fp8",
-    "qwen3.6-35b-a3b-int4",
-    "qwen3.6-27b-fp8",
-    "qwen3.6-27b-int4",
-    "qwen3.5-122b-a10b-fp8",
-    "qwen3.5-122b-a10b-int4",
-    #"qwen3.5-35b-a3b-fp8",
-    "qwen3.5-35b-a3b-int4",
-    "qwen3.5-27b-fp8",
-    "qwen3.5-27b-int4",
-    "qwen3.5-9b-int4",
-    "qwen3-235b-a22b-int4",
-    "qwen3-next-80b-a3b-fp8",
-    "qwen3-32b-fp8",
-    "qwen3-32b-awq",
-    "qwen3-30b-a3b-fp8",
-    "qwen3-30b-a3b-int4",
-    "qwen3-14b-fp8",
-    "qwen3-14b-awq",
-    "qwen3-8b-fp8",
-    "qwen3-8b-awq",
-    "qwen3-4b-fp8",
-    "qwen3-4b-awq",
-    "qwen3-1.7b-fp8",
-    "qwen3-1.7b-int4",
-    "laguna-s-2.1-fp8",
-    "laguna-s-2.1-int4",
-    "gemma-4-31b-it-int4",
-    "llama-3.3-70b-instruct-awq",
-    "olmo-3-32b-think-8bit",
-    "olmo-3-32b-think-4bit",
-    "glm-4.5-air-fp8",
-    "glm-4.5-air-awq",
-)
 
 SYSTEM_PROMPT = "You are a deployment smoke-test assistant. Follow the user exactly."
 USER_PROMPT = "Reply with exactly: LLM-RIO deployment test passed."
@@ -72,18 +32,25 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default=os.getenv("LLMRIO_API_URL", DEFAULT_BASE_URL))
     parser.add_argument("--api-key", default=os.getenv("LLMRIO_API_KEY"))
-    parser.add_argument(
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument(
         "--model",
         action="append",
         default=[],
         help="Model nickname to test; repeat this option for multiple models.",
     )
-    parser.add_argument(
+    selection.add_argument(
         "--all-available",
         action="store_true",
-        help="Test every model returned by /v1/models instead of the expected batch.",
+        help="Test only routable models; excludes failed registrations from coverage.",
     )
-    parser.add_argument("--max-tokens", type=int, default=32)
+    parser.add_argument(
+        "--continue",
+        dest="resume",
+        action="store_true",
+        help="Resume from maintenance after checking registration jobs.",
+    )
+    parser.add_argument("--max-tokens", type=int, default=512)
     parser.add_argument("--timeout", type=float, default=1800.0)
     parser.add_argument("--report", type=Path, help="Optional path for a JSON result report.")
     return parser.parse_args()
@@ -105,23 +72,63 @@ def main() -> int:
         print("--max-tokens must be positive.", file=sys.stderr)
         return 2
 
-    client = OpenAI(base_url=args.base_url.rstrip("/"), api_key=args.api_key, timeout=args.timeout)
+    root_url = args.base_url.rstrip("/").removesuffix("/v1")
+    os.environ["LLMRIO_API_URL"] = root_url
+    # The supplied inference key may belong to a user. llmctl independently
+    # recovers local admin credentials unless an admin key is supplied via env.
+    client = OpenAI(
+        base_url=root_url + "/v1", api_key=args.api_key, timeout=args.timeout, max_retries=0
+    )
     report: dict[str, Any] = {"base_url": args.base_url, "results": []}
 
     try:
+        status = llmctl_json("maintenance", "status")
+        if not status.get("validation", {}).get("requires_maintenance"):
+            raise RuntimeError("Deployment test requires normal mode.")
+        report["serving_mode"] = status.get("serving_mode", "vllm-sleep")
+        print(f"Server mode: {report['serving_mode']}")
+        catalog = llmctl_json("models", "list", "--json")["data"]
+        enabled = {m["nickname"]: m for m in catalog if m.get("state") != "DISABLED"}
+        targets = list(dict.fromkeys(args.model)) if args.model else sorted(enabled)
+        if args.all_available:
+            targets = sorted(model.id for model in client.models.list().data)
+        if not targets:
+            raise RuntimeError("No models selected; refusing an empty deployment pass.")
+        invalid = []
+        for name in targets:
+            model = enabled.get(name, {})
+            job = model.get("registration_job") or {}
+            if model.get("state") != "AVAILABLE" or job.get("state") != "COMPLETED":
+                invalid.append(f"{name}: catalog={model.get('state')}, job={job.get('state')}")
+        if args.resume:
+            invalid.extend(
+                f"{name}: registration still pending"
+                for name, model in enabled.items()
+                if (model.get("registration_job") or {}).get("state") in {"QUEUED", "RUNNING"}
+                and name not in targets
+            )
+        if invalid:
+            raise RuntimeError("Registrations are not ready: " + "; ".join(invalid))
+        if status.get("validation", {}).get("gpu_uuids"):
+            raise RuntimeError("Validation or unverified teardown still owns GPUs.")
         available = sorted(model.id for model in client.models.list().data)
-    except Exception as exc:  # noqa: BLE001
-        report["model_list_error"] = f"{type(exc).__name__}: {exc}"
+        missing = [name for name in targets if name not in available]
+        if missing:
+            raise RuntimeError(
+                "Selected models are not routable for this key: " + ", ".join(missing)
+            )
+        if args.resume and status["mode"] != "ACTIVE":
+            llmctl_json("maintenance", "resume")
+        elif status["mode"] != "ACTIVE":
+            raise RuntimeError(
+                "Server is in maintenance; use --continue after validation completes."
+            )
+    except Exception as exc:
+        report["preflight_error"] = f"{type(exc).__name__}: {exc}"
         write_report(args.report, report)
-        print(report["model_list_error"], file=sys.stderr)
+        print(report["preflight_error"], file=sys.stderr)
         return 2
 
-    if args.model:
-        targets = args.model
-    elif args.all_available:
-        targets = available
-    else:
-        targets = list(EXPECTED_MODELS)
     missing = [model for model in targets if model not in available]
     report["available_models"] = available
     report["targets"] = targets
@@ -144,6 +151,14 @@ def main() -> int:
                 max_tokens=args.max_tokens,
                 temperature=0,
             )
+            if not response.choices or not response.choices[0].message.content:
+                raise RuntimeError("Response contains no assistant text")
+            if response.choices[0].finish_reason != "stop":
+                raise RuntimeError(f"Incomplete response: {response.choices[0].finish_reason}")
+            if not response.usage or response.usage.completion_tokens <= 0:
+                raise RuntimeError("Response is missing positive token usage")
+            if response.choices[0].message.content.strip() != "LLM-RIO deployment test passed.":
+                raise RuntimeError("Response did not follow the smoke-test prompt")
             result.update(
                 status="PASS",
                 response_model=response.model,

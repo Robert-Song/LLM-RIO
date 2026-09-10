@@ -30,9 +30,7 @@ def test_valid_cache_profile_requires_measured_ram_transition() -> None:
 
 def test_host_ram_threshold_accounts_for_cached_ready_workers(monkeypatch) -> None:
     monkeypatch.setattr(preflight, "available_ram_gib", lambda: 100.0)
-    monkeypatch.setattr(
-        preflight, "gpu_rows", lambda: [("GPU-0", 0.0, 0.0), ("GPU-1", 0.0, 0.0)]
-    )
+    monkeypatch.setattr(preflight, "gpu_rows", lambda: [("GPU-0", 0.0, 0.0), ("GPU-1", 0.0, 0.0)])
 
     before_start = preflight.Checks()
     preflight.check_host(before_start, "before-start")

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import signal
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -85,62 +83,6 @@ def test_vram_capacity_uses_physical_minus_global_reserve_once() -> None:
     assert baseline_error.value.stage == "gpu_measurement"
 
 
-class FinishedProcess:
-    pid = 43123
-    returncode = 0
-
-    def terminate(self) -> None:
-        raise AssertionError("finished parent must not receive a direct terminate")
-
-    def kill(self) -> None:
-        raise AssertionError("finished parent must not receive a direct kill")
-
-    async def wait(self) -> int:
-        return 0
-
-
-@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX-only")
-async def test_terminate_signals_group_after_parent_exits(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    signals: list[tuple[int, int]] = []
-
-    def killpg(process_group: int, requested_signal: int) -> None:
-        signals.append((process_group, requested_signal))
-        if requested_signal == 0:
-            raise ProcessLookupError
-
-    monkeypatch.setattr(os, "killpg", killpg)
-
-    await ProfileValidator._terminate(cast(Any, FinishedProcess()))
-
-    assert signals == [
-        (FinishedProcess.pid, signal.SIGTERM),
-        (FinishedProcess.pid, 0),
-    ]
-
-
-@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX-only")
-async def test_terminate_kills_group_that_outlives_grace_period(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    signals: list[tuple[int, int]] = []
-
-    def killpg(process_group: int, requested_signal: int) -> None:
-        signals.append((process_group, requested_signal))
-
-    async def no_delay(_seconds: float) -> None:
-        return None
-
-    monkeypatch.setattr(os, "killpg", killpg)
-    monkeypatch.setattr(asyncio, "sleep", no_delay)
-
-    await ProfileValidator._terminate(cast(Any, FinishedProcess()))
-
-    assert signals[0] == (FinishedProcess.pid, signal.SIGTERM)
-    assert signals[1:-1] == [(FinishedProcess.pid, 0)] * 50
-
-
 class ValidationDatabase:
     def __init__(self) -> None:
         self.events: list[tuple[str, dict[str, Any]]] = []
@@ -198,6 +140,8 @@ def validation_scheduler(*workers: Any) -> tuple[ResidencyScheduler, ValidationS
     scheduler._validation_gpu_uuids = set()
     scheduler._last_arrival_at = datetime.now(UTC) - timedelta(seconds=60)
     scheduler._maintenance_requested = False
+    scheduler._closed = False
+    scheduler.kvcached = SimpleNamespace(enabled=True)
     scheduler._event = asyncio.Event()
     return scheduler, supervisor
 
@@ -362,6 +306,8 @@ class RegistrationDatabaseStub:
 
 
 class RegistrationValidatorStub:
+    scheduler = SimpleNamespace(validation_requires_maintenance=False)
+
     def __init__(self, *, fail_tp1: bool = False) -> None:
         self.fail_tp1 = fail_tp1
         self.validated_tensor_parallel_sizes: list[int] = []

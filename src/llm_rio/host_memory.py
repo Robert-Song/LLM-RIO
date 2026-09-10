@@ -133,7 +133,7 @@ def _cgroup_v2_path() -> Path | None:
 
 def _bytes_value(path: Path) -> int | None:
     raw = _read_text(path)
-    if raw in {None, "", "max"}:
+    if raw is None or raw in {"", "max"}:
         return None
     try:
         return int(raw)
@@ -157,9 +157,7 @@ def sample_host_memory() -> HostMemorySample:
     swap_current = (_bytes_value(cgroup / "memory.swap.current") or 0) / (1024 * 1024)
     swap_maximum_bytes = _bytes_value(cgroup / "memory.swap.max")
     swap_maximum = (
-        host.swap_total_mib
-        if swap_maximum_bytes is None
-        else swap_maximum_bytes / (1024 * 1024)
+        host.swap_total_mib if swap_maximum_bytes is None else swap_maximum_bytes / (1024 * 1024)
     )
     return HostMemorySample(
         source="cgroup",
@@ -173,4 +171,3 @@ def sample_host_memory() -> HostMemorySample:
 
 def gib_to_mib(value: float | None) -> float | None:
     return None if value is None else value * 1024
-

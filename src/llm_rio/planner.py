@@ -59,6 +59,7 @@ class GreedyPlacementPlanner:
         scale_window_seconds: float = 30.0,
         minimum_marginal_efficiency: float = 0.05,
         prism_enabled: bool = False,
+        queue_mode: bool = False,
         kvcached_required: bool = False,
         gpu_vram_mib: dict[str, int] | None = None,
         reserved_vram_mib: int = 0,
@@ -73,6 +74,7 @@ class GreedyPlacementPlanner:
         self.scale_window_seconds = scale_window_seconds
         self.minimum_marginal_efficiency = minimum_marginal_efficiency
         self.prism_enabled = prism_enabled
+        self.queue_mode = queue_mode
         self.kvcached_required = kvcached_required
         self.gpu_vram_mib = gpu_vram_mib or {}
         self.reserved_vram_mib = reserved_vram_mib
@@ -108,11 +110,7 @@ class GreedyPlacementPlanner:
             )
 
         actions: list[PlannerAction] = []
-        active = [
-            worker
-            for worker in workers
-            if worker.state in {RuntimeState.LOADING, RuntimeState.READY, RuntimeState.DRAINING}
-        ]
+        active = [worker for worker in workers if worker.state is not RuntimeState.COLD]
         used = {gpu for worker in active for gpu in worker.gpu_uuids}
         free = all_gpu_uuids - used
         pressure_by_model = {pressure.model_id: pressure for pressure in pressures}
@@ -158,6 +156,15 @@ class GreedyPlacementPlanner:
                 )
                 if drain:
                     return [DrainPlacement(worker.id, "incompatible_backlog") for worker in drain]
+                if self.queue_mode:
+                    # Do not let younger work claim a partially released TP group
+                    # while the oldest model waits for its remaining GPUs.
+                    free.difference_update(
+                        gpu
+                        for profile in candidates
+                        for gpu_set in profile.eligible_gpu_sets
+                        for gpu in gpu_set
+                    )
                 continue
 
             ready_workers = [
@@ -674,7 +681,10 @@ class GreedyPlacementPlanner:
                 if worker.id != existing_worker_id
                 and (worker.state is RuntimeState.SLEEPING or worker.id in prospective_sleep)
             ]
-            for sleeping_worker in sleeping:
+            # Native serving has a live-VRAM gate that evicts sleeping processes as
+            # needed. Counting them as immovable here can prevent any wake/launch
+            # action from reaching that gate, permanently stalling the queue.
+            for sleeping_worker in sleeping if self.kvcached_required else []:
                 worker_index = sleeping_worker.gpu_uuids.index(gpu_uuid)
                 measured = sleeping_worker.profile.sleep_vram_mib_per_gpu
                 if measured is None or worker_index >= len(measured):
@@ -954,6 +964,54 @@ class GreedyPlacementPlanner:
             return False
         return (now - worker.ready_at).total_seconds() >= self.minimum_residency_seconds
 
+    def _choose_queue_preemption(
+        self,
+        *,
+        now: datetime,
+        candidates: list[PlacementProfile],
+        workers: list[WorkerPlacement],
+        pressure: QueuePressure,
+        pressure_by_model: dict[str, QueuePressure],
+    ) -> list[WorkerPlacement] | None:
+        # Drain a complete GPU group and finish admitted requests before unloading.
+        # Older queued work keeps priority, while unused replicas can be reclaimed.
+        options: list[list[WorkerPlacement]] = []
+        for profile in sorted(candidates, key=lambda item: item.gpu_count):
+            for gpu_set in profile.eligible_gpu_sets:
+                blockers = [w for w in workers if set(w.gpu_uuids) & set(gpu_set)]
+                if not blockers or any(
+                    w.state is not RuntimeState.READY
+                    or w.model_id == pressure.model_id
+                    or not self._residency_satisfied(w, now)
+                    for w in blockers
+                ):
+                    continue
+                if any(
+                    w.model_id in pressure_by_model
+                    and pressure_by_model[w.model_id].oldest_enqueued_at
+                    < pressure.oldest_enqueued_at
+                    and not any(
+                        other.model_id == w.model_id
+                        and other not in blockers
+                        and other.state is RuntimeState.READY
+                        for other in workers
+                    )
+                    for w in blockers
+                ):
+                    continue
+                options.append(blockers)
+        return (
+            min(
+                options,
+                key=lambda group: (
+                    len(group),
+                    sum(w.profile.predicted_tokens_per_second for w in group),
+                ),
+            )
+            if options
+            else None
+        )
+
     def _choose_preemption(
         self,
         *,
@@ -963,6 +1021,14 @@ class GreedyPlacementPlanner:
         pressure: QueuePressure,
         pressure_by_model: dict[str, QueuePressure],
     ) -> list[WorkerPlacement] | None:
+        if self.queue_mode:
+            return self._choose_queue_preemption(
+                now=now,
+                candidates=candidates,
+                workers=workers,
+                pressure=pressure,
+                pressure_by_model=pressure_by_model,
+            )
         smallest_gpu_count = min(profile.gpu_count for profile in candidates)
         compatible_gpus = {
             gpu

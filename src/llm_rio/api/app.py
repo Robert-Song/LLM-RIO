@@ -6,10 +6,11 @@ import sqlite3
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -69,72 +70,64 @@ def create_app(
             level=getattr(logging, resolved_settings.log_level),
             format="%(asctime)s %(levelname)s %(name)s %(message)s",
         )
-        database = Database(resolved_settings.database_path)
-        await database.open()
-        worker_client = httpx.AsyncClient(
-            timeout=None,
-            limits=httpx.Limits(max_connections=None, max_keepalive_connections=256),
-        )
-        inventory = await asyncio.to_thread(
-            inventory_provider,
-            resolved_settings.machine_id,
-            resolved_settings.managed_gpu_uuids,
-        )
-        recovery = await terminate_recorded_workers(database)
-        for item in recovery:
-            await database.record_event("STARTUP_WORKER_RECONCILIATION", payload=item)
-        await database.recover_orphaned_state()
-        previous_fingerprint = await database.set_machine_fingerprint(inventory.fingerprint)
-        if previous_fingerprint and previous_fingerprint != inventory.fingerprint:
-            await database.record_event(
-                "MACHINE_FINGERPRINT_CHANGED",
-                payload={"previous": previous_fingerprint, "current": inventory.fingerprint},
+        async with AsyncExitStack() as resources:
+            database = Database(resolved_settings.database_path)
+            await database.open()
+            resources.push_async_callback(database.close)
+            worker_client = httpx.AsyncClient(
+                timeout=None,
+                limits=httpx.Limits(max_connections=None, max_keepalive_connections=256),
             )
-        await _ensure_initial_admin(database)
+            resources.push_async_callback(worker_client.aclose)
+            inventory = await asyncio.to_thread(
+                inventory_provider,
+                resolved_settings.machine_id,
+                resolved_settings.managed_gpu_uuids,
+            )
+            recovery = await terminate_recorded_workers(database)
+            for item in recovery:
+                await database.record_event("STARTUP_WORKER_RECONCILIATION", payload=item)
+            await database.recover_orphaned_state()
+            previous_fingerprint = await database.set_machine_fingerprint(inventory.fingerprint)
+            if previous_fingerprint and previous_fingerprint != inventory.fingerprint:
+                await database.record_event(
+                    "MACHINE_FINGERPRINT_CHANGED",
+                    payload={"previous": previous_fingerprint, "current": inventory.fingerprint},
+                )
+            await _ensure_initial_admin(database)
 
-        profiles = ProfileRepository(database, inventory.fingerprint)
-        supervisor = WorkerSupervisor(resolved_settings, database)
-        scheduler = ResidencyScheduler(
-            settings=resolved_settings,
-            database=database,
-            inventory=inventory,
-            profiles=profiles,
-            supervisor=supervisor,
-        )
-        validator = ProfileValidator(resolved_settings, inventory, scheduler)
-        registration = RegistrationManager(
-            settings=resolved_settings,
-            database=database,
-            inventory=inventory,
-            profile_repository=profiles,
-            validator=validator,
-        )
-        app.state.settings = resolved_settings
-        app.state.database = database
-        app.state.worker_client = worker_client
-        app.state.inventory = inventory
-        app.state.profiles = profiles
-        app.state.supervisor = supervisor
-        app.state.scheduler = scheduler
-        app.state.registration = registration
-        await scheduler.start()
-        await registration.resume()
-        try:
+            profiles = ProfileRepository(database, inventory.fingerprint)
+            supervisor = WorkerSupervisor(resolved_settings, database)
+            scheduler = ResidencyScheduler(
+                settings=resolved_settings,
+                database=database,
+                inventory=inventory,
+                profiles=profiles,
+                supervisor=supervisor,
+            )
+            validator = ProfileValidator(resolved_settings, inventory, scheduler)
+            registration = RegistrationManager(
+                settings=resolved_settings,
+                database=database,
+                inventory=inventory,
+                profile_repository=profiles,
+                validator=validator,
+            )
+            app.state.settings = resolved_settings
+            app.state.database = database
+            app.state.worker_client = worker_client
+            app.state.inventory = inventory
+            app.state.profiles = profiles
+            app.state.supervisor = supervisor
+            app.state.scheduler = scheduler
+            app.state.registration = registration
+            # LIFO cleanup: production workers, registration probes, HTTP client, database.
+            # Register callbacks before startup so partially initialized services also close.
+            resources.push_async_callback(registration.close)
+            resources.push_async_callback(scheduler.close)
+            await scheduler.start()
+            await registration.resume()
             yield
-        finally:
-            # Stop production engines first, and make every later cleanup independent of
-            # errors in an earlier one.  In particular, a cancelled registration job must
-            # never keep the scheduler from unloading a live worker.
-            try:
-                await scheduler.close()
-            finally:
-                try:
-                    await registration.close()
-                finally:
-                    try:
-                        await worker_client.aclose()
-                    finally:
-                        await database.close()
 
     app = FastAPI(
         title="LLM-RIO",
@@ -197,7 +190,10 @@ def create_app(
         return JSONResponse(
             {
                 "error": {
-                    "message": "The requested nickname, grant, or related record conflicts with existing state",
+                    "message": (
+                        "The requested nickname, grant, or related record "
+                        "conflicts with existing state"
+                    ),
                     "type": "state_conflict",
                     "code": "state_conflict",
                 }
@@ -215,7 +211,7 @@ def create_app(
                     "message": "Request validation failed",
                     "type": "invalid_request_error",
                     "code": "invalid_request_error",
-                    "details": exc.errors(),
+                    "details": jsonable_encoder(exc.errors(), custom_encoder={ValueError: str}),
                 }
             },
             status_code=422,

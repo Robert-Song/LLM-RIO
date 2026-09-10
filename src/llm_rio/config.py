@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import Enum
 from pathlib import Path
 from typing import Literal
 
@@ -12,6 +13,12 @@ from pydantic_settings import (
 )
 
 from llm_rio.prism import KVCachedMode
+
+
+class ServingMode(str, Enum):
+    QUEUE = "queue"
+    VLLM_SLEEP = "vllm-sleep"
+    KV_CACHED = "kv-cached"
 
 
 class EngineSettings(BaseModel):
@@ -46,6 +53,7 @@ class Settings(BaseSettings):
     )
 
     config_file: Path = Field(default=Path("config.toml"), exclude=True)
+    serving_mode: ServingMode | None = None
     machine_id: str = "local"
     api_host: str = "0.0.0.0"
     api_port: int = Field(default=8002, ge=1, le=65535)
@@ -87,6 +95,26 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "ERROR"
     engines: EngineSettings = Field(default_factory=EngineSettings)
 
+    @property
+    def effective_kvcached_mode(self) -> KVCachedMode:
+        if self.serving_mode is ServingMode.KV_CACHED:
+            return "required"
+        if self.serving_mode is not None:
+            return "none"
+        return self.engines.kvcached_mode
+
+    @property
+    def ram_weight_cache_enabled(self) -> bool:
+        if self.serving_mode is ServingMode.QUEUE:
+            return False
+        if self.serving_mode is ServingMode.VLLM_SLEEP:
+            return True
+        return self.prism_weight_cache_mode == "ram"
+
+    @property
+    def queue_mode_enabled(self) -> bool:
+        return self.serving_mode is ServingMode.QUEUE
+
     @classmethod
     def settings_customise_sources(
         cls,
@@ -96,9 +124,13 @@ class Settings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
+        # Resolve the selector with the same precedence as other settings.
         config_path = Path("config.toml")
-        if hasattr(init_settings, "init_kwargs"):
-            config_path = Path(init_settings.init_kwargs.get("config_file", config_path))
+        for source in (init_settings, env_settings, dotenv_settings):
+            selected = source().get("config_file")
+            if selected is not None:
+                config_path = Path(selected)
+                break
         toml_source = TomlConfigSettingsSource(settings_cls, toml_file=config_path)
         return init_settings, env_settings, dotenv_settings, toml_source, file_secret_settings
 

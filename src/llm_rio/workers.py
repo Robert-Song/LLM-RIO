@@ -4,10 +4,8 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
 import re
 import secrets
-import signal
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -18,6 +16,7 @@ import httpx
 
 from llm_rio.config import Settings
 from llm_rio.domain import Engine, PlacementProfile, RuntimeState, WorkerPlacement
+from llm_rio.gpu_memory import read_gpu_memory, required_free_vram
 from llm_rio.host_memory import (
     HostMemorySample,
     gib_to_mib,
@@ -26,6 +25,7 @@ from llm_rio.host_memory import (
 )
 from llm_rio.inventory import gpu_environment
 from llm_rio.prism import add_kvcached_vllm_flags, detect_kvcached
+from llm_rio.process_cleanup import terminate_engine
 from llm_rio.profiles import profile_verified_for_mode
 from llm_rio.storage import Database, _now
 from llm_rio.tool_support import detect_vllm_parser_configuration
@@ -44,33 +44,6 @@ _GPU_RESIDENT_STATES = frozenset(
         RuntimeState.STOPPING,
     }
 )
-
-
-async def _terminate_worker_process_tree(
-    process: asyncio.subprocess.Process, *, force: bool
-) -> None:
-    """Request termination of a worker and every engine process it owns."""
-    if os.name == "posix":
-        try:
-            killpg = getattr(os, "killpg", None)
-            getpgid = getattr(os, "getpgid", None)
-            if killpg is not None and getpgid is not None:
-                # Every engine is launched with start_new_session=True, so its
-                # PID remains the process-group ID after the API parent exits.
-                # That lets a final SIGKILL reap orphaned TP descendants.
-                process_group = getpgid(process.pid) if process.returncode is None else process.pid
-                termination_signal = (
-                    getattr(signal, "SIGKILL", signal.SIGTERM) if force else signal.SIGTERM
-                )
-                killpg(process_group, termination_signal)
-                return
-        except (AttributeError, ProcessLookupError, OSError):
-            # Preserve the direct-child fallback for platforms or launchers without a group.
-            pass
-    if process.returncode is not None:
-        return
-    with contextlib.suppress(ProcessLookupError, OSError):
-        process.kill() if force else process.terminate()
 
 
 class WorkerLaunchError(RuntimeError):
@@ -96,17 +69,18 @@ class WorkerSupervisor:
         self._lock = asyncio.Lock()
         self._transition_locks: dict[str, asyncio.Lock] = {}
         self._host_cache_lock = asyncio.Lock()
+        self._capacity_deferrals: set[tuple[str, tuple[str, ...]]] = set()
         self._drain_to_sleep: set[str] = set()
         self._event_callback: WorkerEventCallback | None = None
         self.internal_api_key = f"rio_internal_{secrets.token_urlsafe(32)}"
-        self.kvcached = detect_kvcached(settings.engines.kvcached_mode)
+        self.kvcached = detect_kvcached(settings.effective_kvcached_mode)
 
     def set_event_callback(self, callback: WorkerEventCallback) -> None:
         self._event_callback = callback
 
     @property
     def ram_weight_cache_enabled(self) -> bool:
-        return self.settings.prism_weight_cache_mode == "ram"
+        return self.settings.ram_weight_cache_enabled
 
     @property
     def persistent_host_weight_cache_enabled(self) -> bool:
@@ -237,6 +211,113 @@ class WorkerSupervisor:
                 )
                 await self._stop(victim.id, force=False)
 
+    async def ensure_gpu_capacity(
+        self,
+        profile: PlacementProfile,
+        gpu_uuids: tuple[str, ...],
+        *,
+        waking_worker_id: str | None = None,
+    ) -> bool:
+        """Evict idle sleeping workers in LRU order, re-reading VRAM before admission.
+
+        The scheduler holds its state lock across this check and launch/wake.
+        Never infer that stopping a process has already released its GPU memory.
+        """
+        key = (profile.id, gpu_uuids)
+        if not profile_verified_for_mode(
+            profile,
+            kvcached_required=False,
+            ram_weight_cache_required=self.ram_weight_cache_enabled,
+            queue_mode_required=self.settings.queue_mode_enabled,
+        ):
+            return False
+        while True:
+            waking_worker = self.workers.get(waking_worker_id) if waking_worker_id else None
+            if waking_worker_id and (
+                waking_worker is None or waking_worker.state is not RuntimeState.SLEEPING
+            ):
+                return False
+            try:
+                samples = await asyncio.to_thread(read_gpu_memory, gpu_uuids)
+                deficits = {
+                    gpu: {
+                        "free_vram_mib": samples[gpu].free_mib,
+                        "required_free_vram_mib": required,
+                    }
+                    for index, gpu in enumerate(gpu_uuids)
+                    if samples[gpu].free_mib
+                    < (
+                        required := required_free_vram(
+                            profile,
+                            index,
+                            samples[gpu],
+                            reserve_mib=self.settings.reserved_vram_mib,
+                            waking_pid=waking_worker.process_pid if waking_worker else None,
+                            waking=waking_worker is not None,
+                        )
+                    )
+                }
+            except Exception as exc:
+                if key not in self._capacity_deferrals:
+                    await self.database.record_event(
+                        "GPU_CAPACITY_DEFERRED",
+                        profile.model_id,
+                        {"reason": "vram_unavailable", "error": str(exc), "gpu_uuids": gpu_uuids},
+                    )
+                    self._capacity_deferrals.add(key)
+                return False
+            if not deficits:
+                self._capacity_deferrals.discard(key)
+                return True
+            async with self._lock:
+                candidates = sorted(
+                    (
+                        worker
+                        for worker in self.workers.values()
+                        if worker.id != waking_worker_id
+                        and worker.state is RuntimeState.SLEEPING
+                        and not worker.admitted_request_ids
+                        and set(worker.gpu_uuids) & deficits.keys()
+                    ),
+                    key=lambda worker: (worker.last_demand_at, worker.id),
+                )
+            if not candidates:
+                if waking_worker is not None and not waking_worker.admitted_request_ids:
+                    # If its residual cannot be safely credited (or foreign allocations
+                    # leave too little room), release the target's context too. A later
+                    # scheduler tick can cold-start it after observing reclaimed VRAM.
+                    waking_worker.last_cache_eviction_reason = "gpu_vram_pressure_cold_restart"
+                    await self.database.record_event(
+                        "WORKER_CACHE_EVICTED",
+                        waking_worker.id,
+                        {"reason": "gpu_vram_pressure_cold_restart", "gpus": deficits},
+                    )
+                    await self.stop(waking_worker.id, force=False)
+                    return False
+                if key not in self._capacity_deferrals:
+                    await self.database.record_event(
+                        "GPU_CAPACITY_DEFERRED",
+                        profile.model_id,
+                        {"reason": "insufficient_free_vram", "gpus": deficits},
+                    )
+                    self._capacity_deferrals.add(key)
+                return False
+            victim = candidates[0]
+            victim.last_cache_eviction_reason = "gpu_vram_pressure"
+            await self.database.record_event(
+                "WORKER_CACHE_EVICTED",
+                victim.id,
+                {
+                    "reason": "gpu_vram_pressure",
+                    "incoming_model_id": profile.model_id,
+                    "gpus": deficits,
+                },
+            )
+            await self.stop(victim.id, force=False)
+            if victim.state is not RuntimeState.COLD:
+                return False
+            await asyncio.sleep(0.1)
+
     @property
     def occupied_gpu_uuids(self) -> set[str]:
         return {
@@ -269,6 +350,7 @@ class WorkerSupervisor:
             profile,
             kvcached_required=self.kvcached.enabled,
             ram_weight_cache_required=self.ram_weight_cache_enabled,
+            queue_mode_required=self.settings.queue_mode_enabled,
         ):
             raise WorkerLaunchError(
                 "placement profile is not verified for the configured vLLM memory backend"
@@ -341,10 +423,8 @@ class WorkerSupervisor:
                     },
                 )
             except BaseException:
-                with contextlib.suppress(Exception):
-                    await _terminate_worker_process_tree(process, force=True)
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(process.wait(), timeout=10)
+                worker.state = RuntimeState.STOPPING
+                await terminate_engine(process, gpu_uuids=worker.gpu_uuids, force=True)
                 await self._cleanup(worker_id)
                 self.workers.pop(worker_id, None)
                 raise
@@ -367,11 +447,14 @@ class WorkerSupervisor:
         gpu_uuids: tuple[str, ...],
         overlapping_workers: list[WorkerPlacement],
     ) -> bool:
+        if self.settings.queue_mode_enabled:
+            return False
         kvcached_required = self.kvcached.enabled
         if profile.engine is not Engine.VLLM or not profile_verified_for_mode(
             profile,
             kvcached_required=kvcached_required,
             ram_weight_cache_required=self.ram_weight_cache_enabled,
+            queue_mode_required=self.settings.queue_mode_enabled,
         ):
             return False
         if any(
@@ -380,6 +463,7 @@ class WorkerSupervisor:
                 worker.profile,
                 kvcached_required=kvcached_required,
                 ram_weight_cache_required=self.ram_weight_cache_enabled,
+                queue_mode_required=self.settings.queue_mode_enabled,
             )
             for worker in overlapping_workers
         ):
@@ -403,6 +487,11 @@ class WorkerSupervisor:
             self.settings.engines.environment,
             executable=executable,
         )
+        if self.settings.queue_mode_enabled:
+            environment.update(
+                ENABLE_KVCACHED="false", KVCACHED_AUTOPATCH="0", VLLM_SERVER_DEV_MODE="0"
+            )
+            environment.pop("LLM_RIO_KVCACHED_VLLM026_SHIM", None)
         if worker.profile.engine is Engine.VLLM:
             environment["VLLM_API_KEY"] = self.internal_api_key
             if self.kvcached.enabled:
@@ -477,6 +566,8 @@ class WorkerSupervisor:
         else:
             raise WorkerLaunchError(f"engine is disabled or unsupported: {profile.engine}")
         for key, value in profile.launch_args.items():
+            if self.settings.queue_mode_enabled and key == "enable_sleep_mode":
+                continue
             flag = f"--{key.replace('_', '-')}"
             if isinstance(value, bool):
                 if value:
@@ -548,15 +639,13 @@ class WorkerSupervisor:
             admitted = list(worker.admitted_request_ids)
             worker.admitted_request_ids.clear()
             worker.outstanding_token_work = 0
-            worker.state = RuntimeState.COLD
+            worker.state = RuntimeState.STOPPING
             self._drain_to_sleep.discard(worker.id)
             process = self._processes.get(worker.id)
         if process:
-            if process.returncode is None:
-                await _terminate_worker_process_tree(process, force=True)
-                await process.wait()
-            await _terminate_worker_process_tree(process, force=True)
+            await terminate_engine(process, gpu_uuids=worker.gpu_uuids, force=True)
         async with self._lock:
+            worker.state = RuntimeState.COLD
             worker.process_pid = None
             worker.host_weights_cached = False
             worker.host_cache_accounted_mib = 0.0
@@ -771,7 +860,6 @@ class WorkerSupervisor:
         async with self._lock:
             worker = self.workers.get(worker_id)
             if worker is None or worker.state in {
-                RuntimeState.DRAINING,
                 RuntimeState.STOPPING,
                 RuntimeState.COLD,
             }:
@@ -821,38 +909,27 @@ class WorkerSupervisor:
             # STOPPING record could not be written.  The final COLD persistence follows
             # after the process is gone.
             logger.exception("could not persist worker %s before stopping it", worker_id)
+        if process:
+            await terminate_engine(process, gpu_uuids=worker.gpu_uuids, force=force)
+        async with self._lock:
+            worker.state = RuntimeState.COLD
+            worker.process_pid = None
+            worker.admitted_request_ids.clear()
+            worker.outstanding_token_work = 0
+            worker.sleeping_at = None
+            worker.host_weights_cached = False
+            worker.host_cache_accounted_mib = 0.0
+            worker.host_cache_accounting_source = None
+            worker.process_rss_mib = 0.0
+            worker.process_pss_mib = 0.0
+            worker.process_swap_mib = 0.0
+            self._drain_to_sleep.discard(worker_id)
         try:
-            if process:
-                if process.returncode is None:
-                    await _terminate_worker_process_tree(process, force=force)
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=5.0 if force else 30.0)
-                    except TimeoutError:
-                        await _terminate_worker_process_tree(process, force=True)
-                        await process.wait()
-                # vLLM's API parent may exit while TP workers remain in its
-                # session. Reap that exact group before declaring it COLD.
-                await _terminate_worker_process_tree(process, force=True)
+            await self._persist(worker)
+            await self.database.record_event("WORKER_COLD", worker_id, {"forced": force})
+            await self._emit(worker_id, "cold")
         finally:
-            async with self._lock:
-                worker.state = RuntimeState.COLD
-                worker.process_pid = None
-                worker.admitted_request_ids.clear()
-                worker.outstanding_token_work = 0
-                worker.sleeping_at = None
-                worker.host_weights_cached = False
-                worker.host_cache_accounted_mib = 0.0
-                worker.host_cache_accounting_source = None
-                worker.process_rss_mib = 0.0
-                worker.process_pss_mib = 0.0
-                worker.process_swap_mib = 0.0
-                self._drain_to_sleep.discard(worker_id)
-            try:
-                await self._persist(worker)
-                await self.database.record_event("WORKER_COLD", worker_id, {"forced": force})
-                await self._emit(worker_id, "cold")
-            finally:
-                await self._cleanup(worker_id)
+            await self._cleanup(worker_id)
 
     async def stop_all(self, *, force: bool = False) -> None:
         worker_ids = list(self.workers)

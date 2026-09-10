@@ -5,6 +5,7 @@ import sqlite3
 import uuid
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 
@@ -373,7 +374,10 @@ async def verify_model_with_kvcached(
             "Only an available local model can be verified with kvcached",
             status_code=409,
         )
-    return await request.app.state.registration.create_kvcached_verification_job(model_id)
+    return cast(
+        dict[str, object],
+        await request.app.state.registration.create_kvcached_verification_job(model_id),
+    )
 
 
 @router.get("/admin/model-verification-jobs/{job_id}")
@@ -383,7 +387,7 @@ async def get_model_verification_job(
     job = await request.app.state.registration.kvcached_verification_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Verification job not found")
-    return job
+    return cast(dict[str, object], job)
 
 
 @router.post("/admin/models/{model_id}/trust-both-backends")
@@ -571,6 +575,7 @@ async def update_model_profile(
         profile=selected.profile,
         model=model,
         request=body,
+        managed_gpu_count=len(request.app.state.inventory.gpus),
         eligible_gpu_sets=gpu_sets,
         llama_cpp_enabled=request.app.state.settings.engines.enable_llama_cpp,
     )
@@ -692,6 +697,11 @@ async def _scheduler_status(request: Request) -> dict[str, object]:
     mode: ServiceMode = await database.service_mode()
     return {
         "mode": mode.value,
+        "serving_mode": scheduler.serving_mode,
+        "validation": {
+            "requires_maintenance": scheduler.validation_requires_maintenance,
+            "gpu_uuids": scheduler.validation_gpu_uuids,
+        },
         "prism": {
             "kvcached": scheduler.kvcached.enabled,
             "weight_cache": (

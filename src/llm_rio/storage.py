@@ -12,6 +12,7 @@ from typing import Any
 
 import aiosqlite
 
+from llm_rio.database_schema import SCHEMA
 from llm_rio.domain import CatalogState, Role, ServiceMode
 from llm_rio.errors import QuotaExceededError, RioError
 from llm_rio.security import (
@@ -35,243 +36,6 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS quota_accounts (
-    id TEXT PRIMARY KEY,
-    nickname TEXT NOT NULL UNIQUE,
-    balance_tokens INTEGER NOT NULL CHECK (balance_tokens >= 0),
-    limit_tokens INTEGER NOT NULL CHECK (limit_tokens >= 0),
-    usage_baseline_tokens INTEGER NOT NULL DEFAULT 0,
-    usage_reset_at TEXT,
-    unlimited INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS api_keys (
-    id TEXT PRIMARY KEY,
-    nickname TEXT NOT NULL UNIQUE,
-    role TEXT NOT NULL CHECK (role IN ('user', 'ta', 'admin')),
-    quota_account_id TEXT NOT NULL REFERENCES quota_accounts(id),
-    token_prefix TEXT NOT NULL UNIQUE,
-    token_hash TEXT NOT NULL,
-    encrypted_api_key TEXT NOT NULL,
-    active INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL,
-    last_used_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(token_prefix) WHERE active = 1;
-
-CREATE TABLE IF NOT EXISTS model_catalog (
-    id TEXT PRIMARY KEY,
-    nickname TEXT NOT NULL UNIQUE,
-    huggingface_repo TEXT NOT NULL,
-    requested_revision TEXT,
-    resolved_revision TEXT,
-    state TEXT NOT NULL,
-    artifact_path TEXT,
-    artifact_hashes_json TEXT NOT NULL DEFAULT '[]',
-    capabilities_json TEXT NOT NULL DEFAULT '[]',
-    request_limits_json TEXT NOT NULL DEFAULT '{}',
-    request_defaults_json TEXT NOT NULL DEFAULT '{}',
-    source_model_id TEXT REFERENCES model_catalog(id),
-    created_by_key_id TEXT NOT NULL REFERENCES api_keys(id),
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS model_grants (
-    key_id TEXT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
-    model_id TEXT NOT NULL REFERENCES model_catalog(id) ON DELETE CASCADE,
-    created_at TEXT NOT NULL,
-    PRIMARY KEY (key_id, model_id)
-);
-
-CREATE TABLE IF NOT EXISTS model_jobs (
-    id TEXT PRIMARY KEY,
-    model_id TEXT NOT NULL REFERENCES model_catalog(id),
-    state TEXT NOT NULL,
-    stage TEXT NOT NULL,
-    progress_json TEXT NOT NULL DEFAULT '{}',
-    failure_json TEXT,
-    requested_grants_json TEXT NOT NULL DEFAULT '[]',
-    validation_overrides_json TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS model_verification_jobs (
-    id TEXT PRIMARY KEY,
-    model_id TEXT NOT NULL REFERENCES model_catalog(id),
-    backend TEXT NOT NULL CHECK (backend IN ('kvcached')),
-    state TEXT NOT NULL CHECK (state IN ('QUEUED', 'RUNNING', 'COMPLETED', 'FAILED')),
-    stage TEXT NOT NULL,
-    progress_json TEXT NOT NULL DEFAULT '{}',
-    failure_json TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_model_verification_jobs_model
-ON model_verification_jobs(model_id, created_at DESC);
-
-
-CREATE TABLE IF NOT EXISTS model_profiles (
-    id TEXT PRIMARY KEY,
-    model_id TEXT NOT NULL REFERENCES model_catalog(id),
-    machine_fingerprint TEXT NOT NULL,
-    profile_key TEXT NOT NULL UNIQUE,
-    profile_json TEXT NOT NULL,
-    verified_at TEXT NOT NULL,
-    active INTEGER NOT NULL DEFAULT 1
-);
-CREATE INDEX IF NOT EXISTS idx_profiles_model_machine
-ON model_profiles(model_id, machine_fingerprint) WHERE active = 1;
-
-CREATE TABLE IF NOT EXISTS quota_reservations (
-    id TEXT PRIMARY KEY,
-    request_id TEXT NOT NULL UNIQUE,
-    idempotency_hash TEXT NOT NULL,
-    account_id TEXT NOT NULL REFERENCES quota_accounts(id),
-    key_id TEXT NOT NULL REFERENCES api_keys(id),
-    model_id TEXT NOT NULL REFERENCES model_catalog(id),
-    reserved_tokens INTEGER NOT NULL CHECK (reserved_tokens >= 0),
-    actual_tokens INTEGER,
-    state TEXT NOT NULL CHECK (state IN ('RESERVED', 'SETTLED', 'RELEASED')),
-    created_at TEXT NOT NULL,
-    settled_at TEXT,
-    UNIQUE (key_id, idempotency_hash)
-);
-
-CREATE TABLE IF NOT EXISTS quota_ledger (
-    id TEXT PRIMARY KEY,
-    account_id TEXT NOT NULL REFERENCES quota_accounts(id),
-    reservation_id TEXT REFERENCES quota_reservations(id),
-    delta_tokens INTEGER NOT NULL,
-    reason TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    UNIQUE (reservation_id, reason)
-);
-
-CREATE TABLE IF NOT EXISTS inference_requests (
-    id TEXT PRIMARY KEY,
-    key_id TEXT NOT NULL REFERENCES api_keys(id),
-    account_id TEXT NOT NULL REFERENCES quota_accounts(id),
-    model_id TEXT NOT NULL REFERENCES model_catalog(id),
-    reservation_id TEXT NOT NULL REFERENCES quota_reservations(id),
-    worker_id TEXT,
-    state TEXT NOT NULL,
-    estimated_tokens INTEGER NOT NULL,
-    estimated_prompt_tokens INTEGER,
-    actual_prompt_tokens INTEGER,
-    actual_completion_tokens INTEGER,
-    error_code TEXT,
-    test_run_id TEXT,
-    client_worker TEXT,
-    accepted_count INTEGER NOT NULL DEFAULT 0,
-    completion_count INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
-    admitted_at TEXT,
-    completed_at TEXT
-);
-
-CREATE TABLE IF NOT EXISTS usage_summary_periods (
-    window TEXT PRIMARY KEY CHECK (window IN ('current', 'total')),
-    period_start TEXT NOT NULL,
-    period_end TEXT NOT NULL,
-    summarized_at TEXT NOT NULL,
-    request_count INTEGER NOT NULL CHECK (request_count >= 0),
-    successful_requests INTEGER NOT NULL CHECK (successful_requests >= 0),
-    failed_requests INTEGER NOT NULL CHECK (failed_requests >= 0),
-    reserved_tokens INTEGER NOT NULL CHECK (reserved_tokens >= 0),
-    charged_tokens INTEGER NOT NULL CHECK (charged_tokens >= 0),
-    prompt_tokens INTEGER NOT NULL CHECK (prompt_tokens >= 0),
-    completion_tokens INTEGER NOT NULL CHECK (completion_tokens >= 0),
-    output_tokens_for_rate INTEGER NOT NULL CHECK (output_tokens_for_rate >= 0),
-    active_output_seconds REAL NOT NULL CHECK (active_output_seconds >= 0),
-    timed_requests INTEGER NOT NULL CHECK (timed_requests >= 0)
-);
-
-CREATE TABLE IF NOT EXISTS usage_summaries (
-    window TEXT NOT NULL CHECK (window IN ('current', 'total')),
-    account_id TEXT NOT NULL REFERENCES quota_accounts(id),
-    key_id TEXT NOT NULL REFERENCES api_keys(id),
-    model_id TEXT NOT NULL REFERENCES model_catalog(id),
-    request_count INTEGER NOT NULL CHECK (request_count >= 0),
-    successful_requests INTEGER NOT NULL CHECK (successful_requests >= 0),
-    failed_requests INTEGER NOT NULL CHECK (failed_requests >= 0),
-    reserved_tokens INTEGER NOT NULL CHECK (reserved_tokens >= 0),
-    charged_tokens INTEGER NOT NULL CHECK (charged_tokens >= 0),
-    prompt_tokens INTEGER NOT NULL CHECK (prompt_tokens >= 0),
-    completion_tokens INTEGER NOT NULL CHECK (completion_tokens >= 0),
-    output_tokens_for_rate INTEGER NOT NULL CHECK (output_tokens_for_rate >= 0),
-    active_output_seconds REAL NOT NULL CHECK (active_output_seconds >= 0),
-    timed_requests INTEGER NOT NULL CHECK (timed_requests >= 0),
-    first_completed_at TEXT,
-    last_completed_at TEXT,
-    PRIMARY KEY (window, account_id, key_id, model_id)
-);
-CREATE INDEX IF NOT EXISTS idx_usage_summaries_window_model
-ON usage_summaries(window, model_id);
-CREATE VIEW IF NOT EXISTS account_lifetime_usage AS
-SELECT account_id, SUM(charged_tokens) AS charged_tokens,
-       SUM(request_count) AS settled_requests
-  FROM (
-        SELECT account_id, COALESCE(actual_tokens, 0) AS charged_tokens,
-               1 AS request_count
-          FROM quota_reservations WHERE state = 'SETTLED'
-        UNION ALL
-        SELECT account_id, charged_tokens, request_count
-          FROM usage_summaries WHERE window = 'total'
-       )
- GROUP BY account_id;
-CREATE VIEW IF NOT EXISTS key_lifetime_usage AS
-SELECT key_id, SUM(charged_tokens) AS charged_tokens,
-       SUM(request_count) AS settled_requests
-  FROM (
-        SELECT key_id, COALESCE(actual_tokens, 0) AS charged_tokens,
-               1 AS request_count
-          FROM quota_reservations WHERE state = 'SETTLED'
-        UNION ALL
-        SELECT key_id, charged_tokens, request_count
-          FROM usage_summaries WHERE window = 'total'
-       )
- GROUP BY key_id;
-
-CREATE TABLE IF NOT EXISTS workers (
-    id TEXT PRIMARY KEY,
-    model_id TEXT NOT NULL REFERENCES model_catalog(id),
-    profile_id TEXT NOT NULL REFERENCES model_profiles(id),
-    gpu_uuids_json TEXT NOT NULL,
-    port INTEGER NOT NULL,
-    pid INTEGER,
-    state TEXT NOT NULL,
-    host_cache_accounted_mib REAL NOT NULL DEFAULT 0,
-    host_cache_accounting_source TEXT,
-    process_rss_mib REAL NOT NULL DEFAULT 0,
-    process_pss_mib REAL NOT NULL DEFAULT 0,
-    process_swap_mib REAL NOT NULL DEFAULT 0,
-    last_cache_eviction_reason TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS runtime_events (
-    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_type TEXT NOT NULL,
-    entity_id TEXT,
-    payload_json TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS service_state (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    mode TEXT NOT NULL,
-    machine_fingerprint TEXT,
-    updated_at TEXT NOT NULL
-);
-INSERT OR IGNORE INTO service_state(singleton, mode, updated_at)
-VALUES (1, 'ACTIVE', CURRENT_TIMESTAMP);
-"""
-
-
 class Database:
     def __init__(self, path: Path, key_vault_path: Path | None = None) -> None:
         self.path = path
@@ -287,15 +51,21 @@ class Database:
         return self._connection
 
     async def open(self) -> None:
+        if self._connection is not None:
+            raise RuntimeError("database is already open")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = await aiosqlite.connect(self.path, isolation_level=None)
-        self._connection.row_factory = aiosqlite.Row
-        await self.execute("PRAGMA foreign_keys=ON")
-        await self.execute("PRAGMA journal_mode=WAL")
-        await self.execute("PRAGMA synchronous=NORMAL")
-        await self.execute("PRAGMA busy_timeout=5000")
-        await self.executescript(SCHEMA)
-        await self._migrate_schema()
+        try:
+            self._connection.row_factory = aiosqlite.Row
+            await self.execute("PRAGMA foreign_keys=ON")
+            await self.execute("PRAGMA journal_mode=WAL")
+            await self.execute("PRAGMA synchronous=NORMAL")
+            await self.execute("PRAGMA busy_timeout=5000")
+            await self.executescript(SCHEMA)
+            await self._migrate_schema()
+        except BaseException:
+            await self.close()
+            raise
 
     async def _migrate_schema(self) -> None:
         """Add backward-compatible metadata to existing lab databases."""
@@ -363,7 +133,6 @@ class Database:
             if column not in worker_columns:
                 await self.execute(f"ALTER TABLE workers ADD COLUMN {column} {definition}")
 
-
     async def close(self) -> None:
         if self._connection is not None:
             await self._connection.close()
@@ -401,13 +170,17 @@ class Database:
             return await self.connection.executescript(sql)
 
     async def fetchone(self, sql: str, parameters: Iterable[Any] = ()) -> aiosqlite.Row | None:
-        async with self._transaction_lock:
-            cursor = await self.connection.execute(sql, tuple(parameters))
+        async with (
+            self._transaction_lock,
+            self.connection.execute(sql, tuple(parameters)) as cursor,
+        ):
             return await cursor.fetchone()
 
     async def fetchall(self, sql: str, parameters: Iterable[Any] = ()) -> list[aiosqlite.Row]:
-        async with self._transaction_lock:
-            cursor = await self.connection.execute(sql, tuple(parameters))
+        async with (
+            self._transaction_lock,
+            self.connection.execute(sql, tuple(parameters)) as cursor,
+        ):
             return list(await cursor.fetchall())
 
     async def authenticate(self, prefix: str, token: str) -> Principal | None:
@@ -446,7 +219,9 @@ class Database:
             f"SELECT id, nickname, token_hash FROM api_keys WHERE token_prefix = ?{active_clause}",
             (selector[:24],),
         )
-        if row is None or not verify_api_key(str(row["token_hash"]), selector):
+        if row is None or not await asyncio.to_thread(
+            verify_api_key, str(row["token_hash"]), selector
+        ):
             return None
         return {"id": str(row["id"]), "nickname": str(row["nickname"])}
 
@@ -469,6 +244,8 @@ class Database:
     ) -> None:
         if role is Role.ADMIN:
             unlimited = True
+        token_hash = await asyncio.to_thread(hash_api_key, api_key)
+        encrypted_api_key = self.key_vault.encrypt(api_key)
         async with self.transaction() as connection:
             await connection.execute(
                 """
@@ -496,8 +273,8 @@ class Database:
                     role.value,
                     account_id,
                     prefix,
-                    hash_api_key(api_key),
-                    self.key_vault.encrypt(api_key),
+                    token_hash,
+                    encrypted_api_key,
                     _now(),
                 ),
             )
@@ -577,13 +354,14 @@ class Database:
             return cursor.rowcount > 0
 
     async def replace_key_secret(self, key_id: str, prefix: str, api_key: str) -> bool:
+        token_hash = await asyncio.to_thread(hash_api_key, api_key)
         cursor = await self.execute(
             """
             UPDATE api_keys
                SET token_prefix = ?, token_hash = ?, encrypted_api_key = ?, active = 1
              WHERE id = ? AND token_prefix NOT LIKE 'deleted-%'
             """,
-            (prefix, hash_api_key(api_key), self.key_vault.encrypt(api_key), key_id),
+            (prefix, token_hash, self.key_vault.encrypt(api_key), key_id),
         )
         return cursor.rowcount > 0
 
@@ -1033,7 +811,13 @@ class Database:
         principal: Principal,
         model_id: str,
         estimated_tokens: int,
+        estimated_prompt_tokens: int | None = None,
+        test_run_id: str | None = None,
+        client_worker: str | None = None,
     ) -> str:
+        """Reserve tokens and create the queued request atomically; never replay inference."""
+        if estimated_tokens < 0:
+            raise ValueError("estimated_tokens must be nonnegative")
         async with self.transaction() as connection:
             existing = await (
                 await connection.execute(
@@ -1045,13 +829,24 @@ class Database:
                 )
             ).fetchone()
             if existing:
-                if existing["request_id"] != request_id:
-                    raise RioError(
-                        "idempotency_conflict",
-                        "The idempotency key was already used for another request",
-                        status_code=409,
-                    )
-                return str(existing["id"])
+                raise RioError(
+                    "idempotency_conflict",
+                    "The idempotency key was already used for a request",
+                    status_code=409,
+                )
+            duplicate = await (
+                await connection.execute(
+                    "SELECT 1 FROM quota_reservations WHERE request_id = ? "
+                    "UNION ALL SELECT 1 FROM inference_requests WHERE id = ?",
+                    (request_id, request_id),
+                )
+            ).fetchone()
+            if duplicate:
+                raise RioError(
+                    "request_id_conflict",
+                    "The request ID was already used for a request",
+                    status_code=409,
+                )
             account = await (
                 await connection.execute(
                     "SELECT balance_tokens, unlimited FROM quota_accounts WHERE id = ?",
@@ -1102,6 +897,27 @@ class Database:
                         _now(),
                     ),
                 )
+            await connection.execute(
+                """
+                INSERT INTO inference_requests
+                    (id, key_id, account_id, model_id, reservation_id, state,
+                     estimated_tokens, estimated_prompt_tokens, test_run_id, client_worker,
+                     created_at)
+                VALUES (?, ?, ?, ?, ?, 'QUEUED', ?, ?, ?, ?, ?)
+                """,
+                (
+                    request_id,
+                    principal.key_id,
+                    principal.quota_account_id,
+                    model_id,
+                    reservation_id,
+                    estimated_tokens,
+                    estimated_prompt_tokens,
+                    test_run_id,
+                    client_worker,
+                    _now(),
+                ),
+            )
         return reservation_id
 
     async def summarize_usage(self, through: datetime | None = None) -> dict[str, Any]:
@@ -1112,39 +928,6 @@ class Database:
     async def dashboard_usage(self) -> dict[str, Any]:
         async with self._transaction_lock:
             return await build_usage_dashboard(self.connection, now=datetime.now(UTC))
-
-    async def create_inference_request(
-        self,
-        *,
-        request_id: str,
-        principal: Principal,
-        model_id: str,
-        reservation_id: str,
-        estimated_tokens: int,
-        test_run_id: str | None,
-        client_worker: str | None,
-        estimated_prompt_tokens: int | None = None,
-    ) -> None:
-        await self.execute(
-            """
-            INSERT OR IGNORE INTO inference_requests
-                (id, key_id, account_id, model_id, reservation_id, state,
-                 estimated_tokens, estimated_prompt_tokens, test_run_id, client_worker, created_at)
-            VALUES (?, ?, ?, ?, ?, 'QUEUED', ?, ?, ?, ?, ?)
-            """,
-            (
-                request_id,
-                principal.key_id,
-                principal.quota_account_id,
-                model_id,
-                reservation_id,
-                estimated_tokens,
-                estimated_prompt_tokens,
-                test_run_id,
-                client_worker,
-                _now(),
-            ),
-        )
 
     async def live_requests(self) -> list[dict[str, Any]]:
         """Return requests that are still waiting for or using a worker."""

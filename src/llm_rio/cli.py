@@ -17,7 +17,7 @@ import typer
 import uvicorn
 
 from llm_rio.api.app import create_app
-from llm_rio.config import Settings
+from llm_rio.config import ServingMode, Settings
 from llm_rio.domain import Role
 from llm_rio.inventory import InventoryError, discover_inventory
 from llm_rio.security import ApiKeyVault, default_key_vault_path
@@ -205,7 +205,7 @@ def _job_id_for_model(nickname: str) -> str:
     job = model.get("registration_job")
     if not isinstance(job, dict) or not isinstance(job.get("id"), str):
         raise click.ClickException(f"Model '{nickname}' has no registration job.")
-    return job["id"]
+    return str(job["id"])
 
 
 def _job_id_from_selector(job_or_model: str) -> str:
@@ -251,6 +251,10 @@ def _print_model_job(job: dict[str, Any]) -> None:
     typer.echo(f"Registration job: {job.get('id')}")
     typer.echo(f"Status: {job.get('state')} / {job.get('catalog_state')}")
     typer.echo(f"Stage: {job.get('stage')}")
+    if job.get("stage") == "waiting_for_maintenance":
+        typer.echo("Next step: run llmctl maintenance drain, or use Drain in the TUI.")
+    if job.get("stage") == "gpu_memory_wait":
+        typer.echo("Waiting for free GPU memory; validation will retry automatically.")
     failure = job.get("failure")
     if not isinstance(failure, dict):
         return
@@ -364,9 +368,10 @@ def _print_key_records(records: list[dict[str, Any]]) -> None:
 @app.command()
 def serve(
     config: Path = typer.Option(Path("config.toml"), "--config", help="TOML configuration file"),
+    mode: ServingMode | None = typer.Option(None, "--mode", help="Model residency mode"),
 ) -> None:
     """Run the machine-local API and scheduler."""
-    settings = _settings(config)
+    settings = Settings(config_file=config, serving_mode=mode) if mode else _settings(config)
     log_config = copy.deepcopy(uvicorn.config.LOGGING_CONFIG)
     log_config["formatters"]["default"]["fmt"] = "%(asctime)s | %(levelprefix)s %(message)s"
     uvicorn.run(
@@ -606,7 +611,7 @@ def add_model(
     wait: bool = typer.Option(
         False,
         "--wait/--no-wait",
-        help="Follow automatic download and hardware validation until it finishes.",
+        help="Follow download and validation; normal-mode validation requires maintenance.",
     ),
     poll_seconds: float = typer.Option(2.0, "--poll-seconds", min=0.1),
     timeout_seconds: float | None = typer.Option(

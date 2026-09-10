@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
-import signal
+from dataclasses import dataclass
 
+from llm_rio.process_cleanup import TeardownError, group_members, terminate_engine
 from llm_rio.storage import Database
 
 
@@ -14,6 +16,16 @@ def _matching_managed_process(pid: int, port: int) -> bool:
     except OSError:
         return False
     return ("vllm" in command or "llama-server" in command) and f"--port {port}" in command
+
+
+@dataclass
+class RecordedProcess:
+    pid: int
+
+    async def wait(self) -> int:
+        # This is not our child to reap. terminate_engine already verified that
+        # all group members exited and all owned GPU process records vanished.
+        return 0
 
 
 async def terminate_recorded_workers(database: Database) -> list[dict[str, object]]:
@@ -33,29 +45,26 @@ async def terminate_recorded_workers(database: Database) -> list[dict[str, objec
     for row in rows:
         pid, port = int(row["pid"]), int(row["port"])
         if not _matching_managed_process(pid, port):
-            action = "already_gone" if not os.path.exists(f"/proc/{pid}") else "pid_identity_mismatch"
+            members = await asyncio.to_thread(group_members, pid)
+            if any(state not in {"Z", "X"} for state in members.values()):
+                raise TeardownError(
+                    f"Recorded worker {row['id']} has surviving group {pid} but its parent "
+                    "identity cannot be verified; refusing to clear recovery state"
+                )
+            action = (
+                "already_gone" if not os.path.exists(f"/proc/{pid}") else "pid_identity_mismatch"
+            )
             results.append({"worker_id": row["id"], "action": action})
             continue
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
-            for _ in range(100):
-                if not os.path.exists(f"/proc/{pid}"):
-                    break
-                await asyncio.sleep(0.1)
-            if os.path.exists(f"/proc/{pid}") and _matching_managed_process(pid, port):
-                os.killpg(os.getpgid(pid), signal.SIGKILL)
-            released = not os.path.exists(f"/proc/{pid}")
-            results.append(
-                {
-                    "worker_id": row["id"],
-                    "action": "terminated" if released else "termination_unverified",
-                    "pid": pid,
-                    "gpu_uuids_json": row["gpu_uuids_json"],
-                }
-            )
-        except (ProcessLookupError, PermissionError) as exc:
-            results.append(
-                {"worker_id": row["id"], "action": "failed", "reason": type(exc).__name__}
-            )
+        await terminate_engine(
+            RecordedProcess(pid), gpu_uuids=tuple(json.loads(row["gpu_uuids_json"]))
+        )
+        results.append(
+            {
+                "worker_id": row["id"],
+                "action": "terminated",
+                "pid": pid,
+                "gpu_uuids_json": row["gpu_uuids_json"],
+            }
+        )
     return results
-

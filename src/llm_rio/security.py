@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import os
 import secrets
 from dataclasses import dataclass
@@ -87,7 +86,4 @@ class ApiKeyVault:
         try:
             return self._fernet.decrypt(encrypted_api_key.encode()).decode()
         except InvalidToken as exc:
-            raise RuntimeError(
-                f"Cannot decrypt an API key with the vault at {self.path}"
-            ) from exc
-
+            raise RuntimeError(f"Cannot decrypt an API key with the vault at {self.path}") from exc

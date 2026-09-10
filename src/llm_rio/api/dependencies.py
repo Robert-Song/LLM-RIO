@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Annotated
 
 from fastapi import Depends, Request
@@ -20,7 +20,9 @@ async def current_principal(
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise AuthenticationError("A Bearer API key is required")
     token = credentials.credentials
-    principal = await request.app.state.database.authenticate(token_prefix(token), token)
+    principal: Principal | None = await request.app.state.database.authenticate(
+        token_prefix(token), token
+    )
     if principal is None:
         raise AuthenticationError()
     request.state.key_nickname = principal.nickname
@@ -28,7 +30,7 @@ async def current_principal(
     return principal
 
 
-def require_roles(*roles: Role) -> Callable[..., Principal]:
+def require_roles(*roles: Role) -> Callable[..., Awaitable[Principal]]:
     async def dependency(
         principal: Annotated[Principal, Depends(current_principal)],
     ) -> Principal:
@@ -40,8 +42,5 @@ def require_roles(*roles: Role) -> Callable[..., Principal]:
 
 
 CurrentPrincipal = Annotated[Principal, Depends(current_principal)]
-StaffPrincipal = Annotated[
-    Principal, Depends(require_roles(Role.TA, Role.ADMIN))
-]
+StaffPrincipal = Annotated[Principal, Depends(require_roles(Role.TA, Role.ADMIN))]
 AdminPrincipal = Annotated[Principal, Depends(require_roles(Role.ADMIN))]
-

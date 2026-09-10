@@ -61,4 +61,3 @@ class MaintenanceError(RioError):
             "The service is draining or in maintenance",
             status_code=503,
         )
-

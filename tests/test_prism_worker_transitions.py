@@ -39,6 +39,8 @@ def _supervisor(worker: WorkerPlacement) -> tuple[WorkerSupervisor, _TransitionD
     supervisor = WorkerSupervisor.__new__(WorkerSupervisor)
     supervisor.settings = SimpleNamespace(
         prism_weight_cache_mode="ram",
+        ram_weight_cache_enabled=True,
+        queue_mode_enabled=False,
         prism_transition_timeout_seconds=10.0,
         engines=SimpleNamespace(
             vllm_executable="/opt/llm-rio/bin/vllm",

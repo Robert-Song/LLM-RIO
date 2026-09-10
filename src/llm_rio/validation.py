@@ -4,15 +4,14 @@ import asyncio
 import contextlib
 import importlib.metadata
 import json
-import os
+import math
 import re
 import secrets
-import signal
 import socket
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -26,9 +25,11 @@ from llm_rio.domain import (
     MachineInventory,
     PlacementProfile,
 )
+from llm_rio.gpu_memory import read_gpu_memory
 from llm_rio.host_memory import sample_process_group_memory
 from llm_rio.inventory import candidate_gpu_sets, gpu_environment
 from llm_rio.prism import add_kvcached_vllm_flags, detect_kvcached
+from llm_rio.process_cleanup import TeardownError, terminate_engine
 from llm_rio.runtime import ResidencyScheduler
 from llm_rio.tool_support import detect_vllm_parser_configuration
 
@@ -41,8 +42,14 @@ class ValidationError(RuntimeError):
 
 
 class ValidationPreempted(ValidationError):
-    def __init__(self) -> None:
-        super().__init__("validation", "validation yielded to production inference")
+    def __init__(
+        self,
+        message: str = "validation yielded to production inference",
+        *,
+        stage: str = "validation",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(stage, message, details)
 
 
 def validation_log_path(
@@ -285,6 +292,7 @@ class ProfileValidator:
         ) -> PlacementProfile | ValidationError:
             while not await self.scheduler.acquire_validation_gpus(gpu_set):  # noqa: ASYNC110
                 await asyncio.sleep(5.0)
+            teardown_verified = True
             try:
                 return await self._probe_vllm(
                     model_id=model_id,
@@ -295,12 +303,16 @@ class ProfileValidator:
                     gpu_set=gpu_set,
                     backend=backend,
                 )
+            except TeardownError:
+                teardown_verified = False
+                raise
             except ValidationPreempted:
                 raise
             except ValidationError as exc:
                 return exc
             finally:
-                await self.scheduler.release_validation_gpus(gpu_set)
+                if teardown_verified:
+                    await self.scheduler.release_validation_gpus(gpu_set)
 
         tasks = [
             asyncio.create_task(validate_gpu_set(gpu_set), name=f"vllm-validation-{index}")
@@ -325,6 +337,31 @@ class ProfileValidator:
             raise failures[-1]
         return profiles
 
+    async def _check_native_headroom(
+        self, gpu_set: tuple[str, ...], candidate: CandidateShape
+    ) -> None:
+        """Wait for driver/context memory to disappear instead of launching into OOM."""
+        try:
+            samples = await asyncio.to_thread(read_gpu_memory, gpu_set)
+            deficits = {
+                gpu: {"free_vram_mib": samples[gpu].free_mib, "required_free_vram_mib": required}
+                for gpu in gpu_set
+                if samples[gpu].free_mib
+                < (required := math.ceil(samples[gpu].total_mib * candidate.gpu_memory_utilization))
+            }
+        except Exception as exc:
+            raise ValidationPreempted(
+                "Cannot read GPU memory; validation will retry",
+                stage="gpu_memory_wait",
+                details={"error": str(exc)},
+            ) from exc
+        if deficits:
+            raise ValidationPreempted(
+                "Waiting for GPU memory to be released before validation",
+                stage="gpu_memory_wait",
+                details={"gpus": deficits},
+            )
+
     async def _probe_vllm(
         self,
         *,
@@ -336,20 +373,69 @@ class ProfileValidator:
         gpu_set: tuple[str, ...],
         backend: Literal["native", "kvcached"],
     ) -> PlacementProfile:
-        port = await self._reserve_validation_port()
-        try:
-            return await self._probe_vllm_on_port(
-                model_id=model_id,
-                model_revision=model_revision,
-                model_path=model_path,
-                nickname=nickname,
-                candidate=candidate,
-                gpu_set=gpu_set,
-                backend=backend,
-                port=port,
-            )
-        finally:
-            await self._release_validation_port(port)
+        conservative = backend == "native" and self.scheduler.validation_requires_maintenance
+        queue_mode = conservative and self.settings.queue_mode_enabled
+        initial = (
+            min(candidate.gpu_memory_utilization, 0.80)
+            if conservative and not queue_mode
+            else candidate.gpu_memory_utilization
+        )
+        budgets = [initial]
+        if conservative:
+            deltas = (0.02, 0.04, 0.06, 0.08, 0.10) if queue_mode else (0.10, 0.20)
+            budgets.extend(round(initial - delta, 4) for delta in deltas if initial - delta >= 0.40)
+        for index, budget in enumerate(budgets):
+            attempt = replace(candidate, gpu_memory_utilization=budget)
+            if conservative:
+                await self._check_native_headroom(gpu_set, attempt)
+            port = await self._reserve_validation_port()
+            teardown_verified = True
+            try:
+                return await self._probe_vllm_on_port(
+                    model_id=model_id,
+                    model_revision=model_revision,
+                    model_path=model_path,
+                    nickname=nickname,
+                    candidate=attempt,
+                    gpu_set=gpu_set,
+                    backend=backend,
+                    port=port,
+                )
+            except TeardownError:
+                teardown_verified = False
+                raise
+            except ValidationPreempted:
+                raise
+            except ValidationError as exc:
+                log_path = exc.details.get("log_path")
+                log = Path(log_path).read_text(errors="replace").lower() if log_path else ""
+                memory_failure = exc.stage == "gpu_capacity" or (
+                    exc.stage == "engine_startup"
+                    and any(
+                        marker in log
+                        for marker in (
+                            "cuda out of memory",
+                            "cuda error: out of memory",
+                            "outofmemoryerror",
+                        )
+                    )
+                )
+                if not memory_failure or index == len(budgets) - 1:
+                    raise
+                await self.scheduler.database.record_event(
+                    "VALIDATION_MEMORY_RETRY",
+                    model_id,
+                    {
+                        "gpu_uuids": gpu_set,
+                        "failed_utilization": budget,
+                        "next_utilization": budgets[index + 1],
+                        "log_path": log_path,
+                    },
+                )
+            finally:
+                if teardown_verified:
+                    await self._release_validation_port(port)
+        raise AssertionError("validation budget attempts exhausted")
 
     async def _probe_vllm_on_port(
         self,
@@ -372,7 +458,8 @@ class ProfileValidator:
             **candidate.launch_args,
         }
         kvcached = detect_kvcached("required") if backend == "kvcached" else detect_kvcached("none")
-        ram_weight_cache_enabled = self.settings.prism_weight_cache_mode == "ram"
+        ram_weight_cache_enabled = self.settings.ram_weight_cache_enabled
+        launch_args["enable_sleep_mode"] = ram_weight_cache_enabled
         command = [
             self.settings.engines.vllm_executable,
             "serve",
@@ -405,8 +492,6 @@ class ProfileValidator:
             command.extend(["--enable-auto-tool-choice", "--tool-call-parser", parsers.tool_parser])
         if parsers.reasoning_parser is not None:
             command.extend(["--reasoning-parser", parsers.reasoning_parser])
-        if ram_weight_cache_enabled:
-            command.append("--enable-sleep-mode")
         for key, value in launch_args.items():
             flag = f"--{key.replace('_', '-')}"
             if isinstance(value, bool):
@@ -432,6 +517,11 @@ class ProfileValidator:
             self.settings.engines.environment,
             executable=self.settings.engines.vllm_executable,
         )
+        if self.settings.queue_mode_enabled:
+            environment.update(
+                ENABLE_KVCACHED="false", KVCACHED_AUTOPATCH="0", VLLM_SERVER_DEV_MODE="0"
+            )
+            environment.pop("LLM_RIO_KVCACHED_VLLM026_SHIM", None)
         environment["VLLM_API_KEY"] = api_key
         environment.update(kvcached.environment(pythonpath=environment.get("PYTHONPATH")))
         if ram_weight_cache_enabled:
@@ -501,15 +591,13 @@ class ProfileValidator:
                     baseline_drop_mib=sampler.baseline_drop_mib,
                 )
             except ValidationError as exc:
-                await sampler.stop()
-                await self._terminate(process)
                 exc.details.setdefault("log_path", str(log_path))
                 raise
-            except BaseException:
-                await sampler.stop()
-                await self._terminate(process)
-                raise
-            await self._terminate(process)
+            finally:
+                try:
+                    await sampler.stop()
+                finally:
+                    await self._terminate(process, gpu_uuids=gpu_set)
         try:
             version = importlib.metadata.version("vllm")
         except importlib.metadata.PackageNotFoundError:
@@ -754,57 +842,14 @@ class ProfileValidator:
         return completion_tokens / elapsed
 
     @staticmethod
-    def _process_group_exists(process_group: int) -> bool:
-        try:
-            os.killpg(process_group, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        return True
-
-    @classmethod
-    async def _terminate(cls, process: asyncio.subprocess.Process) -> None:
-        # Validation engines are launched with start_new_session=True. The
-        # launch PID is therefore also the stable process-group ID, even after
-        # the API parent exits and TP workers are reparented to init.
-        process_group = process.pid
-        if os.name == "posix":
-            try:
-                os.killpg(process_group, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            except OSError:
-                if process.returncode is None:
-                    process.terminate()
-        elif process.returncode is None:
-            process.terminate()
-
-        if process.returncode is None:
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(process.wait(), timeout=10.0)
-
-        if os.name == "posix":
-            for _ in range(50):
-                if not cls._process_group_exists(process_group):
-                    return
-                await asyncio.sleep(0.1)
-            try:
-                os.killpg(process_group, signal.SIGKILL)
-            except ProcessLookupError:
-                return
-            if process.returncode is None:
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(process.wait(), timeout=5.0)
-            return
-
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
+    async def _terminate(
+        process: asyncio.subprocess.Process, *, gpu_uuids: tuple[str, ...] = ()
+    ) -> None:
+        await terminate_engine(process, gpu_uuids=gpu_uuids)
 
     @staticmethod
     def _used_vram(gpu_set: tuple[str, ...]) -> tuple[int, ...]:
-        import pynvml
+        import pynvml  # type: ignore[import-untyped]
 
         pynvml.nvmlInit()
         try:

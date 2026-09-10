@@ -303,11 +303,13 @@ def test_cached_fit_composes_active_peak_and_sleep_residual() -> None:
         minimum_residency_seconds=0,
         fair_share_seconds=60,
         prism_enabled=True,
-        kvcached_required=False,
+        kvcached_required=True,
         gpu_vram_mib={"GPU-0": 97_249},
         reserved_vram_mib=2048,
     )
-    sleeping_profile = _profile("sleeping", ("GPU-0",), (30_000,), sleep_mib=(5_201,))
+    sleeping_profile = _profile(
+        "sleeping", ("GPU-0",), (30_000,), sleep_mib=(5_201,), backend="kvcached"
+    )
     sleeping = WorkerPlacement(
         id="sleeping-worker",
         profile=sleeping_profile,
@@ -315,7 +317,7 @@ def test_cached_fit_composes_active_peak_and_sleep_residual() -> None:
         port=18000,
         state=RuntimeState.SLEEPING,
     )
-    fitting = _profile("incoming", ("GPU-0",), (90_000,))
+    fitting = _profile("incoming", ("GPU-0",), (90_000,), backend="kvcached")
     assert planner._cached_prism_fits(fitting, ("GPU-0",), [sleeping])
 
     sleeping.profile = replace(sleeping_profile, sleep_vram_mib_per_gpu=(5_202,))

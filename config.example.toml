@@ -5,6 +5,13 @@
 # null value, so optional restrictions are shown commented out: uncomment one
 # only when the deployment should impose that policy.
 
+# Explicit residency mode: "queue", "vllm-sleep", or "kv-cached".
+# Omit to preserve legacy engines.kvcached_mode / prism_weight_cache_mode behavior
+# (the built-in default is vllm-sleep). Explicit mode takes precedence over those flags.
+# Queue mode fully unloads workers, disables sleep, and loads only for queued requests.
+# Also selectable with --mode queue or LLMRIO_SERVING_MODE=queue, without editing TOML.
+# serving_mode = "queue"
+
 # Human-readable name used in inventory fingerprints, logs, and diagnostics.
 machine_id = "CHANGE_ME"
 
@@ -52,8 +59,8 @@ wait_duration_seconds = 3600
 # Starvation safety bound for incompatible continuously backlogged models.
 fair_share_seconds = 7200
 
-# Required inference-idle period before registration may use free GPUs.
-# The permissive default is 0, so free GPUs can validate immediately.
+# In experimental kvcached mode, required inference-idle time before validation.
+# Normal mode always waits for MAINTENANCE_READY, regardless of this value.
 validation_idle_window_seconds = 0
 
 # Nicknames to warm at startup when Prism is active. This is only the initial
@@ -64,6 +71,9 @@ prism_preload_models = []
 
 # "ram" keeps idle vLLM workers and their weights in host memory using level-1
 # sleep. "disabled" terminates an idle worker instead of retaining a warm process.
+# In normal mode, sleeping processes are fully evicted in LRU order when their
+# remaining GPU contexts prevent a measured placement from fitting live free VRAM.
+# Maintenance fully unloads all production workers before normal-mode validation.
 prism_weight_cache_mode = "ram"
 
 # Seconds without real demand before READY weights are proactively copied to
@@ -154,6 +164,10 @@ enable_llama_cpp = false
 # Per-worker vLLM GPU allocation fraction. Omitted by default so LLM-RIO derives it
 # from reserved_vram_mib and detected VRAM. This affects engine allocation only;
 # the scheduler uses measured incremental peaks rather than applying it again.
+# vllm-sleep validation caps this at 0.80. Queue mode honors this value without
+# that cap; omitted values use (physical VRAM - reserved_vram_mib) / physical VRAM.
+# Queue OOM retries reduce the fraction by 0.02, up to five retries.
+# The successfully measured fraction is persisted for serving. Prism is unchanged.
 # gpu_memory_utilization = 0.95
 
 # Engine context-window ceiling. Omitted by default; the model maximum is used.

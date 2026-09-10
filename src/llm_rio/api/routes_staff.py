@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 from fastapi import APIRouter, HTTPException, Request, Response, status
 
 from llm_rio.api.dependencies import StaffPrincipal
@@ -46,7 +48,7 @@ async def model_job(job_id: str, request: Request, _: StaffPrincipal) -> dict[st
     job = await request.app.state.database.get_model_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    return job
+    return cast(dict[str, object], job)
 
 
 @router.post("/staff/model-jobs/{job_id}/retry", status_code=status.HTTP_202_ACCEPTED)

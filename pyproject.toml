@@ -55,10 +55,9 @@ no-build-isolation-package = ["kvcached"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests", "scripts"]
-pythonpath = ["src"]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
 addopts = "--basetemp=.pytest_tmp"
-
 
 
 [tool.ruff]
@@ -73,3 +72,6 @@ python_version = "3.11"
 strict = true
 packages = ["llm_rio"]
 
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["typer.Option", "typer.Argument"]

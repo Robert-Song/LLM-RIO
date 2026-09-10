@@ -102,8 +102,14 @@ def profile_verified_for_mode(
     *,
     kvcached_required: bool,
     ram_weight_cache_required: bool = False,
+    queue_mode_required: bool = False,
 ) -> bool:
     """Return whether this exact profile was measured for the selected runtime."""
+    if queue_mode_required and (
+        profile.memory_backend != "native"
+        or profile.launch_args.get("enable_sleep_mode") is not False
+    ):
+        return False
     if profile.vram_measurement_version != CURRENT_VRAM_MEASUREMENT_VERSION:
         return False
     if profile.vram_baseline_mib_per_gpu is None:
@@ -302,7 +308,7 @@ class ProfileRepository:
                     """,
                     (json.dumps(raw), _now(), row["id"]),
                 )
-        return len(rows)
+        return len(list(rows))
 
     async def set_profile_backend_verified(
         self,

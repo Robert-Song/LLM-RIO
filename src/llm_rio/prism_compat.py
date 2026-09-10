@@ -371,10 +371,8 @@ async def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             for handle in handles
         )
         packed_kv_shim_ok = all(
-            "LLM-RIO packed "
-            in handle.log_path.read_text(encoding="utf-8", errors="replace")
-            and " KV shim active:"
-            in handle.log_path.read_text(encoding="utf-8", errors="replace")
+            "LLM-RIO packed " in handle.log_path.read_text(encoding="utf-8", errors="replace")
+            and " KV shim active:" in handle.log_path.read_text(encoding="utf-8", errors="replace")
             for handle in handles
         )
         report["servers"] = [
