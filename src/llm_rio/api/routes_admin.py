@@ -16,6 +16,7 @@ from llm_rio.api.schemas import (
     MaintenanceRequest,
     ModelProfileCloneRequest,
     ModelRequestDefaultsUpdate,
+    ModelVerificationTrustRequest,
     ProfileEditRequest,
     QuotaUpdate,
     UsageSummarizeRequest,
@@ -388,6 +389,67 @@ async def get_model_verification_job(
     if job is None:
         raise HTTPException(status_code=404, detail="Verification job not found")
     return cast(dict[str, object], job)
+
+
+@router.post("/admin/models/trust-available")
+async def trust_available_model_verification(
+    body: ModelVerificationTrustRequest, request: Request, _: AdminPrincipal
+) -> dict[str, object]:
+    backend = body.backend or (
+        "kvcached" if request.app.state.scheduler.kvcached.enabled else "native"
+    )
+    return cast(
+        dict[str, object],
+        await request.app.state.profiles.trust_available_models(
+            gpu_uuids={gpu.uuid for gpu in request.app.state.inventory.gpus},
+            backend=backend,
+            queue_mode_required=bool(
+                getattr(
+                    getattr(request.app.state.scheduler, "settings", None),
+                    "queue_mode_enabled",
+                    False,
+                )
+            ),
+            ram_weight_cache_required=bool(
+                getattr(
+                    getattr(request.app.state.scheduler, "planner", None),
+                    "prism_weight_cache_enabled",
+                    False,
+                )
+            ),
+        ),
+    )
+
+
+@router.post("/admin/models/{model_id}/trust-verification")
+async def trust_model_verification(
+    model_id: str, body: ModelVerificationTrustRequest, request: Request, _: AdminPrincipal
+) -> dict[str, object]:
+    backend = body.backend or (
+        "kvcached" if request.app.state.scheduler.kvcached.enabled else "native"
+    )
+    return cast(
+        dict[str, object],
+        await request.app.state.profiles.trust_model_verification(
+            model_id,
+            gpu_uuids={gpu.uuid for gpu in request.app.state.inventory.gpus},
+            backend=backend,
+            queue_mode_required=bool(
+                getattr(
+                    getattr(request.app.state.scheduler, "settings", None),
+                    "queue_mode_enabled",
+                    False,
+                )
+            ),
+            ram_weight_cache_required=bool(
+                getattr(
+                    getattr(request.app.state.scheduler, "planner", None),
+                    "prism_weight_cache_enabled",
+                    False,
+                )
+            ),
+        ),
+    )
 
 
 @router.post("/admin/models/{model_id}/trust-both-backends")

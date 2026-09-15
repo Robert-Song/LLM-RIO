@@ -88,6 +88,13 @@ def create_app(
             for item in recovery:
                 await database.record_event("STARTUP_WORKER_RECONCILIATION", payload=item)
             await database.recover_orphaned_state()
+            await database.record_event(
+                "MACHINE_INVENTORY_DISCOVERED",
+                payload={
+                    "fingerprint": inventory.fingerprint,
+                    "components": inventory.fingerprint_payload,
+                },
+            )
             previous_fingerprint = await database.set_machine_fingerprint(inventory.fingerprint)
             if previous_fingerprint and previous_fingerprint != inventory.fingerprint:
                 await database.record_event(

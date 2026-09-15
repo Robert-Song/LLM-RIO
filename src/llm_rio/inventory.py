@@ -3,10 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import platform
 import subprocess
 from collections.abc import Callable
-from dataclasses import asdict
 from itertools import combinations
 from pathlib import Path
 from typing import Any
@@ -142,13 +140,17 @@ def discover_inventory(machine_id: str, managed_gpu_uuids: list[str]) -> Machine
     if not devices:
         raise InventoryError("No managed NVIDIA GPUs were discovered")
     topology, topology_hash = _read_topology()
+    # Topology is a placement hint, not machine identity: its command output includes
+    # CPU affinity, NICs, formatting, and can disappear temporarily. NVML indices and
+    # PCI addresses can also change across boots. UUIDs identify the actual GPUs.
     fingerprint_payload = {
+        "version": 2,
         "driver": driver_version,
         "cuda": cuda_version,
-        "platform": platform.platform(),
-        "cpu": platform.processor(),
-        "gpus": [asdict(device) for device in devices],
-        "topology_hash": topology_hash,
+        "gpus": sorted(
+            ({"uuid": device.uuid, "total_vram_mib": device.total_vram_mib} for device in devices),
+            key=lambda item: str(item["uuid"]),
+        ),
     }
     fingerprint = hashlib.sha256(
         json.dumps(fingerprint_payload, sort_keys=True).encode()
@@ -161,6 +163,7 @@ def discover_inventory(machine_id: str, managed_gpu_uuids: list[str]) -> Machine
         topology_hash=topology_hash,
         fingerprint=fingerprint,
         topology=topology,
+        fingerprint_payload=fingerprint_payload,
     )
 
 

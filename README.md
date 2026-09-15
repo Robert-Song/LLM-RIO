@@ -179,6 +179,47 @@ non-empty output throughput, model popularity, and live NVIDIA GPU and worker-pl
 Use the mouse or keyboard to navigate; `R` refreshes the current page and `Q` exits. Destructive
 operations require confirmation.
 
+**Start service** lets you select a configuration file and a serving mode (`queue`,
+`vllm-sleep`, or `kv-cached`), or keep the configuration/environment mode. The service takes
+over the terminal after the TUI closes.
+
+On **Models → Profiles**, **Validate model** and **Validate kvcached** manually set the selected
+profile's backend verification flag without probes; their labels change to **Invalidate** when
+verified. **Verify kvcached** queues actual hardware probes. Manual flags still require compatible
+v2 VRAM measurements and only apply to profiles belonging to the current machine fingerprint.
+
+**Models → Trust model** and **Trust all available** explicitly accept saved measurements
+without rerunning probes, including recovery after a fingerprint change. These actions enable
+compatible saved profiles, including inactive ones, for the running server's backend. They require
+local artifacts, a matching resolved model revision, and eligible GPU UUIDs on this machine.
+They preserve measurements and launch settings, skip profiles whose measurements were invalidated,
+and record an audit event. Bulk recovery reports skipped models and reasons. Existing runtime
+requirements (measurement version, memory backend, queue/sleep mode) still apply; an override
+does not manufacture missing measurements or convert profiles between serving modes.
+
+```bash
+./llmctl models trust qwen3.8-27b-nvfp4
+./llmctl models trust-available
+# Explicitly override both backend flags, if needed:
+./llmctl models trust-available --backend both
+```
+
+The admin API equivalents are `POST /admin/models/{model_id}/trust-verification` and
+`POST /admin/models/trust-available`, with JSON `{}` or
+`{"backend": "native"}` (`kvcached` and `both` are also accepted).
+
+Machine fingerprints use sorted managed GPU UUIDs and VRAM capacities plus NVIDIA driver and
+CUDA driver versions. Kernel/platform strings, GPU indices, PCI addresses, and raw topology
+output no longer invalidate verification. Topology remains available for placement ranking.
+Startup logs the fingerprint components in `MACHINE_INVENTORY_DISCOVERED` events. A changed
+fingerprint excludes old profiles without deactivating them, so returning to the original
+fingerprint preserves their activation state. Upgrading from the old fingerprint algorithm
+changes the hash once: use the trust actions to reuse saved measurements after restarting.
+
+Copying state to a different set of GPU UUIDs still requires real validation. When copying state,
+stop the source service for a consistent copy, include the hidden API-key vault, and point the
+destination configuration at the copied database and accessible model artifacts.
+
 All command-oriented workflows remain available for scripts and runbooks. For example,
 `./llmctl keys list`, `./llmctl models review MODEL`, `./llmctl maintenance drain`,
 `./llmctl doctor`, and `./llmctl serve` behave as before. `./llmctl interactive` is an explicit

@@ -200,3 +200,7 @@ class ChatCompletionRequest(BaseModel):
 class MaintenanceStatus(BaseModel):
     mode: str
     workers: list[dict[str, Any]]
+
+
+class ModelVerificationTrustRequest(BaseModel):
+    backend: Literal["native", "kvcached", "both"] | None = None

@@ -285,6 +285,182 @@ class ProfileRepository:
             )
         return records
 
+    async def trust_model_verification(
+        self,
+        model_id: str,
+        *,
+        gpu_uuids: set[str],
+        backend: str,
+        queue_mode_required: bool = False,
+        ram_weight_cache_required: bool = False,
+    ) -> dict[str, Any]:
+        """Explicit admin override, including recovery from a stale fingerprint.
+
+        Reuse the newest compatible fingerprint cohort only. Retain original rows
+        as history and preserve measurements/launch arguments; never invent probes.
+        """
+        if backend not in {"native", "kvcached", "both"}:
+            raise ValueError(f"Unsupported verification backend: {backend}")
+        async with self.database.transaction() as connection:
+            model = await (
+                await connection.execute("SELECT * FROM model_catalog WHERE id = ?", (model_id,))
+            ).fetchone()
+            if model is None:
+                raise RioError("model_not_found", "Model not found", status_code=404)
+            if model["state"] != "AVAILABLE" or not model["artifact_path"]:
+                raise RioError(
+                    "model_verification_unavailable",
+                    "Model must be AVAILABLE with local artifacts",
+                    status_code=409,
+                )
+            if not Path(model["artifact_path"]).exists():
+                raise RioError(
+                    "model_artifact_missing", "Model artifacts are missing", status_code=409
+                )
+            rows = await (
+                await connection.execute(
+                    """SELECT * FROM model_profiles WHERE model_id = ?
+                   ORDER BY (machine_fingerprint = ?) DESC, verified_at DESC, id""",
+                    (model_id, self.machine_fingerprint),
+                )
+            ).fetchall()
+            candidates: list[tuple[Any, dict[str, Any]]] = []
+            source_fingerprint: str | None = None
+            for row in rows:
+                try:
+                    raw = json.loads(row["profile_json"])
+                    if not isinstance(raw, dict):
+                        continue
+                    if backend in {"native", "both"}:
+                        raw["normal_verified"] = True
+                    if backend in {"kvcached", "both"}:
+                        raw["kvcached_verified"] = True
+                    profile = profile_from_dict(raw)
+                except (ValueError, TypeError, KeyError):
+                    continue
+                if not profile_verified_for_mode(
+                    profile,
+                    kvcached_required=(
+                        profile.memory_backend == "kvcached"
+                        if backend == "both"
+                        else backend == "kvcached"
+                    ),
+                    queue_mode_required=queue_mode_required,
+                    ram_weight_cache_required=ram_weight_cache_required,
+                ):
+                    continue
+                if (
+                    profile.model_id != model_id
+                    or profile.model_revision != model["resolved_revision"]
+                ):
+                    continue
+                # Preserve tuple order: per-GPU measurements are positional.
+                groups = [
+                    list(group)
+                    for group in profile.eligible_gpu_sets
+                    if len(group) == len(set(group)) == profile.gpu_count
+                    and set(group) <= gpu_uuids
+                ]
+                if not groups or raw.get("measurements_invalidated_at"):
+                    continue
+                if source_fingerprint is None:
+                    source_fingerprint = row["machine_fingerprint"]
+                if row["machine_fingerprint"] != source_fingerprint:
+                    continue
+                raw["eligible_gpu_sets"] = groups
+                candidates.append((row, raw))
+            if not candidates:
+                raise RioError(
+                    "model_profile_missing",
+                    "No saved profiles have compatible measurements, backend, model revision, "
+                    "and managed GPU UUIDs; "
+                    "run real validation",
+                    status_code=409,
+                )
+            if any(row["active"] == 1 for row, _ in candidates):
+                candidates = [(row, raw) for row, raw in candidates if row["active"] == 1]
+            updated_ids: list[str] = []
+            now = _now()
+            for row, raw in candidates:
+                raw["machine_fingerprint"] = self.machine_fingerprint
+                if backend in {"native", "both"}:
+                    raw["normal_verified"] = True
+                if backend in {"kvcached", "both"}:
+                    raw["kvcached_verified"] = True
+                key = profile_key(raw)
+                existing = await (
+                    await connection.execute(
+                        "SELECT id FROM model_profiles WHERE profile_key = ?", (key,)
+                    )
+                ).fetchone()
+                profile_id = existing["id"] if existing else str(uuid.uuid4())
+                raw["id"] = profile_id
+                raw["verification_override"] = {
+                    "source_profile_id": row["id"],
+                    "source_fingerprint": row["machine_fingerprint"],
+                    "backend": backend,
+                    "at": now,
+                }
+                await connection.execute(
+                    """INSERT INTO model_profiles
+                       (id, model_id, machine_fingerprint, profile_key, profile_json,
+                        verified_at, active) VALUES (?, ?, ?, ?, ?, ?, 1)
+                       ON CONFLICT(profile_key) DO UPDATE SET
+                       profile_json = excluded.profile_json,
+                       verified_at = excluded.verified_at, active = 1""",
+                    (profile_id, model_id, self.machine_fingerprint, key, json.dumps(raw), now),
+                )
+                updated_ids.append(profile_id)
+            result = {
+                "model_id": model_id,
+                "nickname": model["nickname"],
+                "backend": backend,
+                "profiles_updated": len(set(updated_ids)),
+                "machine_fingerprint": self.machine_fingerprint,
+                "source_fingerprint": source_fingerprint,
+            }
+            await connection.execute(
+                """INSERT INTO runtime_events (event_type, entity_id, payload_json, created_at)
+                   VALUES ('MODEL_VERIFICATION_TRUSTED_BY_ADMIN', ?, ?, ?)""",
+                (model_id, json.dumps(result), now),
+            )
+        return result
+
+    async def trust_available_models(
+        self,
+        *,
+        gpu_uuids: set[str],
+        backend: str,
+        queue_mode_required: bool = False,
+        ram_weight_cache_required: bool = False,
+    ) -> dict[str, Any]:
+        """Trust each AVAILABLE model and report models that cannot be recovered."""
+        rows = await self.database.fetchall(
+            "SELECT id, nickname FROM model_catalog WHERE state = 'AVAILABLE' ORDER BY nickname"
+        )
+        trusted, skipped = [], []
+        for row in rows:
+            try:
+                trusted.append(
+                    await self.trust_model_verification(
+                        row["id"],
+                        gpu_uuids=gpu_uuids,
+                        backend=backend,
+                        queue_mode_required=queue_mode_required,
+                        ram_weight_cache_required=ram_weight_cache_required,
+                    )
+                )
+            except RioError as exc:
+                skipped.append(
+                    {
+                        "model_id": row["id"],
+                        "nickname": row["nickname"],
+                        "code": exc.code,
+                        "reason": exc.message,
+                    }
+                )
+        return {"data": trusted, "skipped": skipped}
+
     async def set_model_verified_for_both(self, model_id: str) -> int:
         """Explicitly trust every active profile for both launch backends on this machine."""
         async with self.database.transaction() as connection:

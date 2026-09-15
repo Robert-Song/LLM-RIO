@@ -70,3 +70,17 @@ def test_models_add_wait_prints_automatic_validation_stages(
         "revision": None,
         "grant_to_keys": [],
     }
+
+
+@pytest.mark.parametrize("bulk", [False, True])
+def test_manual_trust_commands(monkeypatch: pytest.MonkeyPatch, bulk: bool) -> None:
+    requests = []
+    monkeypatch.setattr(cli_api, "_model_record", lambda _: {"id": "model-id"})
+    monkeypatch.setattr(
+        cli_api, "_request", lambda *args, **kwargs: requests.append((args, kwargs))
+    )
+    command = ["trust-available"] if bulk else ["trust", "qwen"]
+    result = CliRunner().invoke(cli_api.app, ["models", *command, "--backend", "both"])
+    assert result.exit_code == 0, result.output
+    path = "/admin/models/trust-available" if bulk else "/admin/models/model-id/trust-verification"
+    assert requests == [(("POST", path), {"json_body": {"backend": "both"}})]

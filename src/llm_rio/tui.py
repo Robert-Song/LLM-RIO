@@ -29,7 +29,7 @@ from textual.widgets import (
 from textual.worker import WorkerCancelled, WorkerFailed
 
 from llm_rio import cli as cli_api
-from llm_rio.config import Settings
+from llm_rio.config import ServingMode, Settings
 from llm_rio.inventory import InventoryError, discover_inventory
 
 FormValue = str | bool
@@ -249,7 +249,13 @@ class ConfirmModal(ModalScreen[bool]):
         self.dismiss(event.button.id == "confirm-submit")
 
 
-class RioTui(App[Path | None]):
+@dataclass(frozen=True, slots=True)
+class ServiceLaunch:
+    config: Path
+    mode: ServingMode | None
+
+
+class RioTui(App[ServiceLaunch | None]):
     """Full-screen administration console for LLM-RIO."""
 
     TITLE = "LLM-RIO Control Center"
@@ -462,6 +468,8 @@ class RioTui(App[Path | None]):
                         yield Button("Disable", id="models-disable", variant="warning")
                         yield Button("Change user access", id="models-user-access")
                         yield Button("Profiles", id="models-profiles")
+                        yield Button("Trust model", id="models-trust")
+                        yield Button("Trust all available", id="models-trust-available")
                     yield DataTable(zebra_stripes=True, cursor_type="row", id="models-table")
                     yield Static(
                         "Select a model to see catalog and registration details.",
@@ -1813,6 +1821,35 @@ class RioTui(App[Path | None]):
                 )
             await self.refresh_profiles()
 
+    async def _trust_model_verification(self, model: dict[str, Any] | None = None) -> None:
+        path = (
+            f"/admin/models/{model['id']}/trust-verification"
+            if model is not None
+            else "/admin/models/trust-available"
+        )
+        ok, result = await self._call(
+            "Trust saved model verification",
+            lambda: cli_api._request("POST", path, json_body={}),
+        )
+        if ok and isinstance(result, dict):
+            if model is not None:
+                self.notify(
+                    f"Trusted {result.get('profiles_updated', 0)} saved profiles.", timeout=10
+                )
+            else:
+                self.notify(
+                    f"Trusted {len(result.get('data', []))} models; "
+                    f"skipped {len(result.get('skipped', []))}.",
+                    timeout=10,
+                )
+                for skipped in result.get("skipped", []):
+                    self.notify(
+                        f"{skipped['nickname']}: {skipped['reason']}",
+                        severity="warning",
+                        timeout=15,
+                    )
+            await self.refresh_models()
+
     async def _verify_model_kvcached(self) -> None:
         if self.profile_model is None:
             return
@@ -1910,6 +1947,14 @@ class RioTui(App[Path | None]):
                 required=True,
                 help_text="The TUI will close and the service will take over this terminal.",
             ),
+            FieldSpec(
+                "mode",
+                "Serving mode",
+                value="configured",
+                options=(("Use configuration / environment", "configured"),)
+                + tuple((mode.value, mode.value) for mode in ServingMode),
+                help_text="Choose queue, vllm-sleep, or kv-cached to override the configuration.",
+            ),
         )
         self.push_screen(
             FormModal("Start LLM-RIO service", fields, "Start service"), self._serve_result
@@ -1917,7 +1962,13 @@ class RioTui(App[Path | None]):
 
     def _serve_result(self, values: FormResult | None) -> None:
         if values is not None:
-            self.exit(Path(_str_value(values, "config")))
+            mode = _str_value(values, "mode")
+            self.exit(
+                ServiceLaunch(
+                    config=Path(_str_value(values, "config")),
+                    mode=None if mode == "configured" else ServingMode(mode),
+                )
+            )
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id or ""
@@ -1971,6 +2022,19 @@ class RioTui(App[Path | None]):
                 )
         elif button_id == "models-refresh":
             self.run_worker(self.refresh_models(), exit_on_error=False)
+        elif button_id in {"models-trust", "models-trust-available"}:
+            trust_record = self._selected_model() if button_id == "models-trust" else None
+            if button_id == "models-trust" and trust_record is None:
+                return
+            label = str(trust_record.get("nickname")) if trust_record else "all AVAILABLE models"
+            self._confirm(
+                "Trust saved verification",
+                f"Trust {label} on this machine without running probes? "
+                "This enables saved profiles for matching model revisions and GPU UUIDs, "
+                "including profiles under an older fingerprint. Uses the running server's backend.",
+                "Trust",
+                lambda: self._trust_model_verification(trust_record),
+            )
         elif button_id == "models-add":
             self._open_add_model()
         elif button_id == "models-clone":
@@ -2180,7 +2244,6 @@ def _doctor_report(config: Path) -> dict[str, Any]:
     return report
 
 
-def run_tui() -> Path | None:
-    """Run the terminal app and return a config path when the user chooses Serve."""
-    result = RioTui().run()
-    return result if isinstance(result, Path) else None
+def run_tui() -> ServiceLaunch | None:
+    """Return the configuration and mode when the user chooses Start service."""
+    return RioTui().run()

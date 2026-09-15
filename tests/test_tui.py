@@ -5,12 +5,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from textual.widgets import Button, Checkbox, ContentSwitcher, DataTable, Input
+from textual.widgets import Button, Checkbox, ContentSwitcher, DataTable, Input, Select
 from typer.testing import CliRunner
 
 from llm_rio import cli as cli_api
 from llm_rio import tui as tui_module
-from llm_rio.tui import RioTui
+from llm_rio.config import ServingMode
+from llm_rio.tui import RioTui, ServiceLaunch
 
 
 @pytest.fixture
@@ -647,20 +648,41 @@ def test_no_argument_cli_launches_tui(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls == [True]
 
 
-def test_tui_can_handoff_to_serve(monkeypatch: pytest.MonkeyPatch) -> None:
-    config = Path("alternate.toml")
-    served: list[Path] = []
-
-    def serve(*, config: Path) -> None:
-        served.append(config)
-
-    monkeypatch.setattr(tui_module, "run_tui", lambda: config)
-    monkeypatch.setattr(cli_api, "serve", serve)
+@pytest.mark.parametrize("mode", [None, *ServingMode])
+def test_tui_can_handoff_to_serve(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: ServingMode | None
+) -> None:
+    config = tmp_path / "alternate.toml"
+    config.write_text('serving_mode = "queue"\n')
+    served: list[Any] = []
+    monkeypatch.setattr(tui_module, "run_tui", lambda: ServiceLaunch(config, mode))
+    monkeypatch.setattr(cli_api, "create_app", lambda settings: settings)
+    monkeypatch.setattr(cli_api.uvicorn, "run", lambda app, **kwargs: served.append(app))
 
     result = CliRunner().invoke(cli_api.app, ["interactive"])
 
-    assert result.exit_code == 0
-    assert served == [config]
+    assert result.exit_code == 0, result.output
+    assert len(served) == 1
+    assert served[0].serving_mode == (mode or ServingMode.QUEUE)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [None, *ServingMode])
+async def test_start_service_form_returns_selected_mode(
+    management_backend: dict[str, list[dict[str, Any]]], mode: ServingMode | None
+) -> None:
+    app = RioTui()
+    async with app.run_test(size=(130, 45)) as pilot:
+        await pilot.pause()
+        await pilot.click("#dashboard-start-service")
+        await pilot.pause()
+        app.screen.query_one("#field-config", Input).value = "config.barra.toml"
+        selector = app.screen.query_one("#field-mode", Select)
+        assert selector.value == "configured"
+        selector.value = mode.value if mode else "configured"
+        await pilot.click("#form-submit")
+        await pilot.pause()
+    assert app.return_value == ServiceLaunch(Path("config.barra.toml"), mode)
 
 
 @pytest.mark.asyncio
@@ -744,3 +766,41 @@ async def test_tui_exposes_manual_backend_verification_actions(
     ]
     assert management_backend["profiles"][0]["normal_verified"] is False
     assert management_backend["profiles"][0]["kvcached_verified"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bulk", [False, True])
+async def test_tui_trust_recovers_without_selecting_a_profile(
+    management_backend: dict[str, list[dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+    bulk: bool,
+) -> None:
+    original_request = cli_api._request
+    requests = []
+
+    def request(method, path, *, json_body=None):
+        if method == "POST" and path.endswith(("/trust-available", "/trust-verification")):
+            requests.append((path, json_body))
+            return {"profiles_updated": 1, "data": [{"model_id": "model-1"}], "skipped": []}
+        return original_request(method, path, json_body=json_body)
+
+    monkeypatch.setattr(cli_api, "_request", request)
+    app = RioTui()
+    async with app.run_test(size=(130, 60)) as pilot:
+        await pilot.pause()
+        await pilot.click("#nav-models")
+        await pilot.pause()
+        button = "#models-trust-available" if bulk else "#models-trust"
+        await pilot.click(button)
+        await pilot.pause()
+        assert requests == []
+        await pilot.click("#confirm-cancel")
+        await pilot.pause()
+        assert requests == []
+        await pilot.click(button)
+        await pilot.pause()
+        await pilot.click("#confirm-submit")
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+    path = "/admin/models/trust-available" if bulk else "/admin/models/model-1/trust-verification"
+    assert requests == [(path, {})]

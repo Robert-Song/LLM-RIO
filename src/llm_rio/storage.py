@@ -1107,6 +1107,8 @@ class Database:
         await self.record_event("SERVICE_MODE_CHANGED", payload={"mode": mode.value})
 
     async def set_machine_fingerprint(self, fingerprint: str) -> str | None:
+        # Repository queries enforce the fingerprint. Preserve activation state so
+        # a temporary fingerprint change does not permanently disable old profiles.
         async with self.transaction() as connection:
             row = await (
                 await connection.execute(
@@ -1114,11 +1116,6 @@ class Database:
                 )
             ).fetchone()
             previous = row["machine_fingerprint"] if row else None
-            if previous and previous != fingerprint:
-                await connection.execute(
-                    "UPDATE model_profiles SET active = 0 WHERE machine_fingerprint != ?",
-                    (fingerprint,),
-                )
             await connection.execute(
                 "UPDATE service_state SET machine_fingerprint = ?, updated_at = ? "
                 "WHERE singleton = 1",

@@ -705,6 +705,32 @@ def clone_model_profile(
         typer.echo(f"Request defaults: {json.dumps(defaults, sort_keys=True)}")
 
 
+@models_app.command("trust-available")
+def trust_available_models(
+    backend: str | None = typer.Option(None, "--backend", help="native, kvcached, or both"),
+) -> None:
+    """Manually trust all AVAILABLE models, recovering saved profiles without probes."""
+    if backend not in {None, "native", "kvcached", "both"}:
+        raise typer.BadParameter("Choose native, kvcached, or both")
+    _print(_request("POST", "/admin/models/trust-available", json_body={"backend": backend}))
+
+
+@models_app.command("trust")
+def trust_model(
+    nickname: str,
+    backend: str | None = typer.Option(None, "--backend", help="native, kvcached, or both"),
+) -> None:
+    """Manually trust a model's saved profiles on this machine without probes."""
+    if backend not in {None, "native", "kvcached", "both"}:
+        raise typer.BadParameter("Choose native, kvcached, or both")
+    model_id = _model_record(nickname)["id"]
+    _print(
+        _request(
+            "POST", f"/admin/models/{model_id}/trust-verification", json_body={"backend": backend}
+        )
+    )
+
+
 @models_app.command("profiles")
 def list_model_profiles(
     nickname: str,
@@ -873,9 +899,9 @@ def interactive_menu() -> None:
     # Import lazily so scriptable subcommands don't pay the TUI import/startup cost.
     from llm_rio.tui import run_tui
 
-    service_config = run_tui()
-    if service_config is not None:
-        serve(config=service_config)
+    launch = run_tui()
+    if launch is not None:
+        serve(config=launch.config, mode=launch.mode)
 
 
 @app.callback(invoke_without_command=True)

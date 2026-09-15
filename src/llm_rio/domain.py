@@ -73,6 +73,7 @@ class MachineInventory:
     topology_hash: str
     fingerprint: str
     topology: dict[str, dict[str, str]] = field(default_factory=dict)
+    fingerprint_payload: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
