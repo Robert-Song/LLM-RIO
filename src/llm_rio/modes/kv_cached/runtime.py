@@ -92,7 +92,7 @@ def detect_kvcached(mode: KVCachedMode | str | None) -> KVCachedRuntime:
     except importlib.metadata.PackageNotFoundError as exc:
         if mode == "required":
             raise KVCachedCompatibilityError(
-                "kvcached mode requires kvcached; install the legacy-named 'prism' extra"
+                "kvcached mode requires kvcached; install the 'kvcached' extra"
             ) from exc
         return KVCachedRuntime(False, None, None, False, "kvcached_not_installed")
     try:
@@ -112,7 +112,7 @@ def detect_kvcached(mode: KVCachedMode | str | None) -> KVCachedRuntime:
         not experimental_vllm or source_revision != KVCACHED_COMPAT_REVISION
     ):
         message = (
-            f"vLLM {vllm_version} is outside the tested Prism compatibility set; "
+            f"vLLM {vllm_version} is outside the tested experimental compatibility set; "
             f"the experimental path requires vLLM 0.26.x and kvcached revision "
             f"{KVCACHED_COMPAT_REVISION}"
         )

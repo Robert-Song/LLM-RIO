@@ -1,3 +1,5 @@
+> **Historical beta reference.** These instructions are retired. See the [release documentation](docs/README.md).
+
 # kvcached compatibility and upgrade runbook
 
 This runbook covers two jobs:

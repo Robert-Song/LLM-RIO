@@ -134,17 +134,17 @@ async def test_failed_open_closes_connection_and_can_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = Database(tmp_path / "failed.db")
-    migrate = database._migrate_schema
+    initialize = database.executescript
 
-    async def fail() -> None:
-        raise RuntimeError("migration failed")
+    async def fail(_sql: str) -> None:
+        raise RuntimeError("initialization failed")
 
-    monkeypatch.setattr(database, "_migrate_schema", fail)
-    with pytest.raises(RuntimeError, match="migration failed"):
+    monkeypatch.setattr(database, "executescript", fail)
+    with pytest.raises(RuntimeError, match="initialization failed"):
         await database.open()
     with pytest.raises(RuntimeError, match="database is not open"):
         _ = database.connection
-    monkeypatch.setattr(database, "_migrate_schema", migrate)
+    monkeypatch.setattr(database, "executescript", initialize)
     await database.open()
     try:
         assert await database.key_count() == 0

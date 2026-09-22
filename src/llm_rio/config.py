@@ -3,8 +3,9 @@ from __future__ import annotations
 from enum import Enum
 from pathlib import Path
 from typing import Literal
+from typing import Literal as _Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -12,7 +13,9 @@ from pydantic_settings import (
     TomlConfigSettingsSource,
 )
 
-from llm_rio.prism import KVCachedMode
+from llm_rio.modes.settings import CacheSettings, ModeSettings
+
+KVCachedMode = _Literal["none", "required"]
 
 
 class ServingMode(str, Enum):
@@ -22,6 +25,7 @@ class ServingMode(str, Enum):
 
 
 class EngineSettings(BaseModel):
+    model_config = {"extra": "forbid"}
     vllm_executable: str = "vllm"
     llama_cpp_executable: str = "llama-server"
     # Allows an administrator to select llama.cpp for an existing profile.
@@ -32,16 +36,6 @@ class EngineSettings(BaseModel):
     max_model_len: int | None = Field(default=None, gt=0)
     max_num_seqs: int | None = Field(default=None, gt=0)
     max_num_batched_tokens: int | None = Field(default=None, gt=0)
-    # none: native vLLM sleep/swap; auto: use kvcached when installed;
-    # required: refuse startup unless kvcached and vLLM are both importable.
-    kvcached_mode: KVCachedMode = "none"
-
-    @field_validator("kvcached_mode", mode="before")
-    @classmethod
-    def normalize_kvcached_mode(cls, value: object) -> object:
-        if value is None or str(value).strip().lower() in {"", "none", "disabled"}:
-            return "none"
-        return value
 
 
 class Settings(BaseSettings):
@@ -49,15 +43,15 @@ class Settings(BaseSettings):
         env_prefix="LLMRIO_",
         env_nested_delimiter="__",
         env_file=".env",
-        extra="ignore",
+        extra="forbid",
     )
 
     config_file: Path = Field(default=Path("config.toml"), exclude=True)
-    serving_mode: ServingMode | None = None
+    serving_mode: ServingMode = Field(...)
     machine_id: str = "local"
     api_host: str = "0.0.0.0"
     api_port: int = Field(default=8002, ge=1, le=65535)
-    database_path: Path = Path("state/llm-rio.db")
+    database_path: Path = Path("state/release/llm-rio.db")
     model_store: Path = Path("models")
     log_dir: Path = Path("logs")
     managed_gpu_uuids: list[str] = Field(default_factory=list)
@@ -68,17 +62,7 @@ class Settings(BaseSettings):
     minimum_residency_seconds: float = Field(default=0.0, ge=0)
     fair_share_seconds: float = Field(default=7200.0, gt=0)
     validation_idle_window_seconds: float = Field(default=0.0, ge=0)
-    prism_preload_models: list[str] = Field(default_factory=list)
-    # Host-RAM weight caching is the temporal half of Prism. Level-1 vLLM
-    # sleep retains weights in RAM while releasing their GPU allocations.
-    prism_weight_cache_mode: Literal["disabled", "ram"] = "ram"
-    prism_idle_sleep_seconds: float = Field(default=45.0, ge=0)
-    prism_max_workers_per_gpu: int = Field(default=1, ge=1)
-    prism_host_cache_max_gib: float | None = Field(default=None, gt=0)
-    prism_host_cache_min_available_gib: float = Field(default=4.0, gt=0)
-    prism_swap_max_used_gib: float = Field(default=0.0, ge=0)
-    prism_sleep_gpu_reserve_mib: int = Field(default=1536, ge=0)
-    prism_transition_timeout_seconds: float = Field(default=180.0, gt=0)
+    modes: ModeSettings = Field(default_factory=ModeSettings)
     worker_startup_timeout_seconds: float | None = Field(default=None, gt=0)
     worker_drain_watchdog_seconds: float | None = Field(default=None, gt=0)
     worker_request_timeout_seconds: float | None = Field(default=None, gt=0)
@@ -96,20 +80,18 @@ class Settings(BaseSettings):
     engines: EngineSettings = Field(default_factory=EngineSettings)
 
     @property
-    def effective_kvcached_mode(self) -> KVCachedMode:
+    def residency(self) -> CacheSettings:
         if self.serving_mode is ServingMode.KV_CACHED:
-            return "required"
-        if self.serving_mode is not None:
-            return "none"
-        return self.engines.kvcached_mode
+            return self.modes.kv_cached
+        return self.modes.vllm_sleep
+
+    @property
+    def effective_kvcached_mode(self) -> KVCachedMode:
+        return "required" if self.serving_mode is ServingMode.KV_CACHED else "none"
 
     @property
     def ram_weight_cache_enabled(self) -> bool:
-        if self.serving_mode is ServingMode.QUEUE:
-            return False
-        if self.serving_mode is ServingMode.VLLM_SLEEP:
-            return True
-        return self.prism_weight_cache_mode == "ram"
+        return self.serving_mode is not ServingMode.QUEUE
 
     @property
     def queue_mode_enabled(self) -> bool:
@@ -138,12 +120,6 @@ class Settings(BaseSettings):
     def validate_settings(self) -> Settings:
         if self.worker_port_start > self.worker_port_end:
             raise ValueError("worker_port_start must not exceed worker_port_end")
-        preload = [name.strip() for name in self.prism_preload_models]
-        if any(not name for name in preload):
-            raise ValueError("prism_preload_models cannot contain blank nicknames")
-        if "*" in preload and len(preload) != 1:
-            raise ValueError("'*' must be the only prism_preload_models entry")
-        self.prism_preload_models = preload
         return self
 
     def ensure_directories(self) -> None:

@@ -61,7 +61,7 @@ def create_app(
     settings: Settings | None = None,
     inventory_provider: InventoryProvider = discover_inventory,
 ) -> FastAPI:
-    resolved_settings = settings or Settings()
+    resolved_settings = settings or Settings(**{})
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -238,6 +238,3 @@ def create_app(
     app.include_router(staff_router)
     app.include_router(admin_router)
     return app
-
-
-app = create_app()

@@ -1,3 +1,5 @@
+> **Historical beta reference.** These instructions are retired. See the [release documentation](docs/README.md).
+
 # Prism host-RAM budget and swap follow-up
 
 ## Purpose

@@ -11,6 +11,7 @@ import pytest
 
 from llm_rio import registration
 from llm_rio.domain import GpuDevice, MachineInventory, RuntimeState, ServiceMode
+from llm_rio.ports import PortAllocator
 from llm_rio.registration import RegistrationManager
 from llm_rio.runtime import ResidencyScheduler
 from llm_rio.validation import (
@@ -142,6 +143,9 @@ def validation_scheduler(*workers: Any) -> tuple[ResidencyScheduler, ValidationS
     scheduler._maintenance_requested = False
     scheduler._closed = False
     scheduler.kvcached = SimpleNamespace(enabled=True)
+    scheduler.mode = SimpleNamespace(
+        capabilities=SimpleNamespace(validation_requires_maintenance=False, sleep=True)
+    )
     scheduler._event = asyncio.Event()
     return scheduler, supervisor
 
@@ -235,6 +239,7 @@ async def test_vllm_validation_starts_disjoint_gpu_probes_concurrently(
 ) -> None:
     gpu_sets = (("GPU-0",), ("GPU-1",))
     scheduler = ConcurrentProbeScheduler()
+    scheduler.supervisor = SimpleNamespace(ports=PortAllocator(18000, 18999))
     validator = ProfileValidator(
         cast(Any, SimpleNamespace()),
         cast(Any, SimpleNamespace()),
@@ -277,12 +282,10 @@ async def test_validation_port_reservations_are_distinct(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     validator = ProfileValidator.__new__(ProfileValidator)
-    validator.settings = cast(Any, SimpleNamespace(worker_port_end=19_000))
-    validator._validation_ports = set()
-    validator._validation_port_lock = asyncio.Lock()
+    validator.ports = PortAllocator(19001, 19128)
     monkeypatch.setattr(
-        ProfileValidator,
-        "_local_port_available",
+        PortAllocator,
+        "available",
         staticmethod(lambda _port: True),
     )
 
@@ -294,7 +297,7 @@ async def test_validation_port_reservations_are_distinct(
     assert (first, second) == (19_001, 19_002)
     await validator._release_validation_port(first)
     await validator._release_validation_port(second)
-    assert validator._validation_ports == set()
+    assert validator.ports.snapshot() == {}
 
 
 class RegistrationDatabaseStub:
@@ -327,6 +330,7 @@ def registration_manager(validator: RegistrationValidatorStub) -> RegistrationMa
     manager.settings = cast(
         Any,
         SimpleNamespace(
+            effective_kvcached_mode="none",
             reserved_vram_mib=2048,
             engines=SimpleNamespace(
                 gpu_memory_utilization=None,

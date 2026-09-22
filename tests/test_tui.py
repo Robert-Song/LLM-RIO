@@ -8,7 +8,9 @@ import pytest
 from textual.widgets import Button, Checkbox, ContentSwitcher, DataTable, Input, Select
 from typer.testing import CliRunner
 
+from llm_rio import admin_client as client_api
 from llm_rio import cli as cli_api
+from llm_rio import connection
 from llm_rio import tui as tui_module
 from llm_rio.config import ServingMode
 from llm_rio.tui import RioTui, ServiceLaunch
@@ -199,7 +201,8 @@ def management_backend(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[dict[s
             return {"model": record, "profiles": [], "shared_artifact": True}
         if (method, path) == ("GET", "/staff/model-jobs/job-1"):
             return {
-                "id": "job-1", "state": "COMPLETED",
+                "id": "job-1",
+                "state": "COMPLETED",
                 "validation_overrides": {"max_num_seqs": 8},
             }
         if (method, path) == ("POST", "/staff/model-jobs/job-1/retry"):
@@ -223,11 +226,11 @@ def management_backend(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[dict[s
             return {"nickname": record["nickname"], "api_key": record["api_key"]}
         raise AssertionError((method, path, json_body))
 
-    monkeypatch.setattr(cli_api, "_key_records", lambda: records["keys"])
-    monkeypatch.setattr(cli_api, "_model_records", lambda: records["models"])
-    monkeypatch.setattr(cli_api, "_request", request)
-    monkeypatch.setattr(cli_api, "_base_url", lambda: "http://127.0.0.1:8000")
-    monkeypatch.setattr(cli_api, "_api_key", lambda: "rio_admin")
+    monkeypatch.setattr(client_api, "key_records", lambda: records["keys"])
+    monkeypatch.setattr(client_api, "model_records", lambda: records["models"])
+    monkeypatch.setattr(client_api, "request", request)
+    monkeypatch.setattr(connection, "base_url", lambda: "http://127.0.0.1:8000")
+    monkeypatch.setattr(connection, "api_key", lambda: "rio_admin")
     return records
 
 
@@ -576,8 +579,8 @@ def test_cli_clone_model_profile_posts_configured_defaults(
 ) -> None:
     calls: list[tuple[str, str, dict[str, Any] | None]] = []
     monkeypatch.setattr(
-        cli_api,
-        "_model_record",
+        client_api,
+        "model_record",
         lambda nickname: {"id": "source-model", "nickname": nickname},
     )
 
@@ -598,13 +601,13 @@ def test_cli_clone_model_profile_posts_configured_defaults(
             "shared_artifact": True,
         }
 
-    monkeypatch.setattr(cli_api, "_request", request)
+    monkeypatch.setattr(client_api, "request", request)
 
     result = CliRunner().invoke(
         cli_api.app,
         [
             "models",
-            "profile-clone",
+            "clone-profile",
             "qwen",
             "qwen-ext",
             "--reasoning-effort",
@@ -663,6 +666,7 @@ def test_tui_can_handoff_to_serve(
 ) -> None:
     config = tmp_path / "alternate.toml"
     config.write_text('serving_mode = "queue"\n')
+    monkeypatch.delenv("LLMRIO_SERVING_MODE")
     served: list[Any] = []
     monkeypatch.setattr(tui_module, "run_tui", lambda: ServiceLaunch(config, mode))
     monkeypatch.setattr(cli_api, "create_app", lambda settings: settings)
@@ -683,7 +687,9 @@ async def test_start_service_form_returns_selected_mode(
     app = RioTui()
     async with app.run_test(size=(130, 45)) as pilot:
         await pilot.pause()
-        await pilot.click("#dashboard-start-service")
+        await pilot.click("#nav-system")
+        await pilot.pause()
+        await pilot.click("#system-start-service")
         await pilot.pause()
         app.screen.query_one("#field-config", Input).value = "config.barra.toml"
         selector = app.screen.query_one("#field-mode", Select)
@@ -717,105 +723,6 @@ async def test_dashboard_refresh_preserves_table_scroll(
 
 
 @pytest.mark.asyncio
-async def test_tui_exposes_manual_backend_verification_actions(
-    management_backend: dict[str, list[dict[str, Any]]],
-) -> None:
-    app = RioTui()
-
-    async with app.run_test(size=(130, 45)) as pilot:
-        await pilot.pause()
-        await asyncio.sleep(0.05)
-        await pilot.click("#nav-models")
-        await pilot.pause()
-        await pilot.click("#models-profiles")
-        await pilot.pause()
-
-        assert app.query_one("#profiles-verify-kvcached", Button).label == "Verify kvcached"
-        assert (
-            app.query_one("#profiles-toggle-normal-verification", Button).label
-            == "Invalidate model"
-        )
-        assert (
-            app.query_one("#profiles-toggle-kvcached-verification", Button).label
-            == "Validate kvcached"
-        )
-
-        await pilot.click("#profiles-verify-kvcached")
-        await pilot.pause()
-        await pilot.click("#confirm-submit")
-        await asyncio.sleep(0.05)
-        await pilot.pause()
-
-        await pilot.click("#profiles-toggle-normal-verification")
-        await pilot.pause()
-        await pilot.click("#confirm-submit")
-        await asyncio.sleep(0.05)
-        await pilot.pause()
-
-        await pilot.click("#profiles-toggle-kvcached-verification")
-        await pilot.pause()
-        await pilot.click("#confirm-submit")
-        await asyncio.sleep(0.05)
-        await pilot.pause()
-
-    assert management_backend["verification_requests"] == [
-        {"path": "/admin/models/model-1/verify-kvcached"}
-    ]
-    assert management_backend["verification_override_requests"] == [
-        {
-            "path": "/admin/models/model-1/profiles/profile-1/verification/native/invalidate",
-            "backend": "native",
-            "action": "invalidate",
-        },
-        {
-            "path": "/admin/models/model-1/profiles/profile-1/verification/kvcached/validate",
-            "backend": "kvcached",
-            "action": "validate",
-        },
-    ]
-    assert management_backend["profiles"][0]["normal_verified"] is False
-    assert management_backend["profiles"][0]["kvcached_verified"] is True
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("bulk", [False, True])
-async def test_tui_trust_recovers_without_selecting_a_profile(
-    management_backend: dict[str, list[dict[str, Any]]],
-    monkeypatch: pytest.MonkeyPatch,
-    bulk: bool,
-) -> None:
-    original_request = cli_api._request
-    requests = []
-
-    def request(method, path, *, json_body=None):
-        if method == "POST" and path.endswith(("/trust-available", "/trust-verification")):
-            requests.append((path, json_body))
-            return {"profiles_updated": 1, "data": [{"model_id": "model-1"}], "skipped": []}
-        return original_request(method, path, json_body=json_body)
-
-    monkeypatch.setattr(cli_api, "_request", request)
-    app = RioTui()
-    async with app.run_test(size=(130, 60)) as pilot:
-        await pilot.pause()
-        await pilot.click("#nav-models")
-        await pilot.pause()
-        button = "#models-trust-available" if bulk else "#models-trust"
-        await pilot.click(button)
-        await pilot.pause()
-        assert requests == []
-        await pilot.click("#confirm-cancel")
-        await pilot.pause()
-        assert requests == []
-        await pilot.click(button)
-        await pilot.pause()
-        await pilot.click("#confirm-submit")
-        await pilot.pause()
-        await app.workers.wait_for_complete()
-    path = "/admin/models/trust-available" if bulk else "/admin/models/model-1/trust-verification"
-    assert requests == [(path, {})]
-
-
-@pytest.mark.asyncio
 async def test_tui_revalidation_form_submits_parameters_and_keeps_invalid_json(
     management_backend,
 ) -> None:
@@ -842,11 +749,17 @@ async def test_tui_revalidation_form_submits_parameters_and_keeps_invalid_json(
         app.screen.query_one("#form-submit", Button).focus()
         await pilot.press("enter")
         await pilot.pause()
-    assert management_backend["revalidation_requests"] == [{"validation_overrides": {
-        "max_model_len": 131072, "gpu_memory_utilization": 0.85,
-        "tensor_parallel_size": 2, "max_num_seqs": 8,
-        "launch_args": {"kv_cache_dtype": "fp8", "enforce_eager": True},
-    }}]
+    assert management_backend["revalidation_requests"] == [
+        {
+            "validation_overrides": {
+                "max_model_len": 131072,
+                "gpu_memory_utilization": 0.85,
+                "tensor_parallel_size": 2,
+                "max_num_seqs": 8,
+                "launch_args": {"kv_cache_dtype": "fp8", "enforce_eager": True},
+            }
+        }
+    ]
 
 
 @pytest.mark.asyncio

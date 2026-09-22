@@ -15,21 +15,22 @@ from typing import Any
 import httpx
 
 from llm_rio.config import Settings
-from llm_rio.domain import Engine, PlacementProfile, RuntimeState, WorkerPlacement
-from llm_rio.engine_args import extra_engine_arguments
+from llm_rio.domain import PlacementProfile, RuntimeState, WorkerPlacement
+from llm_rio.engine_runtime import detect_kvcached
+from llm_rio.engines.identity import launch_binding
+from llm_rio.engines.launch import adapter
 from llm_rio.gpu_memory import read_gpu_memory, required_free_vram
 from llm_rio.host_memory import (
     HostMemorySample,
-    gib_to_mib,
-    sample_host_memory,
-    sample_process_group_memory,
 )
-from llm_rio.inventory import gpu_environment
-from llm_rio.prism import add_kvcached_vllm_flags, detect_kvcached
+from llm_rio.host_memory import sample_host_memory as sample_host_memory
+from llm_rio.host_memory import sample_process_group_memory as sample_process_group_memory
+from llm_rio.modes.lifecycle import WorkerLifecycle
+from llm_rio.ports import PortAllocator
 from llm_rio.process_cleanup import terminate_engine
 from llm_rio.profiles import profile_verified_for_mode
 from llm_rio.storage import Database, _now
-from llm_rio.tool_support import detect_vllm_parser_configuration
+from llm_rio.worker_types import WorkerLaunchError as WorkerLaunchError
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +48,6 @@ _GPU_RESIDENT_STATES = frozenset(
 )
 
 
-class WorkerLaunchError(RuntimeError):
-    pass
-
-
 def worker_log_path(*, log_dir: Path, served_model_name: str, worker_id: str) -> Path:
     """Build a sortable log name that identifies the worker's model."""
     safe_model_name = re.sub(r"[^a-zA-Z0-9._-]+", "-", served_model_name)
@@ -64,6 +61,7 @@ class WorkerSupervisor:
         self.settings = settings
         self.database = database
         self.workers: dict[str, WorkerPlacement] = {}
+        self.ports = PortAllocator(settings.worker_port_start, settings.worker_port_end)
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._log_handles: dict[str, Any] = {}
         self._log_paths: dict[str, Path] = {}
@@ -75,6 +73,23 @@ class WorkerSupervisor:
         self._event_callback: WorkerEventCallback | None = None
         self.internal_api_key = f"rio_internal_{secrets.token_urlsafe(32)}"
         self.kvcached = detect_kvcached(settings.effective_kvcached_mode)
+
+    @property
+    def lifecycle(self) -> WorkerLifecycle:
+        if not hasattr(self, "_lifecycle"):
+            if self.settings.queue_mode_enabled:
+                from llm_rio.modes.queue.lifecycle import QueueLifecycle
+
+                self._lifecycle: WorkerLifecycle = QueueLifecycle(self)
+            elif self.settings.effective_kvcached_mode == "required":
+                from llm_rio.modes.kv_cached.lifecycle import KVCachedLifecycle
+
+                self._lifecycle = KVCachedLifecycle(self)
+            else:
+                from llm_rio.modes.vllm_sleep.lifecycle import SleepLifecycle
+
+                self._lifecycle = SleepLifecycle(self)
+        return self._lifecycle
 
     def set_event_callback(self, callback: WorkerEventCallback) -> None:
         self._event_callback = callback
@@ -88,129 +103,21 @@ class WorkerSupervisor:
         return self.kvcached.environment().get("LLM_RIO_KVCACHED_VLLM026_SHIM") == "1"
 
     async def _refresh_cached_worker_samples(self) -> None:
-        async with self._lock:
-            targets = [
-                (worker.id, worker.process_pid)
-                for worker in self.workers.values()
-                if worker.host_weights_cached and worker.process_pid is not None
-            ]
-        samples = await asyncio.gather(
-            *(
-                asyncio.to_thread(sample_process_group_memory, process_pid)
-                for _, process_pid in targets
-            )
-        )
-        async with self._lock:
-            for (worker_id, process_pid), sample in zip(targets, samples, strict=True):
-                worker = self.workers.get(worker_id)
-                if worker is None or worker.process_pid != process_pid:
-                    continue
-                worker.process_rss_mib = sample.rss_mib
-                worker.process_pss_mib = sample.pss_mib
-                worker.process_swap_mib = sample.swap_pss_mib or sample.swap_mib
-                worker.host_cache_accounted_mib = sample.accounted_mib
-                worker.host_cache_accounting_source = sample.source
+        return await self.lifecycle._refresh_cached_worker_samples()
 
     def _host_cache_limit_mib(self, host: HostMemorySample) -> float:
-        configured = gib_to_mib(getattr(self.settings, "prism_host_cache_max_gib", None))
-        if configured is not None:
-            return configured
-        reserve = (
-            gib_to_mib(getattr(self.settings, "prism_host_cache_min_available_gib", 4.0)) or 0.0
-        )
-        return max(0.0, host.effective_total_mib - reserve)
+        return self.lifecycle._host_cache_limit_mib(host)
 
     def _host_cache_pressure_reason(
-        self,
-        host: HostMemorySample,
-        cache_accounted_mib: float,
-        cache_swap_mib: float = 0.0,
+        self, host: HostMemorySample, cache_accounted_mib: float, cache_swap_mib: float = 0.0
     ) -> str | None:
-        swap_limit = gib_to_mib(getattr(self.settings, "prism_swap_max_used_gib", 0.0)) or 0.0
-        if cache_swap_mib > swap_limit:
-            return "swap_pressure"
-        minimum_available = (
-            gib_to_mib(getattr(self.settings, "prism_host_cache_min_available_gib", 4.0)) or 0.0
-        )
-        if host.available_mib < minimum_available:
-            return "ram_headroom"
-        if cache_accounted_mib > self._host_cache_limit_mib(host):
-            return "ram_budget"
-        return None
+        return self.lifecycle._host_cache_pressure_reason(host, cache_accounted_mib, cache_swap_mib)
 
     async def host_cache_status(self) -> dict[str, float | str | None]:
-        await self._refresh_cached_worker_samples()
-        host = await asyncio.to_thread(sample_host_memory)
-        async with self._lock:
-            cached_workers = [
-                worker for worker in self.workers.values() if worker.host_weights_cached
-            ]
-            cache_accounted_mib = sum(worker.host_cache_accounted_mib for worker in cached_workers)
-            cache_swap_mib = sum(worker.process_swap_mib for worker in cached_workers)
-        return {
-            "source": host.source,
-            "effective_total_mib": host.effective_total_mib,
-            "available_mib": host.available_mib,
-            "swap_used_mib": host.swap_used_mib,
-            "swap_total_mib": host.swap_total_mib,
-            "cache_accounted_mib": cache_accounted_mib,
-            "cache_swap_mib": cache_swap_mib,
-            "cache_limit_mib": self._host_cache_limit_mib(host),
-            "pressure_reason": self._host_cache_pressure_reason(
-                host, cache_accounted_mib, cache_swap_mib
-            ),
-        }
+        return await self.lifecycle.host_cache_status()
 
     async def enforce_host_cache_budget(self, *, incoming_worker_id: str | None = None) -> bool:
-        """Evict least-recently-demanded sleeping workers until host pressure clears."""
-        if not self.ram_weight_cache_enabled:
-            return True
-        host_cache_lock = getattr(self, "_host_cache_lock", None)
-        if host_cache_lock is None:
-            host_cache_lock = self._host_cache_lock = asyncio.Lock()
-        async with host_cache_lock:
-            while True:
-                status = await self.host_cache_status()
-                reason = status["pressure_reason"]
-                if reason is None:
-                    return True
-                async with self._lock:
-                    candidates = sorted(
-                        (
-                            worker
-                            for worker in self.workers.values()
-                            if worker.id != incoming_worker_id
-                            and worker.state is RuntimeState.SLEEPING
-                            and worker.host_weights_cached
-                            and not worker.admitted_request_ids
-                        ),
-                        key=lambda worker: worker.last_demand_at,
-                    )
-                    if not candidates:
-                        incoming = (
-                            self.workers.get(incoming_worker_id)
-                            if incoming_worker_id is not None
-                            else None
-                        )
-                        if incoming is not None:
-                            incoming.last_cache_eviction_reason = str(reason)
-                        return False
-                    victim = candidates[0]
-                    victim.last_cache_eviction_reason = str(reason)
-                    victim.state = RuntimeState.STOPPING
-                await self.database.record_event(
-                    "WORKER_CACHE_EVICTED",
-                    victim.id,
-                    {
-                        "reason": reason,
-                        "cache_accounted_mib": status["cache_accounted_mib"],
-                        "cache_limit_mib": status["cache_limit_mib"],
-                        "host_available_mib": status["available_mib"],
-                        "host_swap_used_mib": status["swap_used_mib"],
-                        "cache_swap_mib": status["cache_swap_mib"],
-                    },
-                )
-                await self._stop(victim.id, force=False)
+        return await self.lifecycle.enforce_host_cache_budget(incoming_worker_id=incoming_worker_id)
 
     async def ensure_gpu_capacity(
         self,
@@ -356,6 +263,8 @@ class WorkerSupervisor:
             raise WorkerLaunchError(
                 "placement profile is not verified for the configured vLLM memory backend"
             )
+        if profile.launch_binding != launch_binding(self.settings, profile, profile.engine):
+            raise WorkerLaunchError("Launch configuration changed; run Validate/Revalidate")
         async with self._lock:
             requested_gpus = set(gpu_uuids)
             overlapping_workers = [
@@ -370,7 +279,7 @@ class WorkerSupervisor:
             if overlap and not self._can_share_gpus(profile, gpu_uuids, overlapping_workers):
                 raise WorkerLaunchError(f"GPU UUIDs already owned: {sorted(overlap)}")
             worker_id = str(uuid.uuid4())
-            port = self._allocate_port()
+            port = self.ports.reserve(worker_id)
             worker = WorkerPlacement(
                 id=worker_id,
                 profile=profile,
@@ -379,9 +288,19 @@ class WorkerSupervisor:
             )
             self.workers[worker_id] = worker
             try:
-                command = self._command(worker, model_path, served_model_name)
-                environment = self._environment(worker)
+                spec = adapter(profile.engine).launch(
+                    settings=self.settings,
+                    shape=profile,
+                    artifact=Path(str(profile.launch_args.get("model", model_path))),
+                    nickname=served_model_name,
+                    gpu_uuids=gpu_uuids,
+                    port=port,
+                    api_key=self.internal_api_key,
+                )
+                command = list(spec.command)
+                environment = spec.environment
             except BaseException:
+                self.ports.release(port, worker_id)
                 self.workers.pop(worker_id, None)
                 raise
             log_path: Path | None = None
@@ -433,149 +352,46 @@ class WorkerSupervisor:
             asyncio.create_task(self._monitor(worker), name=f"worker-monitor-{worker_id}")
             return worker
 
-    def _allocate_port(self) -> int:
-        used = {
-            worker.port for worker in self.workers.values() if worker.state is not RuntimeState.COLD
-        }
-        for port in range(self.settings.worker_port_start, self.settings.worker_port_end + 1):
-            if port not in used:
-                return port
-        raise WorkerLaunchError("private worker port range is exhausted")
-
     def _can_share_gpus(
         self,
         profile: PlacementProfile,
         gpu_uuids: tuple[str, ...],
         overlapping_workers: list[WorkerPlacement],
     ) -> bool:
-        if self.settings.queue_mode_enabled:
-            return False
-        kvcached_required = self.kvcached.enabled
-        if profile.engine is not Engine.VLLM or not profile_verified_for_mode(
-            profile,
-            kvcached_required=kvcached_required,
-            ram_weight_cache_required=self.ram_weight_cache_enabled,
-            queue_mode_required=self.settings.queue_mode_enabled,
-        ):
-            return False
-        if any(
-            worker.profile.engine is not Engine.VLLM
-            or not profile_verified_for_mode(
-                worker.profile,
-                kvcached_required=kvcached_required,
-                ram_weight_cache_required=self.ram_weight_cache_enabled,
-                queue_mode_required=self.settings.queue_mode_enabled,
-            )
-            for worker in overlapping_workers
-        ):
-            return False
-        for gpu_uuid in gpu_uuids:
-            colocated = [worker for worker in overlapping_workers if gpu_uuid in worker.gpu_uuids]
-            active = sum(worker.state in _GPU_RESIDENT_STATES for worker in colocated)
-            max_active = self.settings.prism_max_workers_per_gpu if kvcached_required else 1
-            if active >= max_active:
-                return False
-        return True
+        return self.lifecycle._can_share_gpus(profile, gpu_uuids, overlapping_workers)
 
     def _environment(self, worker: WorkerPlacement) -> dict[str, str]:
-        executable = (
-            self.settings.engines.vllm_executable
-            if worker.profile.engine is Engine.VLLM
-            else self.settings.engines.llama_cpp_executable
-        )
-        environment = gpu_environment(
-            worker.gpu_uuids,
-            self.settings.engines.environment,
-            executable=executable,
-        )
-        if self.settings.queue_mode_enabled:
-            environment.update(
-                ENABLE_KVCACHED="false", KVCACHED_AUTOPATCH="0", VLLM_SERVER_DEV_MODE="0"
+        return (
+            adapter(worker.profile.engine)
+            .launch(
+                settings=self.settings,
+                shape=worker.profile,
+                artifact=Path(str(worker.profile.launch_args.get("model", "."))),
+                nickname=worker.model_id,
+                gpu_uuids=worker.gpu_uuids,
+                port=worker.port,
+                api_key=self.internal_api_key,
             )
-            environment.pop("LLM_RIO_KVCACHED_VLLM026_SHIM", None)
-        if worker.profile.engine is Engine.VLLM:
-            environment["VLLM_API_KEY"] = self.internal_api_key
-            if self.kvcached.enabled:
-                environment.update(
-                    self.kvcached.environment(pythonpath=environment.get("PYTHONPATH"))
-                )
-            if self.ram_weight_cache_enabled:
-                # vLLM gates its authenticated sleep/wake routes behind this
-                # opt-in. Workers listen only on loopback private ports.
-                environment["VLLM_SERVER_DEV_MODE"] = "1"
-        return environment
+            .environment
+        )
 
     def _command(
         self, worker: WorkerPlacement, model_path: str, served_model_name: str
     ) -> list[str]:
-        profile = worker.profile
-        if profile.engine is Engine.VLLM:
-            command = [
-                self.settings.engines.vllm_executable,
-                "serve",
-                model_path,
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(worker.port),
-                "--api-key",
-                self.internal_api_key,
-                "--served-model-name",
-                served_model_name,
-                "--tensor-parallel-size",
-                str(profile.tensor_parallel_size),
-                "--pipeline-parallel-size",
-                str(profile.pipeline_parallel_size),
-                "--dtype",
-                profile.dtype,
-                "--max-model-len",
-                str(profile.max_model_len),
-                "--gpu-memory-utilization",
-                str(profile.gpu_memory_utilization),
-            ]
-            if profile.max_num_seqs is not None:
-                command.extend(["--max-num-seqs", str(profile.max_num_seqs)])
-            if profile.max_num_batched_tokens is not None:
-                command.extend(["--max-num-batched-tokens", str(profile.max_num_batched_tokens)])
-            if profile.quantization:
-                command.extend(["--quantization", profile.quantization])
-            parsers = detect_vllm_parser_configuration(model_path)
-            if parsers.tool_parser is not None:
-                command.extend(
-                    ["--enable-auto-tool-choice", "--tool-call-parser", parsers.tool_parser]
-                )
-            if parsers.reasoning_parser is not None:
-                command.extend(["--reasoning-parser", parsers.reasoning_parser])
-            if self.ram_weight_cache_enabled and not profile.launch_args.get("enable_sleep_mode"):
-                command.append("--enable-sleep-mode")
-        elif profile.engine is Engine.LLAMA_CPP and self.settings.engines.enable_llama_cpp:
-            command = [
-                self.settings.engines.llama_cpp_executable,
-                "--model",
-                model_path,
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(worker.port),
-                "--ctx-size",
-                str(profile.max_model_len),
-                "--api-key",
-                self.internal_api_key,
-            ]
-            if profile.max_num_seqs is not None:
-                command.extend(["--parallel", str(profile.max_num_seqs)])
-        else:
-            raise WorkerLaunchError(f"engine is disabled or unsupported: {profile.engine}")
-        launch_args = {
-            key: value for key, value in profile.launch_args.items()
-            if not (self.settings.queue_mode_enabled and key == "enable_sleep_mode")
-        }
-        command.extend(
-            extra_engine_arguments(launch_args, explicit_false=profile.engine is Engine.VLLM)
+        artifact = Path(str(worker.profile.launch_args.get("model", model_path)))
+        return list(
+            adapter(worker.profile.engine)
+            .launch(
+                settings=self.settings,
+                shape=worker.profile,
+                artifact=artifact,
+                nickname=served_model_name,
+                gpu_uuids=worker.gpu_uuids,
+                port=worker.port,
+                api_key=self.internal_api_key,
+            )
+            .command
         )
-        if profile.engine is Engine.VLLM and self.kvcached.enabled:
-            add_kvcached_vllm_flags(command, self.kvcached)
-        return command
 
     @staticmethod
     def _redact_command(command: list[str]) -> list[str]:
@@ -691,163 +507,18 @@ class WorkerSupervisor:
         await self._emit(worker_id, "released")
 
     async def sleep(self, worker_id: str) -> None:
-        """Drain a routable worker and retain its weights in host RAM."""
-        if not self.ram_weight_cache_enabled:
-            await self.drain(worker_id)
-            return
-        offload_now = False
-        async with self._lock:
-            worker = self.workers.get(worker_id)
-            if worker is None or worker.state in {
-                RuntimeState.COLD,
-                RuntimeState.OFFLOADING,
-                RuntimeState.SLEEPING,
-                RuntimeState.WAKING,
-                RuntimeState.STOPPING,
-            }:
-                return
-            if worker.state is RuntimeState.LOADING:
-                return
-            self._drain_to_sleep.add(worker_id)
-            if worker.admitted_request_ids:
-                worker.state = RuntimeState.DRAINING
-                worker.drain_started_at = datetime.now(UTC)
-            else:
-                offload_now = True
-        if offload_now:
-            await self._offload(worker_id)
-            return
-        await self._persist(worker)
-        await self.database.record_event(
-            "WORKER_DRAINING_TO_RAM",
-            worker_id,
-            {"active_requests": len(worker.admitted_request_ids)},
-        )
+        return await self.lifecycle.sleep(worker_id)
 
     async def _offload(self, worker_id: str) -> None:
-        transition_lock = self._transition_locks.setdefault(worker_id, asyncio.Lock())
-        async with transition_lock:
-            async with self._lock:
-                worker = self.workers.get(worker_id)
-                if worker is None or worker.state in {
-                    RuntimeState.COLD,
-                    RuntimeState.SLEEPING,
-                    RuntimeState.STOPPING,
-                }:
-                    return
-                if worker.admitted_request_ids:
-                    self._drain_to_sleep.add(worker_id)
-                    worker.state = RuntimeState.DRAINING
-                    worker.drain_started_at = datetime.now(UTC)
-                    return
-                worker.state = RuntimeState.OFFLOADING
-                worker.drain_started_at = None
-                self._drain_to_sleep.discard(worker_id)
-            await self._persist(worker)
-            await self.database.record_event("WORKER_OFFLOADING", worker_id)
-            started = asyncio.get_running_loop().time()
-            try:
-                await self._post_engine(worker, "/sleep", params={"level": "1"})
-            except Exception as exc:
-                await self._fail(worker, f"weight_offload_failed:{type(exc).__name__}")
-                return
-            elapsed = asyncio.get_running_loop().time() - started
-            async with self._lock:
-                if worker.state is not RuntimeState.OFFLOADING:
-                    return
-                worker.state = RuntimeState.SLEEPING
-                worker.sleeping_at = datetime.now(UTC)
-                worker.last_offload_seconds = elapsed
-                worker.host_weights_cached = True
-            retained = await self.enforce_host_cache_budget(incoming_worker_id=worker_id)
-            if not retained:
-                reason = worker.last_cache_eviction_reason or "ram_budget"
-                await self.database.record_event(
-                    "WORKER_CACHE_REJECTED",
-                    worker_id,
-                    {
-                        "reason": reason,
-                        "host_cache_accounted_mib": worker.host_cache_accounted_mib,
-                        "process_swap_mib": worker.process_swap_mib,
-                    },
-                )
-                await self._stop(worker_id, force=False)
-                return
-            async with self._lock:
-                if worker.state is not RuntimeState.SLEEPING:
-                    return
-            await self._persist(worker)
-            await self.database.record_event(
-                "WORKER_WEIGHTS_CACHED",
-                worker_id,
-                {
-                    "offload_seconds": elapsed,
-                    "storage": "host_ram",
-                    "host_cache_accounted_mib": worker.host_cache_accounted_mib,
-                    "accounting_source": worker.host_cache_accounting_source,
-                },
-            )
-            await self._emit(worker_id, "sleeping")
+        return await self.lifecycle._offload(worker_id)
 
     async def wake(self, worker_id: str) -> None:
-        """Restore a SLEEPING worker's retained weights from host RAM."""
-        if not self.ram_weight_cache_enabled:
-            raise WorkerLaunchError("host-RAM weight caching is disabled")
-        transition_lock = self._transition_locks.setdefault(worker_id, asyncio.Lock())
-        async with transition_lock:
-            async with self._lock:
-                worker = self.workers.get(worker_id)
-                if worker is None or worker.state is not RuntimeState.SLEEPING:
-                    return
-                worker.state = RuntimeState.WAKING
-            await self._persist(worker)
-            await self.database.record_event(
-                "WORKER_WAKING",
-                worker_id,
-                {"storage": "host_ram"},
-            )
-            started = asyncio.get_running_loop().time()
-            try:
-                await self._post_engine(worker, "/wake_up")
-            except Exception as exc:
-                await self._fail(worker, f"weight_restore_failed:{type(exc).__name__}")
-                return
-            elapsed = asyncio.get_running_loop().time() - started
-            async with self._lock:
-                if worker.state is not RuntimeState.WAKING:
-                    return
-                now = datetime.now(UTC)
-                worker.state = RuntimeState.READY
-                worker.ready_at = now
-                worker.last_demand_at = now
-                worker.sleeping_at = None
-                worker.last_activation_seconds = elapsed
-                if not self.persistent_host_weight_cache_enabled:
-                    worker.host_weights_cached = False
-            await self._persist(worker)
-            await self.database.record_event(
-                "WORKER_WEIGHTS_RESTORED",
-                worker_id,
-                {"activation_seconds": elapsed, "storage": "host_ram"},
-            )
-            await self._emit(worker_id, "ready")
+        return await self.lifecycle.wake(worker_id)
 
     async def _post_engine(
-        self,
-        worker: WorkerPlacement,
-        path: str,
-        *,
-        params: dict[str, str] | None = None,
+        self, worker: WorkerPlacement, path: str, *, params: dict[str, str] | None = None
     ) -> None:
-        headers = {"Authorization": f"Bearer {self.internal_api_key}"}
-        timeout = self.settings.prism_transition_timeout_seconds
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                f"http://127.0.0.1:{worker.port}{path}",
-                headers=headers,
-                params=params,
-            )
-            response.raise_for_status()
+        return await self.lifecycle._post_engine(worker, path, params=params)
 
     async def drain(self, worker_id: str) -> None:
         stop_now = False
@@ -938,6 +609,9 @@ class WorkerSupervisor:
                     logger.error("could not stop worker %s during shutdown: %r", worker_id, result)
 
     async def _cleanup(self, worker_id: str, *, retain_log: bool = False) -> None:
+        worker = self.workers.get(worker_id)
+        if worker is not None and self.ports.snapshot().get(worker.port) == worker_id:
+            self.ports.release(worker.port, worker_id)
         self._drain_to_sleep.discard(worker_id)
         self._processes.pop(worker_id, None)
         handle = self._log_handles.pop(worker_id, None)

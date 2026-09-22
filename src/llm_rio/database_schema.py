@@ -1,4 +1,4 @@
-"""SQLite schema; changes must remain compatible with existing host databases."""
+"""Release schema version 1. Beta databases are never migrated in place."""
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS quota_accounts (
@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS model_catalog (
     id TEXT PRIMARY KEY,
     nickname TEXT NOT NULL UNIQUE,
     huggingface_repo TEXT NOT NULL,
+    source_type TEXT NOT NULL DEFAULT 'huggingface',
+    local_path TEXT,
+    engine TEXT NOT NULL DEFAULT 'vllm',
     requested_revision TEXT,
     resolved_revision TEXT,
     state TEXT NOT NULL,
@@ -63,21 +66,6 @@ CREATE TABLE IF NOT EXISTS model_jobs (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS model_verification_jobs (
-    id TEXT PRIMARY KEY,
-    model_id TEXT NOT NULL REFERENCES model_catalog(id),
-    backend TEXT NOT NULL CHECK (backend IN ('kvcached')),
-    state TEXT NOT NULL CHECK (state IN ('QUEUED', 'RUNNING', 'COMPLETED', 'FAILED')),
-    stage TEXT NOT NULL,
-    progress_json TEXT NOT NULL DEFAULT '{}',
-    failure_json TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_model_verification_jobs_model
-ON model_verification_jobs(model_id, created_at DESC);
-
-
 CREATE TABLE IF NOT EXISTS model_profiles (
     id TEXT PRIMARY KEY,
     model_id TEXT NOT NULL REFERENCES model_catalog(id),

@@ -16,8 +16,8 @@ from typing import Any, BinaryIO
 
 import httpx
 
+from llm_rio.engine_runtime import add_kvcached_vllm_flags, detect_kvcached
 from llm_rio.inventory import gpu_environment
-from llm_rio.prism import add_kvcached_vllm_flags, detect_kvcached
 
 
 class CompatibilityFailure(RuntimeError):
@@ -292,10 +292,10 @@ async def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         )
     runtime = detect_kvcached("required")
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    diagnostics_dir = args.diagnostics_dir / f"prism-compat-{timestamp}"
+    diagnostics_dir = args.diagnostics_dir / f"kv-cached-compat-{timestamp}"
     diagnostics_dir.mkdir(parents=True, exist_ok=False)
     baseline = _gpu_snapshot(gpu_uuids)
-    api_key = f"rio_prism_compat_{secrets.token_urlsafe(24)}"
+    api_key = f"rio_kv_cached_compat_{secrets.token_urlsafe(24)}"
     handles: list[ServerHandle] = []
     report: dict[str, Any] = {
         "runtime": {
@@ -311,8 +311,8 @@ async def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         "diagnostics_dir": str(diagnostics_dir),
     }
     specs = (
-        ServerSpec("model-a", args.model_a, "prism-compat-a", args.port_a),
-        ServerSpec("model-b", args.model_b or args.model_a, "prism-compat-b", args.port_b),
+        ServerSpec("model-a", args.model_a, "kv-cached-compat-a", args.port_a),
+        ServerSpec("model-b", args.model_b or args.model_a, "kv-cached-compat-b", args.port_b),
     )
     try:
         first = await _launch(

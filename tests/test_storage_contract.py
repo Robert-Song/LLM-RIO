@@ -44,7 +44,7 @@ async def test_authentication_hash_verification_runs_off_event_loop(
         verifier_threads.append(threading.get_ident())
         return True
 
-    monkeypatch.setattr("llm_rio.storage.verify_api_key", verify)
+    monkeypatch.setattr("llm_rio.repositories.identity.verify_api_key", verify)
     database = AuthenticationDatabase(tmp_path / "unused.db")
 
     principal = await database.authenticate("rio_prefix", "presented-token")
@@ -56,7 +56,7 @@ async def test_authentication_hash_verification_runs_off_event_loop(
 
 
 @pytest.mark.asyncio
-async def test_existing_model_catalog_gains_profile_default_columns(tmp_path: Path) -> None:
+async def test_beta_database_is_rejected_without_modification(tmp_path: Path) -> None:
     database_path = tmp_path / "legacy.db"
     with sqlite3.connect(database_path) as connection:
         connection.execute(
@@ -79,13 +79,9 @@ async def test_existing_model_catalog_gains_profile_default_columns(tmp_path: Pa
             """
         )
 
+    original = database_path.read_bytes()
     database = Database(database_path)
-    await database.open()
-    try:
-        rows = await database.fetchall("PRAGMA table_info(model_catalog)")
-        columns = {str(row["name"]): row for row in rows}
-
-        assert columns["request_defaults_json"]["dflt_value"] == "'{}'"
-        assert "source_model_id" in columns
-    finally:
-        await database.close()
+    with pytest.raises(RuntimeError, match="Beta or unsupported database"):
+        await database.open()
+    assert database_path.read_bytes() == original
+    assert not database.key_vault_path.exists()

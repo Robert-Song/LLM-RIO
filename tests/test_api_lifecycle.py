@@ -6,15 +6,16 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from test_profile_admin_contract import inventory, make_profile
 
 import llm_rio.api.app as app_module
 from llm_rio.api.dependencies import current_principal
 from llm_rio.api.schemas import ProfileEditRequest
-from llm_rio.config import Settings
 from llm_rio.domain import Role
+from llm_rio.modes.factory import create_mode
 from llm_rio.profiles import StoredProfile
 from llm_rio.security import Principal
+from tests.release_fixtures import Settings
+from tests.test_profile_admin_contract import inventory, make_profile
 
 
 def settings(tmp_path: Path) -> Settings:
@@ -119,6 +120,7 @@ async def test_profile_edit_endpoint_supplies_managed_gpu_count(tmp_path: Path) 
     profile = make_profile("profile", "model", ("GPU-0",))
     app.state.settings = settings(tmp_path)
     app.state.inventory = inventory()
+    app.state.scheduler = SimpleNamespace(mode=create_mode(app.state.settings, app.state.inventory))
     app.state.database = SimpleNamespace(
         model_by_id=AsyncMock(return_value={"id": "model"}), record_event=AsyncMock()
     )
@@ -137,4 +139,4 @@ async def test_profile_edit_endpoint_supplies_managed_gpu_count(tmp_path: Path) 
     updated = app.state.profiles.update.call_args.args[0]
     assert updated.tensor_parallel_size == 2
     assert updated.eligible_gpu_sets == (("GPU-0", "GPU-1"),)
-    assert not updated.normal_verified
+    assert not updated.measurements_valid

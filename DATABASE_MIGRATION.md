@@ -1,3 +1,5 @@
+> **Historical beta reference.** These instructions are retired. See the [release documentation](docs/README.md).
+
 # Rebuild per-server databases while retaining credentials and models
 
 This procedure creates a **new database path for each server**, retaining the old

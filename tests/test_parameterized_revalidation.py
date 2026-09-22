@@ -6,22 +6,23 @@ from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError as SchemaError
-from test_profile_admin_contract import inventory
-from test_scheduler_contract import make_worker
-from test_validation_cleanup import RegistrationValidatorStub, registration_manager
-from test_verification_recovery import saved_models as saved_models
 
 from llm_rio.api.schemas import ModelValidationOverrides
-from llm_rio.config import Settings
+from llm_rio.ports import PortAllocator
 from llm_rio.profiles import (
     ProfileRepository,
     profile_key,
     profile_to_dict,
     profile_verified_for_mode,
 )
-from llm_rio.tui import _revalidation_overrides
+from llm_rio.ui.components import _revalidation_overrides
 from llm_rio.validation import CandidateShape, ProfileValidator, ValidationError
 from llm_rio.workers import WorkerSupervisor
+from tests.release_fixtures import Settings
+from tests.test_profile_admin_contract import inventory
+from tests.test_scheduler_contract import make_worker
+from tests.test_validation_cleanup import RegistrationValidatorStub, registration_manager
+from tests.test_verification_recovery import saved_models as saved_models
 
 
 @pytest.mark.parametrize(
@@ -130,10 +131,14 @@ async def test_probe_persists_parameters_reused_by_serving(
         serving_mode="queue",
         log_dir=tmp_path,
     )
-    validator = ProfileValidator(settings, inventory(), SimpleNamespace())
+    validator = ProfileValidator(
+        settings,
+        inventory(),
+        SimpleNamespace(supervisor=SimpleNamespace(ports=PortAllocator(18000, 18999))),
+    )
     probe = AsyncMock(return_value=SimpleNamespace(pid=1234))
     monkeypatch.setattr("llm_rio.validation.asyncio.create_subprocess_exec", probe)
-    monkeypatch.setattr("llm_rio.validation.gpu_environment", lambda *a, **kw: {})
+    monkeypatch.setattr("llm_rio.engines.launch.gpu_environment", lambda *a, **kw: {})
     monkeypatch.setattr(validator, "_used_vram", lambda gpus: (1000,) * len(gpus))
     monkeypatch.setattr(validator, "_wait_for_health", AsyncMock())
     monkeypatch.setattr(validator, "_generation_contract", AsyncMock(return_value=15.0))
@@ -199,12 +204,12 @@ async def test_retry_api_persists_tp_and_engine_arguments(
     from unittest.mock import Mock
 
     import httpx
-    from test_api_lifecycle import settings
 
     from llm_rio.api.app import create_app
     from llm_rio.api.dependencies import current_principal
     from llm_rio.domain import CatalogState, Role
     from llm_rio.security import Principal
+    from tests.test_api_lifecycle import settings
 
     _, job_id = await saved_models.create_model_job(
         nickname="revalidate",

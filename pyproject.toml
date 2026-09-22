@@ -28,7 +28,7 @@ dependencies = [
 
 [project.optional-dependencies]
 engine = ["vllm==0.26.0"]
-prism = [
+kvcached = [
   "kvcached @ git+https://github.com/ovg-project/kvcached.git@60cad949389af6bbf1d65c4eddf325113df5a9eb",
 ]
 dev = [

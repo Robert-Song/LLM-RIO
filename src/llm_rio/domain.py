@@ -108,8 +108,9 @@ class PlacementProfile:
     weight_cache_offload_seconds: float | None = None
     weight_cache_activation_seconds: float | None = None
     host_cache_mib: float | None = None
-    normal_verified: bool = True
-    kvcached_verified: bool = False
+    serving_mode: str = "queue"
+    measurements_valid: bool = True
+    launch_binding: str = ""
     vram_measurement_version: int = 1
     vram_baseline_mib_per_gpu: tuple[int, ...] | None = None
     wake_peak_vram_mib_per_gpu: tuple[int, ...] | None = None

@@ -1,0 +1,33 @@
+Goal: make a full Prism implementation that will pass my live demo.
+I've added the original Prism paper, summary of paper, prism-research github repo clone, and copy of this prompt inside docs/ directory.
+
+Again, I've killed my end of server and freed resources, feel free to test on this server.
+API key you can use for testing is:
+rio_43e22ad6dc6d_0ZKev_Uydo3GsuC2hzhzjA3UQk54FsdvTBA7D-cfois
+One thing to note is that you should not touch port 8002, since it is receiving actual user request, which is routed to different server.
+Instead, use port 3737.
+
+Expected demo (I have to perform a live demo, so delete model id/profile and weight of qwen3-8b after the testrun):
+
+First, turn on the server and server is loaded with pre-filled models (popular models). In this case it will be gemma4-31b, qwen3.8-27b, and deepseek-v4-flash-0731.
+
+1) automatic model addition and validation.
+I mimic an admin who wants to add a new model. I am choosing qwen3-8b-q8 as a sampler (it is small enough to demo, and is a well known model that many library supports, less likely that something goes wrong during an actual demo).
+I send request to add a new model (using TUI).
+The server downloads model to a dedicated location and automatically validates it.
+Then, the model becomes ready.
+-> this will be run at the beginning of presentation and then in the middle, I will show: "oh, model is ready by now, so I will just send a short chat to this one."
+
+2) huge number of same model request.
+I mimic a user using coding agent.
+User will request a large number of concurrent request to qwen3.8-27b-nvfp4, and each request will fill-in some frontend features of a webpage.
+Logic stays the same, since we only have 2 GPUs in the testing server, the app loades that model to both GPU separately (TP=1) and tries to maximize the output tokens.
+One thing to check is that since both GPUs are the same model, and we are loading same language models on both, which means one instance can be duplicated on both GPUs. (tell me if this is not viable).
+Then, I show total token output, and in few seconds, clustered homepage is done.
+(It is quite cheating but having blueprint of homepage with full local code is fine, just fill-in-blanks are okay. The key point here is to show Prism doesn't slow down an active inference speeds).
+
+3) model switching. (this is key Prism demo)
+I will use a pre-coded chatting agent app, and I will switch models between each chat extensively.
+gemma4-31b, qwen3.8-27b, (laguna2.1-s might be used, too if it works) and deepseek-v4-flash-0731(if it can work. if not, using large enough LLM is okay, too) will be used, which are models that cannot fit in our setting at the same time.
+I will show a live nvidia-smi and show how the model switching is quick with Prism, taking less then 10 seconds.
+

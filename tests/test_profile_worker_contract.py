@@ -4,23 +4,22 @@ import json
 import re
 import signal
 import sqlite3
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from test_scheduler_contract import GPU_0, make_profile, make_worker
 
-from llm_rio.config import EngineSettings, Settings
 from llm_rio.domain import RuntimeState
-from llm_rio.prism import KVCachedRuntime
+from llm_rio.engine_runtime import KVCachedRuntime
 from llm_rio.profiles import ProfileRepository, profile_to_dict
 from llm_rio.tool_support import (
     detect_vllm_reasoning_parser,
     detect_vllm_tool_parser,
 )
 from llm_rio.workers import WorkerSupervisor, worker_log_path
+from tests.release_fixtures import EngineSettings, Settings, replace
+from tests.test_scheduler_contract import GPU_0, make_profile, make_worker
 
 
 class ProfileRows:
@@ -115,9 +114,17 @@ def test_vllm_worker_enables_detected_tool_parser(tmp_path: Path) -> None:
     assert "--enable-auto-tool-choice" in command
 
 
-def test_kvcached_worker_launch_is_explicit_and_shareable(tmp_path: Path) -> None:
+def test_kvcached_worker_launch_is_explicit_and_shareable(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "llm_rio.engines.launch.detect_kvcached",
+        lambda _: KVCachedRuntime(True, "test", "0.26.0", False, "test"),
+    )
     supervisor = WorkerSupervisor(
-        Settings(config_file=tmp_path / "missing.toml", prism_max_workers_per_gpu=2),
+        Settings(
+            serving_mode="kv-cached",
+            config_file=tmp_path / "missing.toml",
+            prism_max_workers_per_gpu=2,
+        ),
         FailingDatabase(),  # type: ignore[arg-type]
     )
     supervisor.kvcached = KVCachedRuntime(

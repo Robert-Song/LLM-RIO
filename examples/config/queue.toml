@@ -1,0 +1,45 @@
+# Release configuration. Mode selection is mandatory. Unknown settings are rejected.
+# Copy to a NEW configuration; beta databases/configuration remain untouched.
+serving_mode = "queue"
+machine_id = "local"
+api_host = "0.0.0.0"
+api_port = 8002
+database_path = "state/release/llm-rio.db"
+model_store = "models"
+log_dir = "logs"
+managed_gpu_uuids = []
+reserved_vram_mib = 2048
+# queue_capacity_per_model = 1  # Optional; unset by default. See configuration reference.
+# queue_capacity_per_tenant = 1  # Optional; unset by default. See configuration reference.
+wait_duration_seconds = 5.0
+minimum_residency_seconds = 0.0
+fair_share_seconds = 7200.0
+validation_idle_window_seconds = 0.0
+# worker_startup_timeout_seconds = 1  # Optional; unset by default. See configuration reference.
+# worker_drain_watchdog_seconds = 1  # Optional; unset by default. See configuration reference.
+# worker_request_timeout_seconds = 1  # Optional; unset by default. See configuration reference.
+# worker_stream_idle_timeout_seconds = 1  # Optional; unset by default. See configuration reference.
+worker_port_start = 18000
+worker_port_end = 18999
+scheduler_tick_seconds = 1.0
+# max_prompt_tokens = 1  # Optional; unset by default. See configuration reference.
+# max_output_tokens = 1  # Optional; unset by default. See configuration reference.
+# max_n = 1  # Optional; unset by default. See configuration reference.
+quota_charge_requested_maximum = false
+capture_worker_engine_logs = true
+# Supply LLMRIO_HF_TOKEN through the environment when needed.
+log_level = "ERROR"
+
+[engines]
+vllm_executable = "vllm"
+llama_cpp_executable = "llama-server"
+enable_llama_cpp = false
+# gpu_memory_utilization = 1  # Optional; unset by default. See configuration reference.
+# max_model_len = 1  # Optional; unset by default. See configuration reference.
+# max_num_seqs = 1  # Optional; unset by default. See configuration reference.
+# max_num_batched_tokens = 1  # Optional; unset by default. See configuration reference.
+
+[engines.environment]
+# Environment passed to workers; native modes strip experimental activation flags.
+
+[modes.queue]

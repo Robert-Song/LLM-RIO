@@ -14,3 +14,5 @@ def isolated_working_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     for name in os.environ:
         if name.startswith("LLMRIO_"):
             monkeypatch.delenv(name)
+
+    monkeypatch.setenv("LLMRIO_SERVING_MODE", "vllm-sleep")

@@ -1,0 +1,2 @@
+class WorkerLaunchError(RuntimeError):
+    pass

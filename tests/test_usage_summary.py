@@ -7,7 +7,8 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from llm_rio import cli
+from llm_rio import admin_client as client_api
+from llm_rio import cli, connection
 from llm_rio.domain import Role
 from llm_rio.security import Principal
 from llm_rio.storage import Database
@@ -240,7 +241,7 @@ def test_llmctl_summarize_calls_admin_endpoint(monkeypatch: pytest.MonkeyPatch) 
             "lifetime": {},
         }
 
-    monkeypatch.setattr(cli, "_request", request)
+    monkeypatch.setattr(client_api, "request", request)
     result = CliRunner().invoke(
         cli.app,
         ["summarize", "--through", "2026-08-21T00:00:00+00:00", "--json"],
@@ -265,11 +266,11 @@ def test_summarize_http_timeout_allows_large_compactions(monkeypatch: pytest.Mon
         timeouts.append(kwargs["timeout"])
         return httpx.Response(200, json={})
 
-    monkeypatch.setattr(cli, "_api_key", lambda: "test-key")
-    monkeypatch.setattr(cli, "_base_url", lambda: "http://localhost")
-    monkeypatch.setattr(cli.httpx, "request", request)
-    cli._request("POST", "/admin/usage/summarize")
-    cli._request("GET", "/admin/dashboard")
+    monkeypatch.setattr(connection, "api_key", lambda: "test-key")
+    monkeypatch.setattr(connection, "base_url", lambda: "http://localhost")
+    monkeypatch.setattr(client_api.httpx, "request", request)
+    client_api.request("POST", "/admin/usage/summarize")
+    client_api.request("GET", "/admin/dashboard")
     assert isinstance(timeouts[0], httpx.Timeout)
     assert timeouts[0].read == 600.0
     assert timeouts[0].connect == 60.0

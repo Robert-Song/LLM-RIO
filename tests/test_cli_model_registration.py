@@ -5,7 +5,9 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+from llm_rio import admin_client as client_api
 from llm_rio import cli as cli_api
+from llm_rio.commands import common
 
 
 def test_models_add_wait_prints_automatic_validation_stages(
@@ -51,8 +53,8 @@ def test_models_add_wait_prints_automatic_validation_stages(
             return next(jobs)
         raise AssertionError((method, path, json_body))
 
-    monkeypatch.setattr(cli_api, "_request", request)
-    monkeypatch.setattr(cli_api.time, "sleep", lambda _: None)
+    monkeypatch.setattr(client_api, "request", request)
+    monkeypatch.setattr(common.time, "sleep", lambda _: None)
 
     result = CliRunner().invoke(
         cli_api.app,
@@ -67,20 +69,8 @@ def test_models_add_wait_prints_automatic_validation_stages(
     assert requests[0][2] == {
         "nickname": "qwen3-8b",
         "huggingface_repo": "Qwen/Qwen3-8B",
+        "local_path": None,
+        "engine": "vllm",
         "revision": None,
         "grant_to_keys": [],
     }
-
-
-@pytest.mark.parametrize("bulk", [False, True])
-def test_manual_trust_commands(monkeypatch: pytest.MonkeyPatch, bulk: bool) -> None:
-    requests = []
-    monkeypatch.setattr(cli_api, "_model_record", lambda _: {"id": "model-id"})
-    monkeypatch.setattr(
-        cli_api, "_request", lambda *args, **kwargs: requests.append((args, kwargs))
-    )
-    command = ["trust-available"] if bulk else ["trust", "qwen"]
-    result = CliRunner().invoke(cli_api.app, ["models", *command, "--backend", "both"])
-    assert result.exit_code == 0, result.output
-    path = "/admin/models/trust-available" if bulk else "/admin/models/model-id/trust-verification"
-    assert requests == [(("POST", path), {"json_body": {"backend": "both"}})]

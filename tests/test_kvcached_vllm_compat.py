@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from llm_rio.kvcached_vllm_compat import (
+from llm_rio.modes.kv_cached.kvcached_vllm_compat import (
     _install_shared_pool_race_shim,
     _is_shared_pool_capacity_race,
     install,

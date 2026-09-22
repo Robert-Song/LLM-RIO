@@ -1,3 +1,5 @@
+> **Historical beta reference.** These instructions are retired. See the [release documentation](docs/README.md).
+
 # Open-Source Model Serving Inventory for 2x NVIDIA RTX 6000 Pro Blackwell (192 GB VRAM)
 
 ## 1. Hardware Environment & Quantization Guidelines

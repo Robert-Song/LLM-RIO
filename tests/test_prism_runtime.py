@@ -1,22 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
-from llm_rio.domain import Engine, PlacementProfile, RuntimeState, WorkerPlacement
-from llm_rio.kvcached_vllm_compat import (
+from llm_rio.domain import Engine, RuntimeState, WorkerPlacement
+from llm_rio.modes.kv_cached.kvcached_vllm_compat import (
     _install_allocate_slots_rollback_shim,
     _install_hybrid_sleep_wake_shim,
     _install_persistent_weight_backup_shim,
 )
-from llm_rio.planner import (
-    GreedyPlacementPlanner,
-    QueuePressure,
-    StartPlacement,
-    WakePlacement,
-)
+from llm_rio.planner import QueuePressure, StartPlacement, WakePlacement
+from tests.release_fixtures import GreedyPlacementPlanner, PlacementProfile, replace
 
 
 class _Logger:
@@ -262,7 +257,7 @@ def test_prism_has_no_fixed_sleeping_worker_count_limit() -> None:
 
     assert len(actions) == 1
     assert isinstance(actions[0], StartPlacement)
-    assert actions[0].reason == "prism_cold_backlog"
+    assert actions[0].reason == "residency_cold_backlog"
 
 
 def test_native_sleep_uses_incremental_peak_and_applies_global_reserve_once() -> None:
@@ -284,7 +279,7 @@ def test_native_sleep_uses_incremental_peak_and_applies_global_reserve_once() ->
         peak_mib=(95_201,),
         utilization=0.92,
     )
-    assert planner._cached_prism_fits(fitting, ("GPU-0",), [])
+    assert planner._cached_cache_fits(fitting, ("GPU-0",), [])
 
     too_large = _profile(
         "too-large",
@@ -294,7 +289,7 @@ def test_native_sleep_uses_incremental_peak_and_applies_global_reserve_once() ->
         utilization=0.92,
     )
 
-    assert not planner._cached_prism_fits(too_large, ("GPU-0",), [])
+    assert not planner._cached_cache_fits(too_large, ("GPU-0",), [])
 
 
 def test_cached_fit_composes_active_peak_and_sleep_residual() -> None:
@@ -318,10 +313,10 @@ def test_cached_fit_composes_active_peak_and_sleep_residual() -> None:
         state=RuntimeState.SLEEPING,
     )
     fitting = _profile("incoming", ("GPU-0",), (90_000,), backend="kvcached")
-    assert planner._cached_prism_fits(fitting, ("GPU-0",), [sleeping])
+    assert planner._cached_cache_fits(fitting, ("GPU-0",), [sleeping])
 
     sleeping.profile = replace(sleeping_profile, sleep_vram_mib_per_gpu=(5_202,))
-    assert not planner._cached_prism_fits(fitting, ("GPU-0",), [sleeping])
+    assert not planner._cached_cache_fits(fitting, ("GPU-0",), [sleeping])
 
 
 def test_cached_fit_rejects_legacy_absolute_vram_profile() -> None:
@@ -338,7 +333,7 @@ def test_cached_fit_rejects_legacy_absolute_vram_profile() -> None:
         vram_measurement_version=1,
         vram_baseline_mib_per_gpu=None,
     )
-    assert not planner._cached_prism_fits(legacy, ("GPU-0",), [])
+    assert not planner._cached_cache_fits(legacy, ("GPU-0",), [])
 
 
 def test_prism_falls_back_to_tp_profile_that_uses_composed_measured_peaks() -> None:
@@ -348,6 +343,7 @@ def test_prism_falls_back_to_tp_profile_that_uses_composed_measured_peaks() -> N
         minimum_residency_seconds=0,
         fair_share_seconds=60,
         prism_enabled=True,
+        kvcached_required=True,
         gpu_vram_mib={"GPU-0": 97_887, "GPU-1": 97_887},
         reserved_vram_mib=2048,
         prism_max_workers_per_gpu=2,
@@ -371,8 +367,8 @@ def test_prism_falls_back_to_tp_profile_that_uses_composed_measured_peaks() -> N
         backend="kvcached",
     )
 
-    assert not planner._prism_fits(tp1, ("GPU-1",), [resident])
-    assert planner._prism_fits(tp2, gpu_set, [resident])
+    assert not planner._cached_cache_fits(tp1, ("GPU-1",), [resident])
+    assert planner._cached_cache_fits(tp2, gpu_set, [resident])
 
 
 def test_prism_preload_warms_requested_replica_count_without_waking_cache() -> None:

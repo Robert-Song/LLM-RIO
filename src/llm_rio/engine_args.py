@@ -6,9 +6,7 @@ import json
 from typing import Any
 
 
-def extra_engine_arguments(
-    arguments: dict[str, Any], *, explicit_false: bool = True
-) -> list[str]:
+def extra_engine_arguments(arguments: dict[str, Any], *, explicit_false: bool = True) -> list[str]:
     result: list[str] = []
     for key, value in arguments.items():
         flag = f"--{key.replace('_', '-')}"

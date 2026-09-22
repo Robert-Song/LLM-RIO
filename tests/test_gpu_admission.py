@@ -1,19 +1,18 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from test_scheduler_contract import FakeDatabase, FakeProfiles, make_profile
 
-from llm_rio.config import Settings
 from llm_rio.domain import MachineInventory, RuntimeState, WorkerPlacement
 from llm_rio.gpu_memory import GpuMemory, read_gpu_memory, required_free_vram
 from llm_rio.planner import StartPlacement, WakePlacement
 from llm_rio.runtime import ResidencyScheduler
 from llm_rio.workers import WorkerSupervisor
+from tests.release_fixtures import Settings, replace
+from tests.test_scheduler_contract import FakeDatabase, FakeProfiles, make_profile
 
 
 def profile(gpus=("GPU-0",), peak=80, sleep=5, utilization=0.8):

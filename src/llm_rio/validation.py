@@ -7,7 +7,6 @@ import json
 import math
 import re
 import secrets
-import socket
 import time
 import uuid
 from collections.abc import Callable
@@ -25,11 +24,11 @@ from llm_rio.domain import (
     MachineInventory,
     PlacementProfile,
 )
-from llm_rio.engine_args import extra_engine_arguments
+from llm_rio.engines.identity import launch_binding
+from llm_rio.engines.launch import adapter
 from llm_rio.gpu_memory import read_gpu_memory
 from llm_rio.host_memory import sample_process_group_memory
-from llm_rio.inventory import candidate_gpu_sets, gpu_environment
-from llm_rio.prism import add_kvcached_vllm_flags, detect_kvcached
+from llm_rio.inventory import candidate_gpu_sets
 from llm_rio.process_cleanup import TeardownError, terminate_engine
 from llm_rio.runtime import ResidencyScheduler
 from llm_rio.tool_support import detect_vllm_parser_configuration
@@ -249,34 +248,16 @@ class ProfileValidator:
         self.settings = settings
         self.inventory = inventory
         self.scheduler = scheduler
-        self._validation_ports: set[int] = set()
-        self._validation_port_lock = asyncio.Lock()
-
-    @staticmethod
-    def _local_port_available(port: int) -> bool:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-            try:
-                listener.bind(("127.0.0.1", port))
-            except OSError:
-                return False
-        return True
+        self.ports = scheduler.supervisor.ports
 
     async def _reserve_validation_port(self) -> int:
-        first_port = self.settings.worker_port_end + 1
-        async with self._validation_port_lock:
-            for port in range(first_port, first_port + 128):
-                if port in self._validation_ports or not self._local_port_available(port):
-                    continue
-                self._validation_ports.add(port)
-                return port
-        raise ValidationError(
-            "engine_launch",
-            f"no free validation port is available in {first_port}-{first_port + 127}",
-        )
+        try:
+            return self.ports.reserve("validation")
+        except RuntimeError as exc:
+            raise ValidationError("engine_launch", str(exc)) from exc
 
     async def _release_validation_port(self, port: int) -> None:
-        async with self._validation_port_lock:
-            self._validation_ports.discard(port)
+        self.ports.release(port, "validation")
 
     async def validate_vllm(
         self,
@@ -375,16 +356,9 @@ class ProfileValidator:
         backend: Literal["native", "kvcached"],
     ) -> PlacementProfile:
         conservative = backend == "native" and self.scheduler.validation_requires_maintenance
-        queue_mode = conservative and self.settings.queue_mode_enabled
-        initial = (
-            min(candidate.gpu_memory_utilization, 0.80)
-            if conservative and not queue_mode
-            else candidate.gpu_memory_utilization
-        )
-        budgets = [initial]
-        if conservative:
-            deltas = (0.02, 0.04, 0.06, 0.08, 0.10) if queue_mode else (0.10, 0.20)
-            budgets.extend(round(initial - delta, 4) for delta in deltas if initial - delta >= 0.40)
+        from llm_rio.modes.validation import memory_budgets
+
+        budgets = memory_budgets(self.settings.serving_mode.value, candidate.gpu_memory_utilization)
         for index, budget in enumerate(budgets):
             attempt = replace(candidate, gpu_memory_utilization=budget)
             if conservative:
@@ -458,43 +432,21 @@ class ProfileValidator:
             **_model_launch_args(model_path),
             **candidate.launch_args,
         }
-        kvcached = detect_kvcached("required") if backend == "kvcached" else detect_kvcached("none")
+
         ram_weight_cache_enabled = self.settings.ram_weight_cache_enabled
         launch_args["enable_sleep_mode"] = ram_weight_cache_enabled
-        command = [
-            self.settings.engines.vllm_executable,
-            "serve",
-            str(model_path),
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--api-key",
-            api_key,
-            "--served-model-name",
-            nickname,
-            "--tensor-parallel-size",
-            str(candidate.tensor_parallel_size),
-            "--dtype",
-            candidate.dtype,
-            "--max-model-len",
-            str(candidate.max_model_len),
-            "--gpu-memory-utilization",
-            str(candidate.gpu_memory_utilization),
-        ]
-        if candidate.max_num_seqs is not None:
-            command.extend(["--max-num-seqs", str(candidate.max_num_seqs)])
-        if candidate.max_num_batched_tokens is not None:
-            command.extend(["--max-num-batched-tokens", str(candidate.max_num_batched_tokens)])
-        if candidate.quantization:
-            command.extend(["--quantization", candidate.quantization])
         parsers = detect_vllm_parser_configuration(model_path)
-        if parsers.tool_parser is not None:
-            command.extend(["--enable-auto-tool-choice", "--tool-call-parser", parsers.tool_parser])
-        if parsers.reasoning_parser is not None:
-            command.extend(["--reasoning-parser", parsers.reasoning_parser])
-        command.extend(extra_engine_arguments(launch_args))
-        add_kvcached_vllm_flags(command, kvcached)
+        launch_shape = replace(candidate, launch_args=launch_args)
+        spec = adapter(Engine.VLLM).launch(
+            settings=self.settings,
+            shape=launch_shape,
+            artifact=model_path,
+            nickname=nickname,
+            gpu_uuids=gpu_set,
+            port=port,
+            api_key=api_key,
+        )
+        command = list(spec.command)
         log_path = validation_log_path(
             log_dir=self.settings.log_dir,
             nickname=nickname,
@@ -502,20 +454,7 @@ class ProfileValidator:
             tensor_parallel_size=candidate.tensor_parallel_size,
             gpu_indices=gpu_indices,
         )
-        environment = gpu_environment(
-            gpu_set,
-            self.settings.engines.environment,
-            executable=self.settings.engines.vllm_executable,
-        )
-        if self.settings.queue_mode_enabled:
-            environment.update(
-                ENABLE_KVCACHED="false", KVCACHED_AUTOPATCH="0", VLLM_SERVER_DEV_MODE="0"
-            )
-            environment.pop("LLM_RIO_KVCACHED_VLLM026_SHIM", None)
-        environment["VLLM_API_KEY"] = api_key
-        environment.update(kvcached.environment(pythonpath=environment.get("PYTHONPATH")))
-        if ram_weight_cache_enabled:
-            environment["VLLM_SERVER_DEV_MODE"] = "1"
+        environment = spec.environment
         started = time.monotonic()
         sleep_memory: tuple[int, ...] | None = None
         wake_peak_memory: tuple[int, ...] | None = None
@@ -598,6 +537,7 @@ class ProfileValidator:
             model_revision=model_revision,
             engine=Engine.VLLM,
             engine_version=version,
+            launch_binding=launch_binding(self.settings, launch_shape, Engine.VLLM),
             machine_fingerprint=self.inventory.fingerprint,
             gpu_count=candidate.gpu_count,
             tensor_parallel_size=candidate.tensor_parallel_size,
@@ -627,8 +567,8 @@ class ProfileValidator:
             weight_cache_offload_seconds=offload_seconds,
             weight_cache_activation_seconds=activation_seconds,
             host_cache_mib=host_cache_mib,
-            normal_verified=backend == "native",
-            kvcached_verified=backend == "kvcached",
+            serving_mode=self.settings.serving_mode.value,
+            measurements_valid=True,
             vram_measurement_version=CURRENT_VRAM_MEASUREMENT_VERSION,
             vram_baseline_mib_per_gpu=sampler.baseline_mib,
             wake_peak_vram_mib_per_gpu=wake_peak_memory,
@@ -645,7 +585,7 @@ class ProfileValidator:
         if self.scheduler.validation_should_yield():
             raise ValidationPreempted()
         headers = {"Authorization": f"Bearer {api_key}"}
-        timeout = self.settings.prism_transition_timeout_seconds
+        timeout = self.settings.residency.transition_timeout_seconds
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 started = time.monotonic()

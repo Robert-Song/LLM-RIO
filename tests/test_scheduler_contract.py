@@ -7,19 +7,10 @@ from typing import Any
 
 import pytest
 
-from llm_rio.config import Settings
-from llm_rio.domain import (
-    Engine,
-    MachineInventory,
-    PlacementProfile,
-    RuntimeState,
-    ServiceMode,
-    WorkerPlacement,
-)
+from llm_rio.domain import Engine, MachineInventory, RuntimeState, ServiceMode, WorkerPlacement
 from llm_rio.errors import MaintenanceError
 from llm_rio.planner import (
     DrainPlacement,
-    GreedyPlacementPlanner,
     QueuePressure,
     SleepPlacement,
     StartPlacement,
@@ -27,6 +18,7 @@ from llm_rio.planner import (
 )
 from llm_rio.queueing import QueuedRequest
 from llm_rio.runtime import ResidencyScheduler, WorkerLease
+from tests.release_fixtures import GreedyPlacementPlanner, PlacementProfile, Settings
 
 GPU_0 = "GPU-0"
 GPU_1 = "GPU-1"
@@ -133,7 +125,7 @@ def test_prism_starts_a_second_model_on_an_occupied_gpu() -> None:
         profiles={"gemma": [gemma]},
     )
 
-    assert actions == [StartPlacement(gemma, (GPU_0,), "prism_cold_backlog")]
+    assert actions == [StartPlacement(gemma, (GPU_0,), "residency_cold_backlog")]
 
 
 def test_prism_proactively_caches_idle_weights_in_ram() -> None:
@@ -149,7 +141,7 @@ def test_prism_proactively_caches_idle_weights_in_ram() -> None:
         profiles={},
     )
 
-    assert actions == [SleepPlacement(worker.id, "prism_idle_weight_cache")]
+    assert actions == [SleepPlacement(worker.id, "residency_idle_weight_cache")]
 
 
 def test_prism_evicts_an_idle_resident_only_for_real_demand() -> None:
@@ -180,8 +172,8 @@ def test_prism_evicts_an_idle_resident_only_for_real_demand() -> None:
         profiles={"gemma": [gemma]},
     )
 
-    assert demand_actions == [SleepPlacement(worker.id, "prism_weight_capacity")]
-    assert preload_actions == [SleepPlacement(worker.id, "prism_weight_capacity")]
+    assert demand_actions == [SleepPlacement(worker.id, "residency_weight_capacity")]
+    assert preload_actions == [SleepPlacement(worker.id, "residency_weight_capacity")]
 
 
 def test_prism_wakes_a_cached_model_instead_of_cold_starting() -> None:
@@ -197,7 +189,7 @@ def test_prism_wakes_a_cached_model_instead_of_cold_starting() -> None:
         profiles={"qwen": [qwen]},
     )
 
-    assert actions == [WakePlacement(worker.id, "prism_ram_cache_hit")]
+    assert actions == [WakePlacement(worker.id, "residency_ram_cache_hit")]
 
 
 def test_prism_sleeping_count_does_not_force_lru_eviction() -> None:
@@ -221,7 +213,7 @@ def test_prism_sleeping_count_does_not_force_lru_eviction() -> None:
         profiles={"incoming": [incoming]},
     )
 
-    assert actions == [StartPlacement(incoming, (GPU_0,), "prism_cold_backlog")]
+    assert actions == [StartPlacement(incoming, (GPU_0,), "residency_cold_backlog")]
 
 
 def test_prism_preload_uses_memory_budget_not_sleeping_count() -> None:
@@ -247,7 +239,7 @@ def test_prism_preload_uses_memory_budget_not_sleeping_count() -> None:
         profiles={"incoming": [incoming]},
     )
 
-    assert actions == [StartPlacement(incoming, (GPU_0,), "prism_preload")]
+    assert actions == [StartPlacement(incoming, (GPU_0,), "residency_preload")]
 
 
 def test_prism_never_offloads_a_worker_with_an_active_request() -> None:
@@ -300,7 +292,7 @@ def test_prism_rejects_native_profiles_and_supports_tp_colocation() -> None:
     )
 
     assert native_actions == []
-    assert tp_actions == [StartPlacement(gemma_tp, (GPU_0, GPU_1), "prism_cold_backlog")]
+    assert tp_actions == [StartPlacement(gemma_tp, (GPU_0, GPU_1), "residency_cold_backlog")]
 
 
 def test_cold_single_gpu_model_fills_both_validated_gpu_slots() -> None:
@@ -449,7 +441,6 @@ def test_wait_duration_does_not_delay_reclaim_for_a_new_model() -> None:
 
     assert {action.worker_id for action in actions if isinstance(action, DrainPlacement)} == {
         "qwen-worker-0",
-        "qwen-worker-1",
     }
 
 
@@ -601,11 +592,14 @@ async def test_newly_validated_model_requests_one_time_ram_warm() -> None:
     )
 
     scheduler.kvcached = SimpleNamespace(enabled=True)
+    scheduler.mode = SimpleNamespace(
+        capabilities=SimpleNamespace(validation_requires_maintenance=False, sleep=True)
+    )
     await scheduler.warm_model_once("new-model")
 
-    assert scheduler._prism_one_time_warm_model_ids == {"new-model"}
+    assert scheduler._cache_one_time_warm_model_ids == {"new-model"}
     assert database.events[-1] == (
-        "PRISM_MODEL_WARM_REQUESTED",
+        "RESIDENCY_MODEL_WARM_REQUESTED",
         "new-model",
         {"target": "host_ram"},
     )

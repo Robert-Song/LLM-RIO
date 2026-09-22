@@ -1,3 +1,3 @@
-from llm_rio.api.app import app
+from llm_rio.api.app import create_app
 
-__all__ = ["app"]
+__all__ = ["create_app"]

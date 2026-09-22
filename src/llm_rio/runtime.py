@@ -5,21 +5,23 @@ import contextlib
 import logging
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import cast
 
+from llm_rio.artifacts import local_artifact_unchanged
 from llm_rio.config import Settings
 from llm_rio.domain import CatalogState, MachineInventory, RuntimeState, ServiceMode
+from llm_rio.engine_runtime import detect_kvcached
 from llm_rio.errors import MaintenanceError, RioError
+from llm_rio.modes.factory import create_mode
 from llm_rio.planner import (
     DrainPlacement,
-    GreedyPlacementPlanner,
     QueuePressure,
     SleepPlacement,
     StartPlacement,
     WakePlacement,
 )
-from llm_rio.prism import detect_kvcached
-from llm_rio.profiles import ProfileRepository, profile_verified_for_mode
+from llm_rio.profiles import ProfileRepository
 from llm_rio.queueing import ModelQueues, QueuedRequest
 from llm_rio.storage import Database
 from llm_rio.workers import WorkerSupervisor
@@ -61,24 +63,8 @@ class ResidencyScheduler:
         self.queues = ModelQueues(
             settings.queue_capacity_per_model, settings.queue_capacity_per_tenant
         )
-        self.planner = GreedyPlacementPlanner(
-            wait_duration_seconds=settings.wait_duration_seconds,
-            minimum_residency_seconds=settings.minimum_residency_seconds,
-            fair_share_seconds=settings.fair_share_seconds,
-            prism_enabled=self.kvcached.enabled or supervisor.ram_weight_cache_enabled,
-            queue_mode=settings.queue_mode_enabled,
-            kvcached_required=self.kvcached.enabled,
-            gpu_vram_mib={device.uuid: device.total_vram_mib for device in inventory.gpus},
-            reserved_vram_mib=settings.reserved_vram_mib,
-            prism_max_workers_per_gpu=settings.prism_max_workers_per_gpu,
-            prism_sleep_gpu_reserve_mib=settings.prism_sleep_gpu_reserve_mib,
-            prism_idle_sleep_seconds=settings.prism_idle_sleep_seconds,
-            prism_weight_cache_enabled=getattr(
-                supervisor,
-                "ram_weight_cache_enabled",
-                self.kvcached.enabled and settings.prism_weight_cache_mode == "ram",
-            ),
-        )
+        self.mode = create_mode(settings, inventory)
+        self.planner = self.mode.planner
         self._state_lock = asyncio.Lock()
         self._event = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
@@ -87,21 +73,19 @@ class ResidencyScheduler:
         self._validation_gpu_uuids: set[str] = set()
         self._last_arrival_at = datetime.now(UTC)
         self._maintenance_requested = False
-        self._prism_preload_model_ids: dict[str, int] = {}
-        self._prism_one_time_warm_model_ids: set[str] = set()
+        self._cache_preload_model_ids: dict[str, int] = {}
+        self._cache_one_time_warm_model_ids: set[str] = set()
         self._reported_incompatible_profiles: set[str] = set()
-        self._prism_configured = False
+        self._cache_configured = False
         supervisor.set_event_callback(self.worker_event)
 
     @property
     def serving_mode(self) -> str:
-        if self.kvcached.enabled:
-            return "kv-cached"
-        return "vllm-sleep" if self.supervisor.ram_weight_cache_enabled else "queue"
+        return self.mode.capabilities.name
 
     @property
     def validation_requires_maintenance(self) -> bool:
-        return not self.kvcached.enabled
+        return self.mode.capabilities.validation_requires_maintenance
 
     @property
     def validation_gpu_uuids(self) -> tuple[str, ...]:
@@ -112,29 +96,24 @@ class ResidencyScheduler:
             self._maintenance_requested = (
                 await self.database.service_mode() is not ServiceMode.ACTIVE
             )
-            await self._configure_prism()
+            await self._configure_mode()
             self._task = asyncio.create_task(self._run(), name="residency-scheduler")
 
-    async def _configure_prism(self) -> None:
-        if self._prism_configured:
+    async def _configure_mode(self) -> None:
+        if self._cache_configured:
             return
-        self._prism_configured = True
+        self._cache_configured = True
         runtime = self.kvcached
         if not runtime.enabled:
-            if self.settings.effective_kvcached_mode == "auto":
-                await self.database.record_event(
-                    "PRISM_UNAVAILABLE",
-                    payload={"reason": runtime.reason},
-                )
             event_type = (
-                "PRISM_NATIVE_SLEEP_ENABLED"
+                "RESIDENCY_NATIVE_SLEEP_ENABLED"
                 if self.supervisor.ram_weight_cache_enabled
                 else "QUEUE_ENABLED"
                 if self.settings.queue_mode_enabled
-                else "PRISM_DISABLED"
+                else "RESIDENCY_DISABLED"
             )
         else:
-            event_type = "PRISM_ENABLED"
+            event_type = "RESIDENCY_ENABLED"
         await self.database.record_event(
             event_type,
             payload={
@@ -144,20 +123,22 @@ class ResidencyScheduler:
                 "vllm_version": runtime.vllm_version,
                 "officially_tested": runtime.officially_tested,
                 "max_workers_per_gpu": (
-                    self.settings.prism_max_workers_per_gpu if runtime.enabled else 1
+                    self.settings.modes.kv_cached.max_workers_per_gpu if runtime.enabled else 1
                 ),
                 "weight_cache": (
                     "vllm_sleep_level_1" if self.supervisor.ram_weight_cache_enabled else "disabled"
                 ),
-                "host_cache_max_gib": self.settings.prism_host_cache_max_gib,
-                "host_cache_min_available_gib": (self.settings.prism_host_cache_min_available_gib),
-                "swap_max_used_gib": self.settings.prism_swap_max_used_gib,
-                "idle_sleep_seconds": self.settings.prism_idle_sleep_seconds,
+                "host_cache_max_gib": self.settings.residency.host_cache_max_gib,
+                "host_cache_min_available_gib": (
+                    self.settings.residency.host_cache_min_available_gib
+                ),
+                "swap_max_used_gib": self.settings.residency.swap_max_used_gib,
+                "idle_sleep_seconds": self.settings.residency.idle_sleep_seconds,
             },
         )
         if self.settings.queue_mode_enabled:
             return  # Queue mode loads only in response to real queued requests.
-        selectors = self.settings.prism_preload_models
+        selectors = self.settings.residency.preload_models
         if not selectors:
             return
         models = await self.database.list_models()
@@ -171,18 +152,18 @@ class ResidencyScheduler:
         for nickname in selectors:
             if nickname != "*" and nickname not in selected_nicknames:
                 await self.database.record_event(
-                    "PRISM_PRELOAD_SKIPPED",
+                    "RESIDENCY_PRELOAD_SKIPPED",
                     payload={"nickname": nickname, "reason": "model_not_found"},
                 )
         for model in selected:
             if model.get("state") == CatalogState.AVAILABLE.value and model.get("artifact_path"):
                 model_id = str(model["id"])
-                self._prism_preload_model_ids[model_id] = (
-                    self._prism_preload_model_ids.get(model_id, 0) + 1
+                self._cache_preload_model_ids[model_id] = (
+                    self._cache_preload_model_ids.get(model_id, 0) + 1
                 )
             else:
                 await self.database.record_event(
-                    "PRISM_PRELOAD_SKIPPED",
+                    "RESIDENCY_PRELOAD_SKIPPED",
                     str(model["id"]),
                     {
                         "nickname": model["nickname"],
@@ -227,12 +208,12 @@ class ResidencyScheduler:
 
     async def warm_model_once(self, model_id: str) -> None:
         """Populate one newly validated model into the host-RAM weight cache."""
-        if self.validation_requires_maintenance or not self.planner.prism_weight_cache_enabled:
+        if self.validation_requires_maintenance or not self.mode.capabilities.sleep:
             return
         async with self._state_lock:
-            self._prism_one_time_warm_model_ids.add(model_id)
+            self._cache_one_time_warm_model_ids.add(model_id)
         await self.database.record_event(
-            "PRISM_MODEL_WARM_REQUESTED",
+            "RESIDENCY_MODEL_WARM_REQUESTED",
             model_id,
             {"target": "host_ram"},
         )
@@ -464,10 +445,10 @@ class ResidencyScheduler:
             for worker in self.supervisor.workers.values()
             if worker.state in {RuntimeState.READY, RuntimeState.SLEEPING}
         }
-        self._prism_one_time_warm_model_ids.difference_update(warm_model_ids)
+        self._cache_one_time_warm_model_ids.difference_update(warm_model_ids)
         pressured_model_ids = {pressure.model_id for pressure in pressures}
-        preload_requirements = dict(self._prism_preload_model_ids)
-        for model_id in self._prism_one_time_warm_model_ids:
+        preload_requirements = dict(self._cache_preload_model_ids)
+        for model_id in self._cache_one_time_warm_model_ids:
             preload_requirements.setdefault(model_id, 1)
         pressures.extend(
             QueuePressure(
@@ -491,37 +472,18 @@ class ResidencyScheduler:
             pressure.model_id: await self.profiles.for_model(pressure.model_id)
             for pressure in pressures
         }
-        if self.settings.queue_mode_enabled:
-            profile_map = {
-                model_id: [
-                    profile
-                    for profile in model_profiles
-                    if profile_verified_for_mode(
-                        profile, kvcached_required=False, queue_mode_required=True
-                    )
-                ]
-                for model_id, model_profiles in profile_map.items()
-            }
-        if self.kvcached.enabled or self.planner.prism_weight_cache_enabled:
-            for model_id, model_profiles in profile_map.items():
-                compatible = any(
-                    profile_verified_for_mode(
-                        profile,
-                        kvcached_required=self.kvcached.enabled,
-                        ram_weight_cache_required=(self.planner.prism_weight_cache_enabled),
-                    )
-                    for profile in model_profiles
-                )
-                if (
-                    model_profiles
-                    and not compatible
-                    and model_id not in self._reported_incompatible_profiles
-                ):
-                    self._reported_incompatible_profiles.add(model_id)
-                    await self.database.record_event(
-                        "PRISM_PROFILE_REVALIDATION_REQUIRED",
-                        model_id,
-                    )
+        for model_id, model_profiles in profile_map.items():
+            compatible = [
+                profile for profile in model_profiles if self.mode.eligibility(profile).allowed
+            ]
+            profile_map[model_id] = compatible
+            if (
+                model_profiles
+                and not compatible
+                and model_id not in self._reported_incompatible_profiles
+            ):
+                self._reported_incompatible_profiles.add(model_id)
+                await self.database.record_event("PROFILE_REVALIDATION_REQUIRED", model_id)
         actions = self.planner.plan(
             now=now,
             all_gpu_uuids={device.uuid for device in self.inventory.gpus}
@@ -582,6 +544,19 @@ class ResidencyScheduler:
             )
             await self.release(lease)
 
+    async def _artifact_ready(self, model_id: str) -> bool:
+        model = await self.database.model_by_id(model_id)
+        if model is None or not model.get("artifact_path"):
+            return False
+        if model.get("source_type") == "local" and not await asyncio.to_thread(
+            local_artifact_unchanged, Path(model["artifact_path"]), model["artifact_hashes"]
+        ):
+            await self.database.record_event(
+                "PLACEMENT_REJECTED", model_id, {"reason": "artifact_changed"}
+            )
+            return False
+        return True
+
     async def _launch_if_active(self, action: StartPlacement) -> None:
         async with self._state_lock:
             if (
@@ -597,6 +572,8 @@ class ResidencyScheduler:
                     action.profile.model_id,
                     {"reason": "artifact_path_missing"},
                 )
+                return
+            if not await self._artifact_ready(action.profile.model_id):
                 return
             if not self.kvcached.enabled and not await self.supervisor.ensure_gpu_capacity(
                 action.profile, action.gpu_uuids
@@ -619,6 +596,8 @@ class ResidencyScheduler:
                 or await self.database.service_mode() is not ServiceMode.ACTIVE
                 or bool(set(worker.gpu_uuids) & self._validation_gpu_uuids)
             ):
+                return
+            if not await self._artifact_ready(worker.model_id):
                 return
             if not self.kvcached.enabled and not await self.supervisor.ensure_gpu_capacity(
                 worker.profile, worker.gpu_uuids, waking_worker_id=worker.id

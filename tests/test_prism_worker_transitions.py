@@ -8,13 +8,14 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from test_prism_runtime import _profile
 
-from llm_rio.config import EngineSettings
 from llm_rio.domain import RuntimeState, WorkerPlacement
+from llm_rio.engine_runtime import KVCachedRuntime
 from llm_rio.host_memory import HostMemorySample, ProcessMemorySample
-from llm_rio.prism import KVCachedRuntime
+from llm_rio.ports import PortAllocator
 from llm_rio.workers import WorkerSupervisor
+from tests.release_fixtures import Settings
+from tests.test_prism_runtime import _profile
 
 
 class _TransitionDatabase:
@@ -37,16 +38,14 @@ class _TransitionDatabase:
 def _supervisor(worker: WorkerPlacement) -> tuple[WorkerSupervisor, _TransitionDatabase]:
     database = _TransitionDatabase()
     supervisor = WorkerSupervisor.__new__(WorkerSupervisor)
-    supervisor.settings = SimpleNamespace(
-        prism_weight_cache_mode="ram",
-        ram_weight_cache_enabled=True,
-        queue_mode_enabled=False,
-        prism_transition_timeout_seconds=10.0,
-        engines=SimpleNamespace(
-            vllm_executable="/opt/llm-rio/bin/vllm",
-            llama_cpp_executable="llama-server",
-            environment={"PATH": "/usr/local/bin:/usr/bin"},
-        ),
+    supervisor.ports = PortAllocator(18000, 18999)
+    supervisor.settings = Settings(
+        serving_mode="vllm-sleep",
+        modes={"vllm_sleep": {"transition_timeout_seconds": 10}},
+        engines={
+            "vllm_executable": "/opt/llm-rio/bin/vllm",
+            "environment": {"PATH": "/usr/local/bin:/usr/bin"},
+        },
     )
     supervisor.database = database
     supervisor.workers = {worker.id: worker}
@@ -201,9 +200,9 @@ async def test_host_cache_budget_evicts_least_recently_used_worker(
     newer.last_demand_at = datetime.now(UTC) - timedelta(minutes=1)
     supervisor, database = _supervisor(older)
     supervisor.workers[newer.id] = newer
-    supervisor.settings.prism_host_cache_max_gib = 0.75
-    supervisor.settings.prism_host_cache_min_available_gib = 0.1
-    supervisor.settings.prism_swap_max_used_gib = 1.0
+    supervisor.settings.residency.host_cache_max_gib = 0.75
+    supervisor.settings.residency.host_cache_min_available_gib = 0.1
+    supervisor.settings.residency.swap_max_used_gib = 1.0
 
     monkeypatch.setattr(
         "llm_rio.workers.sample_process_group_memory",
@@ -222,11 +221,6 @@ async def test_host_cache_budget_evicts_least_recently_used_worker(
     assert eviction[2]["reason"] == "ram_budget"
 
 
-def test_empty_kvcached_mode_normalizes_to_native() -> None:
-    assert EngineSettings(kvcached_mode="").kvcached_mode == "none"
-    assert EngineSettings(kvcached_mode="disabled").kvcached_mode == "none"
-
-
 def test_native_worker_uses_vllm_sleep_without_kvcached_flags() -> None:
     worker = _ready_worker()
     supervisor, _database = _supervisor(worker)
@@ -237,5 +231,5 @@ def test_native_worker_uses_vllm_sleep_without_kvcached_flags() -> None:
 
     assert "--enable-sleep-mode" in command
     assert "--no-enable-prefix-caching" not in command
-    assert "ENABLE_KVCACHED" not in environment
+    assert environment["ENABLE_KVCACHED"] == "false"
     assert environment["VLLM_SERVER_DEV_MODE"] == "1"

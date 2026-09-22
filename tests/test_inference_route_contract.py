@@ -7,7 +7,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from test_scheduler_contract import GPU_0, make_profile
 
 from llm_rio.api.inference_proxy import (
     _open_worker_stream,
@@ -17,10 +16,11 @@ from llm_rio.api.inference_proxy import (
 from llm_rio.api.inference_validation import _apply_model_defaults, _validate_request
 from llm_rio.api.routes_inference import _resolve_model, _routable_profiles
 from llm_rio.api.schemas import ChatCompletionRequest
-from llm_rio.config import Settings
 from llm_rio.domain import CatalogState, Role
 from llm_rio.errors import RioError
 from llm_rio.security import Principal
+from tests.release_fixtures import Settings
+from tests.test_scheduler_contract import GPU_0, make_profile
 
 
 def prism_request(*profiles: object) -> SimpleNamespace:
@@ -46,7 +46,14 @@ def prism_request(*profiles: object) -> SimpleNamespace:
     state = SimpleNamespace(
         database=Database(),
         profiles=Profiles(),
-        scheduler=SimpleNamespace(kvcached=SimpleNamespace(enabled=True)),
+        scheduler=SimpleNamespace(
+            kvcached=SimpleNamespace(enabled=True),
+            mode=SimpleNamespace(
+                eligibility=lambda profile: SimpleNamespace(
+                    allowed=profile.serving_mode == "kv-cached" and profile.measurements_valid
+                )
+            ),
+        ),
     )
     return SimpleNamespace(app=SimpleNamespace(state=state))
 
@@ -67,7 +74,7 @@ async def test_prism_rejects_native_profile_before_queueing() -> None:
     with pytest.raises(RioError) as captured:
         await _resolve_model(prism_request(native), principal, "model")
 
-    assert captured.value.code == "prism_profile_revalidation_required"
+    assert captured.value.code == "residency_profile_revalidation_required"
     assert captured.value.status_code == 503
 
 

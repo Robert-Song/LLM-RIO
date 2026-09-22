@@ -1,3 +1,5 @@
+> **Historical beta reference.** These instructions are retired. See the [release documentation](docs/README.md).
+
 # Prism live demo and implementation talk track
 
 ## The claim to make on stage

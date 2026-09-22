@@ -1,29 +1,23 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from llm_rio.api.inference_validation import _apply_model_defaults
-from llm_rio.api.routes_admin import _apply_profile_edit
 from llm_rio.api.schemas import (
     ChatCompletionRequest,
     ModelProfileCloneRequest,
     ProfileEditRequest,
 )
-from llm_rio.domain import (
-    Engine,
-    GpuDevice,
-    MachineInventory,
-    PlacementProfile,
-    Role,
-)
+from llm_rio.domain import Engine, GpuDevice, MachineInventory, Role
 from llm_rio.errors import RioError
 from llm_rio.inventory import candidate_gpu_sets
 from llm_rio.profiles import ProfileRepository, profile_key, profile_to_dict
+from llm_rio.services.profile_edit import _apply_profile_edit
 from llm_rio.storage import Database, _now
+from tests.release_fixtures import PlacementProfile, replace
 
 GPU_0 = "GPU-0"
 GPU_1 = "GPU-1"
@@ -162,8 +156,8 @@ def test_profile_override_rebuilds_placement_for_new_tensor_parallel_size() -> N
     assert updated.vram_measurement_version == 0
     assert updated.vram_baseline_mib_per_gpu is None
     assert updated.wake_peak_vram_mib_per_gpu is None
-    assert not updated.normal_verified
-    assert not updated.kvcached_verified
+    assert not updated.measurements_valid
+    assert not updated.measurements_valid
 
 
 def test_vllm_limit_edit_preserves_dtype_and_quantization() -> None:
@@ -292,8 +286,8 @@ async def test_profile_override_updates_default_and_catalog_context_limit(tmp_pa
         assert records[0].profile.vram_measurement_version == 0
         assert records[0].profile.vram_baseline_mib_per_gpu is None
         assert records[0].profile.peak_vram_mib_per_gpu == (0,)
-        assert not records[0].profile.normal_verified
-        assert not records[0].profile.kvcached_verified
+        assert not records[0].profile.measurements_valid
+        assert not records[0].profile.measurements_valid
         model = await database.model_by_id("model")
         assert model is not None
         assert model["request_limits"]["max_context_tokens"] == 8192
@@ -456,8 +450,8 @@ async def test_clone_model_shares_weights_but_has_separate_yarn_profiles_and_def
         assert cloned_profile.vram_measurement_version == 0
         assert cloned_profile.vram_baseline_mib_per_gpu is None
         assert cloned_profile.wake_peak_vram_mib_per_gpu is None
-        assert not cloned_profile.normal_verified
-        assert not cloned_profile.kvcached_verified
+        assert not cloned_profile.measurements_valid
+        assert not cloned_profile.measurements_valid
         text_overrides = cloned_profile.launch_args["hf_overrides"]["text_config"]
         assert text_overrides["max_position_embeddings"] == 1_048_576
         assert text_overrides["rope_parameters"] == {
@@ -478,146 +472,5 @@ async def test_clone_model_shares_weights_but_has_separate_yarn_profiles_and_def
         source_profiles = await repository.for_model("source-model")
         assert source_profiles[0].launch_args == {}
         assert source_profiles[0].max_model_len == 262_144
-    finally:
-        await database.close()
-
-
-@pytest.mark.asyncio
-async def test_trust_both_is_scoped_to_active_profiles_on_current_machine(
-    tmp_path: Path,
-) -> None:
-    database = Database(tmp_path / "state.db")
-    await database.open()
-    try:
-        await database.create_key(
-            key_id="admin-key",
-            nickname="admin",
-            role=Role.ADMIN,
-            account_id="admin-account",
-            account_nickname="admin-account",
-            prefix="rio_admin_prefix_12345678",
-            api_key="rio_admin_prefix_12345678_secret",
-            limit_tokens=0,
-            unlimited=True,
-        )
-        await database.execute(
-            """
-            INSERT INTO model_catalog
-                (id, nickname, huggingface_repo, state, created_by_key_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            ("model", "model", "org/model", "AVAILABLE", "admin-key", _now(), _now()),
-        )
-        local_profile = replace(
-            make_profile("local-profile", "model", (GPU_0,)),
-            normal_verified=False,
-            kvcached_verified=False,
-        )
-        foreign_profile = replace(
-            local_profile,
-            id="foreign-profile",
-            machine_fingerprint="other-machine",
-        )
-        for profile in (local_profile, foreign_profile):
-            raw = profile_to_dict(profile)
-            await database.execute(
-                """
-                INSERT INTO model_profiles
-                    (id, model_id, machine_fingerprint, profile_key, profile_json,
-                     verified_at, active)
-                VALUES (?, ?, ?, ?, ?, ?, 1)
-                """,
-                (
-                    profile.id,
-                    profile.model_id,
-                    profile.machine_fingerprint,
-                    profile_key(raw),
-                    json.dumps(raw),
-                    _now(),
-                ),
-            )
-
-        repository = ProfileRepository(database, "machine")
-        assert await repository.set_model_verified_for_both("model") == 1
-        local = (await repository.records_for_model("model"))[0].profile
-        assert local.normal_verified
-        assert local.kvcached_verified
-        foreign_row = await database.fetchone(
-            "SELECT profile_json FROM model_profiles WHERE id = ?",
-            ("foreign-profile",),
-        )
-        assert foreign_row is not None
-        foreign = json.loads(foreign_row["profile_json"])
-        assert not foreign["normal_verified"]
-        assert not foreign["kvcached_verified"]
-    finally:
-        await database.close()
-
-
-@pytest.mark.asyncio
-async def test_profile_backend_verification_is_scoped_to_one_profile_and_backend(
-    tmp_path: Path,
-) -> None:
-    database = Database(tmp_path / "state.db")
-    await database.open()
-    try:
-        await database.create_key(
-            key_id="admin-key",
-            nickname="admin",
-            role=Role.ADMIN,
-            account_id="admin-account",
-            account_nickname="admin-account",
-            prefix="rio_admin_prefix_12345678",
-            api_key="rio_admin_prefix_12345678_secret",
-            limit_tokens=0,
-            unlimited=True,
-        )
-        await database.execute(
-            """
-            INSERT INTO model_catalog
-                (id, nickname, huggingface_repo, state, created_by_key_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            ("model", "model", "org/model", "AVAILABLE", "admin-key", _now(), _now()),
-        )
-        local = replace(
-            make_profile("local-profile", "model", (GPU_0,)),
-            normal_verified=False,
-            kvcached_verified=False,
-        )
-        other = replace(local, id="other-profile", max_num_seqs=64)
-        for profile in (local, other):
-            raw = profile_to_dict(profile)
-            await database.execute(
-                """
-                INSERT INTO model_profiles
-                    (id, model_id, machine_fingerprint, profile_key, profile_json,
-                     verified_at, active)
-                VALUES (?, ?, ?, ?, ?, ?, 1)
-                """,
-                (
-                    profile.id,
-                    profile.model_id,
-                    profile.machine_fingerprint,
-                    profile_key(raw),
-                    json.dumps(raw),
-                    _now(),
-                ),
-            )
-        repository = ProfileRepository(database, "machine")
-        assert await repository.set_profile_backend_verified(
-            model_id="model",
-            profile_id="local-profile",
-            backend="native",
-            verified=True,
-        )
-        records = {
-            record.profile.id: record.profile
-            for record in await repository.records_for_model("model")
-        }
-        assert records["local-profile"].normal_verified
-        assert not records["local-profile"].kvcached_verified
-        assert not records["other-profile"].normal_verified
-        assert not records["other-profile"].kvcached_verified
     finally:
         await database.close()

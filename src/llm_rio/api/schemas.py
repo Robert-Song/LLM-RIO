@@ -72,12 +72,22 @@ class ModelAccessUpdate(BaseModel):
 
 class RegisterModelRequest(BaseModel):
     nickname: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
-    huggingface_repo: str = Field(pattern=r"^[^/\s]+/[^/\s]+$")
+    huggingface_repo: str | None = Field(default=None, pattern=r"^[^/\s]+/[^/\s]+$")
+    local_path: str | None = None
+    engine: Engine = Engine.VLLM
     revision: str | None = None
     grant_to_keys: list[str] = Field(
         default_factory=list,
         validation_alias=AliasChoices("grant_to_keys", "grant_to_key_ids"),
     )
+
+    @model_validator(mode="after")
+    def exactly_one_source(self) -> RegisterModelRequest:
+        if bool(self.huggingface_repo) == bool(self.local_path):
+            raise ValueError("Supply exactly one of huggingface_repo or local_path")
+        if self.local_path and self.revision:
+            raise ValueError("Local artifact revisions are measured, not supplied")
+        return self
 
 
 class ModelValidationOverrides(BaseModel):
@@ -97,12 +107,26 @@ class ModelValidationOverrides(BaseModel):
     def validate_launch_args(cls, value: dict[str, JsonValue]) -> dict[str, JsonValue]:
         # These options belong to RIO's placement, networking, or dedicated fields.
         reserved = {
-            "model", "host", "port", "api_key", "served_model_name",
-            "tensor_parallel_size", "pipeline_parallel_size", "data_parallel_size",
-            "data_parallel_rank", "data_parallel_start_rank", "data_parallel_size_local",
-            "data_parallel_address", "data_parallel_rpc_port", "distributed_executor_backend",
-            "enable_sleep_mode", "max_model_len", "gpu_memory_utilization",
-            "max_num_seqs", "max_num_batched_tokens", "config",
+            "model",
+            "host",
+            "port",
+            "api_key",
+            "served_model_name",
+            "tensor_parallel_size",
+            "pipeline_parallel_size",
+            "data_parallel_size",
+            "data_parallel_rank",
+            "data_parallel_start_rank",
+            "data_parallel_size_local",
+            "data_parallel_address",
+            "data_parallel_rpc_port",
+            "distributed_executor_backend",
+            "enable_sleep_mode",
+            "max_model_len",
+            "gpu_memory_utilization",
+            "max_num_seqs",
+            "max_num_batched_tokens",
+            "config",
         }
         normalized: dict[str, JsonValue] = {}
         for key, item in value.items():
@@ -130,6 +154,7 @@ class MaintenanceRequest(BaseModel):
 
 
 class ProfileEditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     """Administrator override for a validated placement profile."""
 
     engine: Engine | None = None
@@ -149,6 +174,8 @@ ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "
 
 class ModelRequestDefaultsUpdate(BaseModel):
     """Validated request defaults for an existing logical model."""
+
+    model_config = ConfigDict(extra="forbid")
 
     temperature: float | None = Field(default=None, ge=0, le=2)
     top_p: float | None = Field(default=None, gt=0, le=1)
@@ -242,4 +269,5 @@ class MaintenanceStatus(BaseModel):
 
 
 class ModelVerificationTrustRequest(BaseModel):
-    backend: Literal["native", "kvcached", "both"] | None = None
+    model_config = ConfigDict(extra="forbid")
+    reason: str = Field(min_length=1, max_length=1000)

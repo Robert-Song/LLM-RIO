@@ -66,7 +66,7 @@ def is_valid_native_v2(profile: dict[str, Any], *, queue_mode: bool = False) -> 
         return False
     if profile.get("memory_backend", "native") != "native":
         return False
-    if not profile.get("normal_verified"):
+    if not profile.get("measurements_valid"):
         return False
     if profile.get("vram_measurement_version") != CURRENT_VRAM_MEASUREMENT_VERSION:
         return False
@@ -189,7 +189,7 @@ def main() -> int:
             print(f"WOULD REQUEUE {nickname} ({job['id']})")
             continue
         completed = subprocess.run(
-            [str(LLMCTL), "models", "retry", job["id"]],
+            [str(LLMCTL), "models", "validate", job["id"]],
             cwd=PROJECT_DIR,
             check=False,
             capture_output=True,

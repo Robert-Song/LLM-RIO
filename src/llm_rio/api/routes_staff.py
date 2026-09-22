@@ -22,6 +22,32 @@ async def register_model(
     body: RegisterModelRequest, request: Request, principal: StaffPrincipal
 ) -> dict[str, str]:
     database = request.app.state.database
+    if body.engine.value not in request.app.state.scheduler.mode.capabilities.engines:
+        raise RioError(
+            "unsupported_engine", "Engine is unavailable in this serving mode", status_code=422
+        )
+    if body.local_path:
+        from pathlib import Path
+
+        artifact = Path(body.local_path)
+        if not artifact.is_absolute() or not artifact.exists():
+            raise RioError(
+                "invalid_local_path",
+                "Use an existing absolute server-local artifact path",
+                status_code=422,
+            )
+        if body.engine.value == "llama.cpp" and (
+            not artifact.is_file() or artifact.suffix.lower() != ".gguf"
+        ):
+            raise RioError(
+                "invalid_local_path", "llama.cpp registration requires a GGUF file", status_code=422
+            )
+        if body.engine.value == "vllm" and not artifact.is_dir():
+            raise RioError(
+                "invalid_local_path",
+                "vLLM registration requires a model directory",
+                status_code=422,
+            )
     grant_key_ids: list[str] = []
     for selector in body.grant_to_keys:
         key = await database.key_by_selector(selector)
@@ -34,7 +60,9 @@ async def register_model(
         grant_key_ids.append(str(key["id"]))
     model_id, job_id = await database.create_model_job(
         nickname=body.nickname,
-        repo=body.huggingface_repo,
+        repo=body.huggingface_repo or "local",
+        local_path=body.local_path,
+        engine=body.engine.value,
         revision=body.revision,
         creator_key_id=principal.key_id,
         grant_key_ids=grant_key_ids,

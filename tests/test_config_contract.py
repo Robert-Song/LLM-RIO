@@ -8,13 +8,14 @@ import pytest
 from typer.testing import CliRunner
 
 import llm_rio.cli as cli_module
+from llm_rio import admin_client as client_api
 from llm_rio.api.inference_validation import _rough_tokens, _validate_request
-from llm_rio.api.routes_admin import _create_key
 from llm_rio.api.schemas import ChatCompletionRequest, CreateKeyRequest
-from llm_rio.config import EngineSettings, Settings
 from llm_rio.domain import Role
 from llm_rio.errors import QueueFullError
 from llm_rio.queueing import DeficitRoundRobinQueue, QueuedRequest
+from llm_rio.services.access import create_key as _create_key
+from tests.release_fixtures import Settings
 
 
 def permissive_settings(tmp_path: Path, **overrides: Any) -> Settings:
@@ -85,10 +86,12 @@ def test_single_example_mentions_every_public_setting(tmp_path: Path) -> None:
     assert settings.worker_drain_watchdog_seconds is None
     assert settings.worker_request_timeout_seconds is None
     assert settings.worker_stream_idle_timeout_seconds is None
-    for name in Settings.model_fields:
+    for name in __import__("llm_rio.config", fromlist=["Settings"]).Settings.model_fields:
         if name not in {"config_file", "hf_token", "engines"}:
             assert name in text
-    for name in EngineSettings.model_fields:
+    for name in __import__(
+        "llm_rio.config", fromlist=["EngineSettings"]
+    ).EngineSettings.model_fields:
         assert name in text
 
 
@@ -119,7 +122,7 @@ def test_cli_key_creation_is_unlimited_unless_limit_is_supplied(
         payloads.append(json_body)
         return {"nickname": "researcher", "api_key": "rio_test"}
 
-    monkeypatch.setattr(cli_module, "_request", fake_request)
+    monkeypatch.setattr(client_api, "request", fake_request)
     runner = CliRunner()
 
     unlimited_result = runner.invoke(cli_module.app, ["keys", "create", "researcher"])
@@ -206,10 +209,9 @@ class RecordingKeyDatabase:
 @pytest.mark.asyncio
 async def test_new_key_without_quota_policy_is_unlimited() -> None:
     database = RecordingKeyDatabase()
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(database=database)))
 
     await _create_key(
-        request,
+        database,
         CreateKeyRequest(nickname="researcher", role=Role.USER),
     )
 
@@ -220,10 +222,9 @@ async def test_new_key_without_quota_policy_is_unlimited() -> None:
 @pytest.mark.asyncio
 async def test_explicit_key_limit_enables_quota_restriction() -> None:
     database = RecordingKeyDatabase()
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(database=database)))
 
     await _create_key(
-        request,
+        database,
         CreateKeyRequest(nickname="student", role=Role.USER, limit_tokens=100_000),
     )
 

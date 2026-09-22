@@ -18,10 +18,8 @@ diagnostics/
 config.toml
 config.barra.toml
 
-docs/
-scripts/*
-!scripts/yarn_context_demo.py
-uv.lock
+docs/prism-research/
+docs/release/results/
 logs_barra/
 db_backup/
 db_salvage/
@@ -31,3 +29,6 @@ state_barra/
 config*.toml
 !config.example.toml
 .*-api-key-vault
+
+# Local copies of research papers; maintained summaries live in docs/historical.
+docs/*.pdf

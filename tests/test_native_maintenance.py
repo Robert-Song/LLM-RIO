@@ -5,25 +5,27 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from test_scheduler_contract import FakeDatabase, FakeProfiles, FakeSupervisor, make_profile
-from test_validation_cleanup import (
-    candidate_shape,
-    validation_scheduler,
-)
 
-from llm_rio.config import Settings
 from llm_rio.domain import MachineInventory, RuntimeState, ServiceMode, WorkerPlacement
 from llm_rio.errors import RioError
 from llm_rio.gpu_memory import GpuMemory
-from llm_rio.planner import GreedyPlacementPlanner, QueuePressure, WakePlacement
+from llm_rio.planner import QueuePressure, WakePlacement
+from llm_rio.ports import PortAllocator
 from llm_rio.registration import RegistrationManager
 from llm_rio.runtime import ResidencyScheduler
 from llm_rio.validation import ProfileValidator, ValidationPreempted
+from tests.release_fixtures import GreedyPlacementPlanner, Settings
+from tests.test_scheduler_contract import FakeDatabase, FakeProfiles, FakeSupervisor, make_profile
+from tests.test_validation_cleanup import (
+    candidate_shape,
+    validation_scheduler,
+)
 
 
 def normal_scheduler(*workers):
     scheduler, supervisor = validation_scheduler(*workers)
     scheduler.kvcached.enabled = False
+    scheduler.mode.capabilities.validation_requires_maintenance = True
     return scheduler, supervisor
 
 
@@ -119,7 +121,7 @@ async def test_normal_validation_does_not_request_a_post_verification_warm() -> 
     )
     scheduler.planner.prism_weight_cache_enabled = True
     await scheduler.warm_model_once("verified-model")
-    assert scheduler._prism_one_time_warm_model_ids == set()
+    assert scheduler._cache_one_time_warm_model_ids == set()
 
 
 async def test_validation_preflight_defers_until_live_context_memory_is_released(
@@ -174,7 +176,7 @@ def test_native_planner_reaches_live_admission_when_sleeping_residuals_block_wak
         pressures=[QueuePressure("target", 1, 10, datetime.now(UTC))],
         profiles={"target": [target_profile]},
     )
-    assert actions == [WakePlacement("target", "prism_ram_cache_hit")]
+    assert actions == [WakePlacement("target", "residency_ram_cache_hit")]
 
 
 async def test_cancelled_gpu_acquisition_releases_validation_ownership() -> None:
@@ -248,7 +250,11 @@ async def test_validation_probe_unloads_and_preserves_vram_measurements(
     inventory = MachineInventory(
         "test", "driver", None, (GpuDevice("GPU-0", 0, "fake", 100),), "topology", "fingerprint"
     )
-    validator = ProfileValidator(settings, inventory, SimpleNamespace())
+    validator = ProfileValidator(
+        settings,
+        inventory,
+        SimpleNamespace(supervisor=SimpleNamespace(ports=PortAllocator(18000, 18999))),
+    )
     process = SimpleNamespace(pid=123)
     sampler = SimpleNamespace(
         start=lambda: None,
@@ -321,6 +327,7 @@ async def test_maintenance_api_reports_probes_and_blocks_resume(tmp_path) -> Non
     )
     scheduler._validation_gpu_uuids.add("GPU-0")
     app = create_app(settings)
+    app.state.inventory = scheduler.inventory
     app.state.database, app.state.scheduler, app.state.supervisor = database, scheduler, supervisor
     app.dependency_overrides[current_principal] = lambda: Principal(
         "key", "admin", Role.ADMIN, "account", True

@@ -1,3 +1,5 @@
+> **Historical beta reference.** These instructions are retired. See the [release documentation](docs/README.md).
+
 # Non-NVFP4 registration matrix — 2026-09-09
 
 The local server was started on port `8002` and the submitted registration jobs

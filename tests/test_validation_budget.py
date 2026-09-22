@@ -1,19 +1,18 @@
-from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from test_validation_cleanup import candidate_shape
 
-from llm_rio.config import Settings
 from llm_rio.process_cleanup import TeardownError
 from llm_rio.validation import ProfileValidator, ValidationError
+from tests.release_fixtures import Settings, replace
+from tests.test_validation_cleanup import candidate_shape
 
 
 @pytest.mark.parametrize("normal,expected", [(True, [0.8, 0.7]), (False, [0.95, 0.85])])
 async def test_normal_memory_retry_persists_smaller_budget(tmp_path, normal, expected):
     validator = ProfileValidator.__new__(ProfileValidator)
-    validator.settings = Settings()
+    validator.settings = Settings(serving_mode="vllm-sleep" if normal else "kv-cached")
     validator.scheduler = SimpleNamespace(
         validation_requires_maintenance=normal,
         database=SimpleNamespace(record_event=AsyncMock()),

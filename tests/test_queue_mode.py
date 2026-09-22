@@ -1,19 +1,19 @@
 import json
-from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from test_scheduler_contract import FakeDatabase, make_profile, make_worker, pressure
-from test_validation_cleanup import candidate_shape
 
-from llm_rio.config import EngineSettings, ServingMode, Settings
+from llm_rio.config import ServingMode
 from llm_rio.domain import RuntimeState
-from llm_rio.planner import DrainPlacement, GreedyPlacementPlanner, StartPlacement
+from llm_rio.planner import DrainPlacement, StartPlacement
 from llm_rio.profiles import profile_from_dict, profile_to_dict, profile_verified_for_mode
 from llm_rio.validation import ProfileValidator, ValidationError
 from llm_rio.workers import WorkerSupervisor
+from tests.release_fixtures import EngineSettings, GreedyPlacementPlanner, Settings, replace
+from tests.test_scheduler_contract import FakeDatabase, make_profile, make_worker, pressure
+from tests.test_validation_cleanup import candidate_shape
 
 
 def queue_profile(name="model", gpus=("GPU-0",)):
@@ -47,17 +47,6 @@ def test_explicit_modes_override_legacy_flags(mode, backend, cache):
     assert settings.effective_kvcached_mode == backend
     assert settings.ram_weight_cache_enabled is cache
     assert settings.queue_mode_enabled is (mode == "queue")
-
-
-def test_default_and_legacy_experimental_mode_preserved(monkeypatch):
-    assert Settings().effective_kvcached_mode == "none"
-    assert Settings().ram_weight_cache_enabled
-    assert (
-        Settings(engines=EngineSettings(kvcached_mode="required")).effective_kvcached_mode
-        == "required"
-    )
-    monkeypatch.setenv("LLMRIO_SERVING_MODE", "queue")
-    assert Settings().serving_mode is ServingMode.QUEUE
 
 
 def test_queue_profile_requires_measurement_without_sleep():
@@ -262,6 +251,12 @@ def test_queue_routability_and_revalidation_script_agree():
                     settings=Settings(serving_mode="queue"),
                     kvcached=SimpleNamespace(enabled=False),
                     planner=SimpleNamespace(prism_weight_cache_enabled=False),
+                    mode=SimpleNamespace(
+                        eligibility=lambda p: SimpleNamespace(
+                            allowed=p.serving_mode == "queue"
+                            and p.launch_args.get("enable_sleep_mode") is False
+                        )
+                    ),
                 )
             )
         )

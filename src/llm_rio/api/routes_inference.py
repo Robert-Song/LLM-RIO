@@ -19,7 +19,6 @@ from llm_rio.api.inference_validation import _apply_model_defaults, _validate_re
 from llm_rio.api.schemas import ChatCompletionRequest
 from llm_rio.domain import CatalogState, PlacementProfile, Role, ServiceMode
 from llm_rio.errors import MaintenanceError, RioError
-from llm_rio.profiles import profile_verified_for_mode
 from llm_rio.queueing import QueuedRequest
 from llm_rio.security import Principal, hash_idempotency_key
 
@@ -40,23 +39,10 @@ async def _available_models(request: Request, principal: Principal) -> list[dict
 def _routable_profiles(
     request: Request, profiles: list[PlacementProfile]
 ) -> list[PlacementProfile]:
-    scheduler = getattr(request.app.state, "scheduler", None)
-    runtime = getattr(scheduler, "kvcached", None)
-    kvcached_required = bool(getattr(runtime, "enabled", False))
-    ram_weight_cache_required = bool(
-        getattr(getattr(scheduler, "planner", None), "prism_weight_cache_enabled", False)
-    )
     return [
         profile
         for profile in profiles
-        if profile_verified_for_mode(
-            profile,
-            kvcached_required=kvcached_required,
-            ram_weight_cache_required=ram_weight_cache_required,
-            queue_mode_required=bool(
-                getattr(getattr(scheduler, "settings", None), "queue_mode_enabled", False)
-            ),
-        )
+        if request.app.state.scheduler.mode.eligibility(profile).allowed
     ]
 
 
@@ -80,6 +66,15 @@ async def _resolve_model(request: Request, principal: Principal, nickname: str) 
             status_code=403,
             details={"available_models": available},
         )
+    if model.get("source_type") == "local":
+        from pathlib import Path
+
+        from llm_rio.artifacts import local_artifact_unchanged
+
+        if not local_artifact_unchanged(Path(model["artifact_path"]), model["artifact_hashes"]):
+            raise RioError(
+                "artifact_changed", "Local artifacts changed; revalidate the model", status_code=409
+            )
     if model["state"] != CatalogState.AVAILABLE.value:
         raise RioError(
             "model_unavailable",
@@ -98,7 +93,7 @@ async def _resolve_model(request: Request, principal: Principal, nickname: str) 
         runtime = getattr(getattr(request.app.state, "scheduler", None), "kvcached", None)
         backend = "kvcached" if getattr(runtime, "enabled", False) else "native"
         error_code = (
-            "prism_profile_revalidation_required"
+            "residency_profile_revalidation_required"
             if backend == "kvcached"
             else "model_backend_verification_required"
         )
@@ -121,7 +116,7 @@ async def list_models(request: Request, principal: CurrentPrincipal) -> dict[str
         state = (
             "available"
             if routable_profiles
-            else "prism_profile_revalidation_required"
+            else "residency_profile_revalidation_required"
             if profiles
             else "verification_required"
         )
