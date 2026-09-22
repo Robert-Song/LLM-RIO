@@ -16,6 +16,7 @@ import httpx
 
 from llm_rio.config import Settings
 from llm_rio.domain import Engine, PlacementProfile, RuntimeState, WorkerPlacement
+from llm_rio.engine_args import extra_engine_arguments
 from llm_rio.gpu_memory import read_gpu_memory, required_free_vram
 from llm_rio.host_memory import (
     HostMemorySample,
@@ -565,20 +566,13 @@ class WorkerSupervisor:
                 command.extend(["--parallel", str(profile.max_num_seqs)])
         else:
             raise WorkerLaunchError(f"engine is disabled or unsupported: {profile.engine}")
-        for key, value in profile.launch_args.items():
-            if self.settings.queue_mode_enabled and key == "enable_sleep_mode":
-                continue
-            flag = f"--{key.replace('_', '-')}"
-            if isinstance(value, bool):
-                if value:
-                    command.append(flag)
-            elif isinstance(value, list):
-                for item in value:
-                    command.extend([flag, str(item)])
-            elif isinstance(value, dict):
-                command.extend([flag, json.dumps(value, separators=(",", ":"), sort_keys=True)])
-            elif value is not None:
-                command.extend([flag, str(value)])
+        launch_args = {
+            key: value for key, value in profile.launch_args.items()
+            if not (self.settings.queue_mode_enabled and key == "enable_sleep_mode")
+        }
+        command.extend(
+            extra_engine_arguments(launch_args, explicit_false=profile.engine is Engine.VLLM)
+        )
         if profile.engine is Engine.VLLM and self.kvcached.enabled:
             add_kvcached_vllm_flags(command, self.kvcached)
         return command

@@ -25,6 +25,7 @@ from llm_rio.domain import (
     MachineInventory,
     PlacementProfile,
 )
+from llm_rio.engine_args import extra_engine_arguments
 from llm_rio.gpu_memory import read_gpu_memory
 from llm_rio.host_memory import sample_process_group_memory
 from llm_rio.inventory import candidate_gpu_sets, gpu_environment
@@ -492,18 +493,7 @@ class ProfileValidator:
             command.extend(["--enable-auto-tool-choice", "--tool-call-parser", parsers.tool_parser])
         if parsers.reasoning_parser is not None:
             command.extend(["--reasoning-parser", parsers.reasoning_parser])
-        for key, value in launch_args.items():
-            flag = f"--{key.replace('_', '-')}"
-            if isinstance(value, bool):
-                if value:
-                    command.append(flag)
-            elif isinstance(value, list):
-                for item in value:
-                    command.extend([flag, str(item)])
-            elif isinstance(value, dict):
-                command.extend([flag, json.dumps(value, separators=(",", ":"), sort_keys=True)])
-            elif value is not None:
-                command.extend([flag, str(value)])
+        command.extend(extra_engine_arguments(launch_args))
         add_kvcached_vllm_flags(command, kvcached)
         log_path = validation_log_path(
             log_dir=self.settings.log_dir,

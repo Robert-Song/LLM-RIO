@@ -96,7 +96,11 @@ def _request(
             f"{_base_url()}{path}",
             headers=headers,
             json=json_body,
-            timeout=60.0,
+            timeout=(
+                httpx.Timeout(60.0, read=600.0)
+                if method.upper() == "POST" and path == "/admin/usage/summarize"
+                else 60.0
+            ),
         )
     except httpx.HTTPError as exc:
         raise click.ClickException(f"Request failed: {exc}") from exc
@@ -799,6 +803,13 @@ def edit_model_profile(
     updated = result.get("profile") if isinstance(result, dict) else None
     if isinstance(updated, dict):
         _print_profile_records([updated])
+    if isinstance(result, dict) and result.get("verification_required"):
+        typer.echo(
+            "Verification required for: " + ", ".join(result["verification_required"])
+            + ". Editing launch settings clears VRAM measurements. Re-run registration "
+            "with the desired limits for native serving, or Verify kvcached for kvcached. "
+            "Validate model only sets a flag; it does not regenerate measurements."
+        )
     if isinstance(result, dict) and result.get("drained_worker_ids"):
         typer.echo("Draining workers: " + ", ".join(result["drained_worker_ids"]))
     elif isinstance(result, dict) and result.get("restart_required"):
@@ -835,10 +846,24 @@ def model_job(
 
 
 @models_app.command("retry")
-def retry_model_job(job_or_model: str) -> None:
-    """Retry a failed registration; accepts its ID or the model nickname."""
+def retry_model_job(
+    job_or_model: str,
+    max_model_len: int | None = typer.Option(
+        None, "--max-model-len", min=1, help="Context length to probe during real validation."
+    ),
+) -> None:
+    """Re-run registration; accepts its ID or the model nickname."""
     job_id = _job_id_from_selector(job_or_model)
-    result = _request("POST", f"/staff/model-jobs/{job_id}/retry")
+    if max_model_len is None:
+        result = _request("POST", f"/staff/model-jobs/{job_id}/retry")
+    else:
+        job = _request("GET", f"/staff/model-jobs/{job_id}")
+        overrides = dict(job.get("validation_overrides") or {})
+        overrides["max_model_len"] = max_model_len
+        result = _request(
+            "POST", f"/staff/model-jobs/{job_id}/retry",
+            json_body={"validation_overrides": overrides},
+        )
     typer.echo(f"Registration job {result['job_id']} was queued for retry.")
 
 

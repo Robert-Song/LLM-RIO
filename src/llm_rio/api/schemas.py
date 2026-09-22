@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    field_validator,
+    model_validator,
+)
 
 from llm_rio.domain import Engine, Role
 
@@ -72,12 +81,42 @@ class RegisterModelRequest(BaseModel):
 
 
 class ModelValidationOverrides(BaseModel):
-    """Per-registration launch limits used only while validating a failed model."""
+    """Launch settings to measure and persist during registration/revalidation."""
 
+    model_config = ConfigDict(extra="forbid")
+
+    tensor_parallel_size: int | None = Field(default=None, gt=0)
+    launch_args: dict[str, JsonValue] = Field(default_factory=dict)
     max_model_len: int | None = Field(default=None, gt=0)
     max_num_seqs: int | None = Field(default=None, gt=0)
     max_num_batched_tokens: int | None = Field(default=None, gt=0)
     gpu_memory_utilization: float | None = Field(default=None, gt=0, le=1)
+
+    @field_validator("launch_args")
+    @classmethod
+    def validate_launch_args(cls, value: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        # These options belong to RIO's placement, networking, or dedicated fields.
+        reserved = {
+            "model", "host", "port", "api_key", "served_model_name",
+            "tensor_parallel_size", "pipeline_parallel_size", "data_parallel_size",
+            "data_parallel_rank", "data_parallel_start_rank", "data_parallel_size_local",
+            "data_parallel_address", "data_parallel_rpc_port", "distributed_executor_backend",
+            "enable_sleep_mode", "max_model_len", "gpu_memory_utilization",
+            "max_num_seqs", "max_num_batched_tokens", "config",
+        }
+        normalized: dict[str, JsonValue] = {}
+        for key, item in value.items():
+            name = key.replace("-", "_")
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+                raise ValueError(f"Invalid engine argument name: {key}")
+            if name.removeprefix("no_") in reserved:
+                raise ValueError(f"{key} is managed by RIO; use its dedicated field if available")
+            if name in normalized:
+                raise ValueError(f"Duplicate engine argument: {key}")
+            if name in {"dtype", "quantization"} and not isinstance(item, str):
+                raise ValueError(f"{key} must be a string")
+            normalized[name] = item
+        return normalized
 
 
 class ModelJobRetryRequest(BaseModel):

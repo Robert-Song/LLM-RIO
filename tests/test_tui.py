@@ -197,6 +197,15 @@ def management_backend(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[dict[s
             records["models"].append(record)
             records.setdefault("clone_requests", []).append(json_body)
             return {"model": record, "profiles": [], "shared_artifact": True}
+        if (method, path) == ("GET", "/staff/model-jobs/job-1"):
+            return {
+                "id": "job-1", "state": "COMPLETED",
+                "validation_overrides": {"max_num_seqs": 8},
+            }
+        if (method, path) == ("POST", "/staff/model-jobs/job-1/retry"):
+            assert json_body is not None
+            records.setdefault("revalidation_requests", []).append(json_body)
+            return {"job_id": "job-1"}
         if (method, path) == ("POST", "/admin/keys"):
             assert json_body is not None
             record = {
@@ -804,3 +813,57 @@ async def test_tui_trust_recovers_without_selecting_a_profile(
         await app.workers.wait_for_complete()
     path = "/admin/models/trust-available" if bulk else "/admin/models/model-1/trust-verification"
     assert requests == [(path, {})]
+
+
+@pytest.mark.asyncio
+async def test_tui_revalidation_form_submits_parameters_and_keeps_invalid_json(
+    management_backend,
+) -> None:
+    from textual.widgets import TextArea
+
+    app = RioTui()
+    async with app.run_test(size=(130, 55)) as pilot:
+        await pilot.pause()
+        await pilot.click("#nav-models")
+        await pilot.click("#models-retry")
+        await pilot.pause()
+        assert app.screen.query_one("#field-max_num_seqs", Input).value == "8"
+        app.screen.query_one("#field-max_model_len", Input).value = "131072"
+        app.screen.query_one("#field-gpu_memory_utilization", Input).value = "0.85"
+        app.screen.query_one("#field-tensor_parallel_size", Input).value = "2"
+        extra = app.screen.query_one("#field-launch_args", TextArea)
+        extra.load_text("{invalid")
+        await pilot.click("#form-submit")
+        await pilot.pause()
+        assert len(app.screen_stack) == 2
+        assert "revalidation_requests" not in management_backend
+        extra.load_text('{"kv_cache_dtype":"fp8","enforce_eager":true}')
+        await pilot.pause(0.5)
+        app.screen.query_one("#form-submit", Button).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+    assert management_backend["revalidation_requests"] == [{"validation_overrides": {
+        "max_model_len": 131072, "gpu_memory_utilization": 0.85,
+        "tensor_parallel_size": 2, "max_num_seqs": 8,
+        "launch_args": {"kv_cache_dtype": "fp8", "enforce_eager": True},
+    }}]
+
+
+@pytest.mark.asyncio
+async def test_profile_revalidation_prefills_selected_profile(management_backend) -> None:
+    from textual.widgets import TextArea
+
+    app = RioTui()
+    async with app.run_test(size=(130, 55)) as pilot:
+        await pilot.pause()
+        await pilot.click("#nav-models")
+        await pilot.click("#models-profiles")
+        await pilot.pause()
+        await pilot.click("#profiles-revalidate")
+        await pilot.pause()
+        assert app.screen.query_one("#field-max_model_len", Input).value == "4096"
+        assert app.screen.query_one("#field-tensor_parallel_size", Input).value == "1"
+        assert app.screen.query_one("#field-max_num_seqs", Input).value == "128"
+        assert app.screen.query_one("#field-launch_args", TextArea).text == "{}"
+        await pilot.click("#form-cancel")
+    assert "revalidation_requests" not in management_backend

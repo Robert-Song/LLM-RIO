@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import platform
 import shutil
@@ -25,10 +26,12 @@ from textual.widgets import (
     Label,
     Select,
     Static,
+    TextArea,
 )
 from textual.worker import WorkerCancelled, WorkerFailed
 
 from llm_rio import cli as cli_api
+from llm_rio.api.schemas import ModelValidationOverrides
 from llm_rio.config import ServingMode, Settings
 from llm_rio.inventory import InventoryError, discover_inventory
 
@@ -49,6 +52,7 @@ class FieldSpec:
     input_type: InputKind = "text"
     options: tuple[tuple[str, str], ...] = ()
     help_text: str = ""
+    multiline: bool = False
 
 
 class FormModal(ModalScreen[FormResult | None]):
@@ -106,6 +110,11 @@ class FormModal(ModalScreen[FormResult | None]):
         border: tall #8ab4f8;
     }
 
+    FormModal TextArea {
+        height: 8;
+        min-height: 5;
+    }
+
     FormModal .modal-actions {
         height: 3;
         align-horizontal: right;
@@ -120,11 +129,15 @@ class FormModal(ModalScreen[FormResult | None]):
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
-    def __init__(self, title: str, fields: Iterable[FieldSpec], submit_label: str) -> None:
+    def __init__(
+        self, title: str, fields: Iterable[FieldSpec], submit_label: str,
+        *, validate: Callable[[FormResult], object] | None = None,
+    ) -> None:
         super().__init__()
         self.form_title = title
         self.fields = tuple(fields)
         self.submit_label = submit_label
+        self.validate = validate
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -141,6 +154,9 @@ class FormModal(ModalScreen[FormResult | None]):
                         )
                     elif isinstance(field.value, bool):
                         yield Checkbox(field.label, value=field.value, id=f"field-{field.key}")
+                    elif field.multiline:
+                        yield Label(field.label)
+                        yield TextArea(str(field.value), id=f"field-{field.key}")
                     else:
                         yield Label(field.label)
                         yield Input(
@@ -163,6 +179,8 @@ class FormModal(ModalScreen[FormResult | None]):
                 self.query_one(selector, Select).focus()
             elif isinstance(field.value, bool):
                 self.query_one(selector, Checkbox).focus()
+            elif field.multiline:
+                self.query_one(selector, TextArea).focus()
             else:
                 self.query_one(selector, Input).focus()
             return
@@ -186,13 +204,40 @@ class FormModal(ModalScreen[FormResult | None]):
                 value = "" if raw is Select.NULL else str(raw)
             elif isinstance(field.value, bool):
                 value = self.query_one(selector, Checkbox).value
+            elif field.multiline:
+                value = self.query_one(selector, TextArea).text.strip()
             else:
                 value = self.query_one(selector, Input).value.strip()
             if field.required and isinstance(value, str) and not value:
                 self.notify(f"{field.label} is required.", severity="error")
                 return
             values[field.key] = value
+        if self.validate is not None:
+            try:
+                self.validate(values)
+            except ValueError as exc:
+                self.notify(str(exc), severity="error", timeout=10)
+                return
         self.dismiss(values)
+
+
+def _revalidation_overrides(values: FormResult) -> dict[str, Any]:
+    raw_args = str(values.get("launch_args") or "{}").strip()
+    try:
+        launch_args = json.loads(raw_args or "{}")
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Engine arguments must be valid JSON: {exc.msg}") from exc
+    if not isinstance(launch_args, dict):
+        raise ValueError("Engine arguments must be a JSON object.")
+    raw: dict[str, Any] = {"launch_args": launch_args}
+    for key in (
+        "max_model_len", "gpu_memory_utilization", "tensor_parallel_size",
+        "max_num_seqs", "max_num_batched_tokens",
+    ):
+        value = str(values.get(key) or "").strip()
+        if value:
+            raw[key] = value
+    return ModelValidationOverrides.model_validate(raw).model_dump(exclude_none=True)
 
 
 class ConfirmModal(ModalScreen[bool]):
@@ -464,7 +509,7 @@ class RioTui(App[ServiceLaunch | None]):
                         yield Button("Clone model", id="models-clone")
                         yield Button("Edit model", id="models-edit")
                         yield Button("Review job", id="models-review")
-                        yield Button("Retry job", id="models-retry")
+                        yield Button("Re-validate…", id="models-retry")
                         yield Button("Disable", id="models-disable", variant="warning")
                         yield Button("Change user access", id="models-user-access")
                         yield Button("Profiles", id="models-profiles")
@@ -485,6 +530,7 @@ class RioTui(App[ServiceLaunch | None]):
                         yield Button("Back to models", id="profiles-back")
                         yield Button("Refresh", id="profiles-refresh", variant="primary")
                         yield Button("Edit selected", id="profiles-edit", variant="warning")
+                        yield Button("Re-validate…", id="profiles-revalidate")
                         yield Button("Enable selected", id="profiles-enable")
                         yield Button("Disable selected", id="profiles-disable", variant="warning")
                         yield Button("Verify kvcached", id="profiles-verify-kvcached")
@@ -1513,16 +1559,96 @@ class RioTui(App[ServiceLaunch | None]):
                 Panel(Pretty(job, expand_all=True), title="Registration job")
             )
 
-    async def _retry_model(self, record: dict[str, Any]) -> None:
+    async def _open_revalidation(
+        self, record: dict[str, Any], profile: dict[str, Any] | None = None
+    ) -> None:
+        job_id = self._model_job_id(record)
+        if job_id is None:
+            return
+        if profile is not None and profile.get("engine") != "vllm":
+            self.notify("Revalidation currently supports vLLM profiles.", severity="warning")
+            return
+        ok, job = await self._call(
+            "Loading validation settings",
+            lambda: cli_api._request("GET", f"/staff/model-jobs/{job_id}"),
+        )
+        if not ok or not isinstance(job, dict):
+            return
+        if job.get("state") in {"QUEUED", "RUNNING"}:
+            self.notify("This model already has a validation job running.", severity="warning")
+            return
+        defaults = dict(job.get("validation_overrides") or {})
+        if profile is not None:
+            defaults = {
+                key: profile.get(key) for key in (
+                    "max_model_len", "gpu_memory_utilization", "tensor_parallel_size",
+                    "max_num_seqs", "max_num_batched_tokens",
+                )
+            }
+            args = dict(profile.get("launch_args") or {})
+            args.pop("enable_sleep_mode", None)
+            for key in ("dtype", "quantization"):
+                if profile.get(key) is not None:
+                    args[key] = profile[key]
+            defaults["launch_args"] = args
+        numeric = (
+            ("max_model_len", "Maximum context tokens (blank: automatic)", "integer"),
+            ("gpu_memory_utilization", "GPU utilization (0–1, blank: automatic)", "number"),
+            ("tensor_parallel_size", "Tensor parallelism / TP (blank: automatic)", "integer"),
+            ("max_num_seqs", "Maximum concurrent sequences (optional)", "integer"),
+            ("max_num_batched_tokens", "Maximum batched tokens (optional)", "integer"),
+        )
+        fields = tuple(
+            FieldSpec(
+                key, label,
+                value="" if defaults.get(key) is None else str(defaults[key]),
+                input_type=cast(InputKind, kind),
+                help_text=(
+                    "Runs real validation. Native validation waits for maintenance; use Drain "
+                    "on the Maintenance page. Success activates the measured profiles and "
+                    "keeps previous profiles inactive."
+                    if key == "max_model_len" else ""
+                ),
+            )
+            for key, label, kind in numeric
+        ) + (
+            FieldSpec(
+                "launch_args", "Extra vLLM arguments (JSON object)", multiline=True,
+                value=json.dumps(defaults.get("launch_args") or {}, indent=2),
+                help_text='Example: {"kv_cache_dtype": "fp8", "enforce_eager": true}. '
+                "Successful validation saves the effective settings for later model loads.",
+            ),
+        )
+
+        def finished(values: FormResult | None) -> None:
+            if values is not None:
+                self.run_worker(
+                    self._retry_model(record, _revalidation_overrides(values)), exit_on_error=False
+                )
+
+        self.push_screen(
+            FormModal(
+                f"Re-validate {record.get('nickname')}", fields, "Queue validation",
+                validate=_revalidation_overrides,
+            ),
+            finished,
+        )
+
+    async def _retry_model(
+        self, record: dict[str, Any], overrides: dict[str, Any]
+    ) -> None:
         job_id = self._model_job_id(record)
         if job_id is None:
             return
         ok, result = await self._call(
-            "Retrying registration",
-            lambda: cli_api._request("POST", f"/staff/model-jobs/{job_id}/retry"),
+            "Queueing validation",
+            lambda: cli_api._request(
+                "POST", f"/staff/model-jobs/{job_id}/retry",
+                json_body={"validation_overrides": overrides},
+            ),
         )
         if ok:
-            self.notify(f"Registration queued: {result}")
+            self.notify(f"Validation queued: {result}", timeout=10)
             await self.refresh_models()
 
     async def _disable_model(self, record: dict[str, Any]) -> None:
@@ -1738,7 +1864,9 @@ class RioTui(App[ServiceLaunch | None]):
                 input_type="integer",
             ),
             FieldSpec("make_default", "Make this the only active/default profile", value=False),
-            FieldSpec("restart_workers", "Drain current workers and use immediately", value=True),
+            FieldSpec(
+                "restart_workers", "Drain current workers (verification still required)", value=True
+            ),
         )
 
         def finished(values: FormResult | None) -> None:
@@ -1795,6 +1923,15 @@ class RioTui(App[ServiceLaunch | None]):
         )
         if ok:
             self.notify("Placement profile updated.", timeout=8)
+            if isinstance(result, dict) and result.get("verification_required"):
+                self.notify(
+                    "Verification required for: " + ", ".join(result["verification_required"])
+                    + ". Editing launch settings clears VRAM measurements. Re-run registration "
+                    "with the desired limits for native serving, or Verify kvcached for kvcached. "
+                    "Validate model only sets a flag; it does not regenerate measurements.",
+                    severity="warning",
+                    timeout=20,
+                )
             if isinstance(result, dict) and result.get("drained_worker_ids"):
                 self.notify(
                     "Draining workers: " + ", ".join(result["drained_worker_ids"]), timeout=10
@@ -2048,11 +2185,11 @@ class RioTui(App[ServiceLaunch | None]):
                 self.run_worker(self._review_model(record), exit_on_error=False)
         elif button_id == "models-retry":
             if (retry_model_record := self._selected_model()) is not None:
-                self._confirm(
-                    "Retry registration",
-                    f"Queue the registration job for '{retry_model_record.get('nickname')}' again?",
-                    "Retry",
-                    lambda: self._retry_model(retry_model_record),
+                self.run_worker(self._open_revalidation(retry_model_record), exit_on_error=False)
+        elif button_id == "profiles-revalidate":
+            if self.profile_model is not None and (profile := self._selected_profile()) is not None:
+                self.run_worker(
+                    self._open_revalidation(self.profile_model, profile), exit_on_error=False
                 )
         elif button_id == "models-disable":
             if (disable_model_record := self._selected_model()) is not None:

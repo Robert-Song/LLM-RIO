@@ -28,7 +28,9 @@ from llm_rio.profiles import (
     StoredProfile,
     invalidate_profile_measurements,
     launch_configuration_changed,
+    profile_key,
     profile_to_dict,
+    profile_verified_for_mode,
 )
 from llm_rio.security import issue_api_key, token_prefix
 
@@ -247,7 +249,11 @@ def _apply_profile_edit(
             updated,
             gpu_count=target_gpu_count,
             tensor_parallel_size=target_gpu_count,
-            eligible_gpu_sets=eligible_gpu_sets,
+            eligible_gpu_sets=(
+                eligible_gpu_sets
+                if target_gpu_count != profile.tensor_parallel_size
+                else profile.eligible_gpu_sets
+            ),
             idle_vram_mib_per_gpu=_resize_per_gpu_measurement(
                 updated.idle_vram_mib_per_gpu, target_gpu_count
             ),
@@ -644,10 +650,28 @@ async def update_model_profile(
     try:
         saved = await request.app.state.profiles.update(updated, make_default=body.make_default)
     except sqlite3.IntegrityError as exc:
+        conflicting = next(
+            (
+                record
+                for record in await request.app.state.profiles.records_for_model(model_id)
+                if record.profile.id != profile_id
+                and profile_key(profile_to_dict(record.profile))
+                == profile_key(profile_to_dict(updated))
+            ),
+            None,
+        )
+        if conflicting is None:
+            raise
         raise RioError(
             "duplicate_profile",
-            "Another placement profile already has these identifying settings",
+            f"Placement profile {conflicting.profile.id} already has these settings "
+            f"({'active' if conflicting.active else 'inactive'}). "
+            "Select that existing profile and enable it if needed.",
             status_code=409,
+            details={
+                "existing_profile_id": conflicting.profile.id,
+                "existing_profile_active": conflicting.active,
+            },
         ) from exc
     if not saved:
         raise HTTPException(status_code=404, detail="Placement profile not found")
@@ -674,6 +698,13 @@ async def update_model_profile(
         ),
         "drained_worker_ids": drained_worker_ids,
         "restart_required": not body.restart_workers,
+        "verification_required": (
+            []
+            if profile_verified_for_mode(
+                updated, kvcached_required=updated.memory_backend == "kvcached"
+            )
+            else [updated.memory_backend]
+        ),
     }
 
 

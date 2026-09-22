@@ -514,6 +514,22 @@ class ProfileRepository:
             if row is None:
                 return False
             raw = json.loads(row["profile_json"])
+            if verified:
+                measured = profile_from_dict(
+                    {**raw, "normal_verified": True, "kvcached_verified": True}
+                )
+                if not profile_verified_for_mode(
+                    measured, kvcached_required=measured.memory_backend == "kvcached"
+                ):
+                    raise RioError(
+                        "profile_measurements_required",
+                        "This profile needs real validation to regenerate VRAM measurements. "
+                        "Setting a verification flag cannot make an edited profile routable. "
+                        "Re-run registration with the desired limits for native serving, "
+                        "or run kvcached verification for kvcached serving.",
+                        status_code=409,
+                        details={"profile_id": profile_id},
+                    )
             raw[field] = verified
             await connection.execute(
                 """

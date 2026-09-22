@@ -297,6 +297,12 @@ the settled raw request, reservation, and ledger rows included in that summary. 
 requests are left untouched. A weekly cron job can therefore invoke `./llmctl summarize`; use
 `LLMRIO_API_URL` and `LLMRIO_API_KEY` when the command runs away from the service host.
 
+Summarization uses a ten-minute HTTP read timeout in both the CLI and TUI. It can
+briefly delay other database operations; regular compaction keeps batches smaller.
+For an offline reset that preserves API keys, model registrations, permissions,
+and validation history, see [the database rebuild procedure](DATABASE_MIGRATION.md).
+The rebuild writes a new database and matching vault without replacing the source.
+
 The admin-only `GET /admin/dashboard` endpoint exposes the same live data used by the TUI:
 current and total usage/throughput, output tokens per active generation second, ranked per-model
 token usage, NVML-backed GPU health, loaded model placements, and continuous-batching slot use.
@@ -320,6 +326,35 @@ Any launch-affecting override clears throughput, VRAM, sleep/wake, and verificat
 the exact edited configuration must pass real validation before inference can route to it. Use
 `--restart-workers` to drain workers still using an older profile. Key and model access commands
 accept human-readable nicknames (or a complete API key for key selection).
+
+### Revalidation with custom settings
+
+In the TUI, choose **Models → Re-validate…**, or select a placement profile and choose
+**Re-validate…** to prefill its settings. The form accepts maximum context length, GPU memory
+utilization, tensor parallelism (TP), maximum concurrent sequences, and maximum batched tokens.
+Blank numeric fields use automatic/configured defaults; explicit TP restricts probes to that
+GPU count. The multiline **Extra vLLM arguments** field accepts a JSON object, for example:
+
+```json
+{"kv_cache_dtype": "fp8", "enforce_eager": true, "enable_prefix_caching": false}
+```
+
+Use argument names without leading `--`; hyphens and underscores are accepted. Nested JSON
+objects such as `hf_overrides` are supported, as are `dtype` and `quantization`. RIO-managed
+options (model path, network binding, authentication, sleep mode, parallel placement, and the
+form's dedicated fields) cannot be overridden through extra arguments. Unknown engine options
+are checked by the engine during real validation.
+
+**Queue validation** submits the request. Native validation waits for **Maintenance → Drain**;
+use **Review job** to follow progress, and **Resume** after completion. Successful validation
+saves the effective tested settings and measurements as active profiles for the model, retaining
+previous profiles as inactive history. Identical configurations update the existing profile.
+Workers use those saved settings on subsequent loads. Memory retries can reduce utilization;
+inspect the saved profile for the effective value. Existing workers retain their launch settings
+until drained/reloaded. Declared model context limits still cap requested context length; when
+metadata omits that limit, an explicit length can exceed the conservative 4,096-token fallback.
+
+The CLI also supports `./llmctl models retry MODEL --max-model-len 131072`.
 
 ### Shared-weight model profiles and request defaults
 

@@ -6,6 +6,7 @@ import json
 import shutil
 import traceback
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -525,15 +526,14 @@ class RegistrationManager:
         tok_max_len = tokenizer_config.get("model_max_length")
         if not isinstance(tok_max_len, int) or tok_max_len >= 10_000_000:
             tok_max_len = None
-        max_model_len = int(
+        declared_max_model_len = (
             config.get("max_position_embeddings")
             or text_cfg.get("max_position_embeddings")
             or config.get("model_max_length")
             or text_cfg.get("model_max_length")
             or tok_max_len
-            or 4096
         )
-        max_model_len = max(1, max_model_len)
+        max_model_len = max(1, int(declared_max_model_len or 4096))
         quantization = config.get("quantization_config", {}).get("quant_method")
         dtype_value = str(config.get("torch_dtype") or "auto").lower()
         dtype = {
@@ -553,6 +553,7 @@ class RegistrationManager:
             "weight_bytes": sum(int(item["bytes"]) for item in weight_files),
             "weight_files": [item["path"] for item in weight_files],
             "max_model_len": max_model_len,
+            "max_model_len_is_fallback": declared_max_model_len is None,
             "dtype": dtype,
             "quantization": quantization,
             "capabilities": capabilities,
@@ -573,13 +574,15 @@ class RegistrationManager:
     ) -> list[Any]:
         raw_overrides = job.get("validation_overrides")
         overrides = raw_overrides if isinstance(raw_overrides, dict) else {}
-        requested_max_model_len = overrides.get("max_model_len")
+        requested_max_model_len = overrides.get(
+            "max_model_len", self.settings.engines.max_model_len
+        )
         source_max_model_len = inspection["max_model_len"]
         max_model_len = source_max_model_len
         if isinstance(requested_max_model_len, int):
             max_model_len = (
                 requested_max_model_len
-                if source_max_model_len is None
+                if source_max_model_len is None or inspection.get("max_model_len_is_fallback")
                 else min(source_max_model_len, requested_max_model_len)
             )
         candidates = build_candidate_shapes(
@@ -598,8 +601,24 @@ class RegistrationManager:
                 "max_num_batched_tokens", self.settings.engines.max_num_batched_tokens
             ),
         )
+        requested_tp = overrides.get("tensor_parallel_size")
+        if requested_tp is not None:
+            candidates = [
+                candidate for candidate in candidates
+                if candidate.tensor_parallel_size == requested_tp
+            ]
+        launch_args = dict(overrides.get("launch_args") or {})
+        dtype = launch_args.pop("dtype", inspection["dtype"])
+        quantization = launch_args.pop("quantization", inspection["quantization"])
+        candidates = [
+            replace(candidate, dtype=dtype, quantization=quantization, launch_args=launch_args)
+            for candidate in candidates
+        ]
         if not candidates:
-            raise ValidationError("candidate_shapes", "model cannot fit any homogeneous GPU set")
+            message = "model cannot fit any homogeneous GPU set"
+            if requested_tp is not None:
+                message = f"No eligible GPU placement for requested TP={requested_tp}"
+            raise ValidationError("candidate_shapes", message)
         accepted = []
         last_validation_error: ValidationError | None = None
         for candidate in candidates:

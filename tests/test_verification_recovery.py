@@ -234,3 +234,19 @@ async def test_trust_respects_running_queue_mode(saved_models, tmp_path, bulk):
         )
         assert (await client.post(path, json={})).status_code == 200
         assert len(await app.state.profiles.for_model("model")) == 1
+
+
+async def test_manual_validate_rejects_measurements_invalidated_by_edit(saved_models):
+    from llm_rio.errors import RioError
+
+    repo = ProfileRepository(saved_models, "old")
+    profile = (await repo.records_for_model("model"))[0].profile
+    assert await repo.update(replace(profile, max_model_len=131072), make_default=True)
+    with pytest.raises(RioError, match="real validation") as error:
+        await repo.set_profile_backend_verified(
+            model_id="model", profile_id=profile.id, backend="native", verified=True
+        )
+    assert error.value.code == "profile_measurements_required"
+    edited = (await repo.for_model("model"))[0]
+    assert not edited.normal_verified
+    assert edited.vram_measurement_version == 0

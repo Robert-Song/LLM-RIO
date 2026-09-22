@@ -254,3 +254,23 @@ def test_llmctl_summarize_calls_admin_endpoint(monkeypatch: pytest.MonkeyPatch) 
             {"through": "2026-08-21T00:00:00+00:00"},
         )
     ]
+
+
+def test_summarize_http_timeout_allows_large_compactions(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    timeouts: list[Any] = []
+
+    def request(*args: Any, **kwargs: Any) -> httpx.Response:
+        timeouts.append(kwargs["timeout"])
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(cli, "_api_key", lambda: "test-key")
+    monkeypatch.setattr(cli, "_base_url", lambda: "http://localhost")
+    monkeypatch.setattr(cli.httpx, "request", request)
+    cli._request("POST", "/admin/usage/summarize")
+    cli._request("GET", "/admin/dashboard")
+    assert isinstance(timeouts[0], httpx.Timeout)
+    assert timeouts[0].read == 600.0
+    assert timeouts[0].connect == 60.0
+    assert timeouts[1] == 60.0
