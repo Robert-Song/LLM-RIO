@@ -3,14 +3,28 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from llm_rio.modes.validation import memory_budgets
 from llm_rio.process_cleanup import TeardownError
 from llm_rio.validation import ProfileValidator, ValidationError
 from tests.release_fixtures import Settings, replace
 from tests.test_validation_cleanup import candidate_shape
 
 
-@pytest.mark.parametrize("normal,expected", [(True, [0.8, 0.7]), (False, [0.95, 0.85])])
-async def test_normal_memory_retry_persists_smaller_budget(tmp_path, normal, expected):
+def test_explicit_sleep_budget_does_not_change_other_modes():
+    assert memory_budgets("vllm-sleep", 0.95, explicit=True) == [0.95, 0.85, 0.75]
+    for mode in ("queue", "kv-cached"):
+        assert memory_budgets(mode, 0.95, explicit=True) == memory_budgets(mode, 0.95)
+
+
+@pytest.mark.parametrize(
+    "normal,explicit,expected",
+    [
+        (True, False, [0.8, 0.7]),
+        (True, True, [0.95, 0.85]),
+        (False, False, [0.95]),
+    ],
+)
+async def test_normal_memory_retry_persists_smaller_budget(tmp_path, normal, explicit, expected):
     validator = ProfileValidator.__new__(ProfileValidator)
     validator.settings = Settings(serving_mode="vllm-sleep" if normal else "kv-cached")
     validator.scheduler = SimpleNamespace(
@@ -36,13 +50,17 @@ async def test_normal_memory_retry_persists_smaller_budget(tmp_path, normal, exp
         model_revision="r",
         model_path=tmp_path,
         nickname="m",
-        candidate=replace(candidate_shape(1, (("GPU-0",),)), gpu_memory_utilization=0.95),
+        candidate=replace(
+            candidate_shape(1, (("GPU-0",),)),
+            gpu_memory_utilization=0.95,
+            gpu_memory_utilization_is_explicit=explicit,
+        ),
         gpu_set=("GPU-0",),
         backend="native",
     )
     if normal:
         profile = await validator._probe_vllm(**args)
-        assert profile.gpu_memory_utilization == 0.7
+        assert profile.gpu_memory_utilization == expected[-1]
         assert seen == expected
         assert validator._release_validation_port.await_count == 2
     else:

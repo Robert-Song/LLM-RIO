@@ -109,8 +109,10 @@ def _audit_source_snapshot(
 
     def launch_engine_settings(config: dict[str, Any]) -> dict[str, Any]:
         settings = dict(config.get("engines", {}))
-        # This beta-only selector does not affect native vLLM launch behavior.
+        # Beta accepted these unsupported extra fields without using them in native
+        # vLLM launch; release rejects unknown engine settings.
         settings.pop("kvcached_mode", None)
+        settings.pop("kv-cache-dtype", None)
         return settings
 
     info["launch_engine_settings_match"] = launch_engine_settings(
@@ -574,6 +576,27 @@ def _insert_values(
     connection.execute(f'INSERT INTO "{table}" ({names}) VALUES ({placeholders})', values)
 
 
+def _seed_revalidation_jobs(connection: sqlite3.Connection) -> int:
+    """Create retryable jobs for imported models with no active placement profile."""
+    if connection.execute("PRAGMA user_version").fetchone()[0] != 1:
+        raise ValueError("Revalidation jobs require a schema-version-1 release database")
+    rows = connection.execute(
+        "SELECT m.id FROM model_catalog m WHERE m.state != 'DISABLED' "
+        "AND NOT EXISTS (SELECT 1 FROM model_profiles p "
+        "WHERE p.model_id=m.id AND p.active=1) "
+        "AND NOT EXISTS (SELECT 1 FROM model_jobs j WHERE j.model_id=m.id) "
+        "ORDER BY m.id"
+    ).fetchall()
+    now = datetime.now(UTC).isoformat()
+    for row in rows:
+        connection.execute(
+            "INSERT INTO model_jobs(id,model_id,state,stage,created_at,updated_at) "
+            "VALUES (?,?,'FAILED','migration_requires_validation',?,?)",
+            (str(uuid.uuid4()), str(row[0]), now, now),
+        )
+    return len(rows)
+
+
 def _apply_migration(
     *,
     source: Path,
@@ -806,6 +829,7 @@ def _apply_migration(
                         item["active"],
                     ),
                 )
+            new_validation_jobs = _seed_revalidation_jobs(release)
             foreign_errors = release.execute("PRAGMA foreign_key_check").fetchall()
             if foreign_errors:
                 raise ValueError(
@@ -840,6 +864,7 @@ def _apply_migration(
                 "model_catalog",
                 "model_grants",
                 "model_profiles",
+                "model_jobs",
                 "quota_reservations",
                 "inference_requests",
                 "runtime_events",
@@ -849,6 +874,7 @@ def _apply_migration(
         return {
             "release_rollback_snapshot": str(rollback_path),
             "rows_after_migration": counts,
+            "new_revalidation_jobs_created": new_validation_jobs,
             "profiles_eligible_and_imported": len(prepared_profiles),
             "active_profile_rows_preserved": active_preserved,
             "eligible_source_profile_records_collapsed_as_equivalent": len(

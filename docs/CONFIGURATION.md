@@ -66,6 +66,9 @@ existing artifacts against the new mode instead of importing beta verification f
 
 All shipped defaults appear in [config.example.toml](../config.example.toml).
 Unset optional numeric values are omitted from TOML; zero is not an unlimited sentinel.
+In `vllm-sleep`, validation starts at 0.80 GPU memory utilization when the value
+is omitted. An explicit engine or per-validation value is honored, including values
+above 0.80; confirmed memory failures use the mode's lower retry budgets.
 Supply `LLMRIO_HF_TOKEN` for gated repositories. Keep credentials out of tracked TOML.
 For remote administration use `LLMRIO_API_URL` and `LLMRIO_API_KEY`; these are client
 connection settings, distinct from server binding settings.

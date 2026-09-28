@@ -49,12 +49,17 @@ serving-time change detection, while validation rebuilds the full content manife
 Native GPU probes require maintenance. Drain waits for admitted requests, verifies engine
 teardown, then permits validation. Review the persisted job stage and engine log on error.
 `models validate NAME` retries the same workflow and always runs probes.
+The data migration creates retryable jobs for imported models with no active
+placement profile; old job history is not copied. Profiles bound to an unavailable
+GPU remain inactive; validate the model on the current managed GPU before serving it.
 Use `models validate NAME --profile ID` to probe the selected edited/cloned profile,
 including its engine, artifact, launch arguments and measured placement set. Clones
 have a persisted validation job. Launch edits drain existing workers after admitted
 work completes; invalidated workers cannot accept new work. Model-specific
 context, concurrency and launch overrides are entered in the TUI validation form or the
 validation API. Failed validation leaves the model requiring administrator review.
+The existing retry API accepts tensor parallelism, context, sequence and batch
+limits, GPU utilization, and allowed engine launch arguments for an exact probe.
 
 Use the profile's measured placement, context and concurrency; never infer eligibility
 from model names, file size alone, or another GPU's result. Enablement and measurement

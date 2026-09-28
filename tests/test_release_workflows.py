@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -20,9 +21,60 @@ from llm_rio.ports import PortAllocator
 from llm_rio.profiles import ProfileRepository
 from llm_rio.security import Principal
 from llm_rio.workers import WorkerSupervisor
+from scripts.migrate_release_data import _seed_revalidation_jobs
 from tests.test_profile_admin_contract import inventory
 
 pytest_plugins = ["tests.test_verification_recovery"]
+
+
+async def test_imported_model_uses_existing_full_parameter_retry(saved_models, tmp_path):
+    with sqlite3.connect(saved_models.path) as connection:
+        assert _seed_revalidation_jobs(connection) == 2
+        assert _seed_revalidation_jobs(connection) == 0
+    row = await saved_models.fetchone("SELECT id FROM model_jobs WHERE model_id='model'")
+    assert row is not None
+    assert (
+        await saved_models.fetchone("SELECT id FROM model_jobs WHERE model_id='disabled'") is None
+    )
+    settings = Settings(serving_mode="vllm-sleep", config_file=tmp_path / "absent.toml")
+    app = create_app(settings)
+    started: list[str] = []
+    app.state.database = saved_models
+    app.state.scheduler = SimpleNamespace(mode=create_mode(settings, inventory()))
+    app.state.registration = SimpleNamespace(start=started.append)
+    app.dependency_overrides[current_principal] = lambda: Principal(
+        "admin-id", "admin", Role.ADMIN, "account", True
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            f"/staff/model-jobs/{row['id']}/retry",
+            json={
+                "validation_overrides": {
+                    "tensor_parallel_size": 1,
+                    "max_model_len": 131072,
+                    "max_num_seqs": 4,
+                    "max_num_batched_tokens": 8192,
+                    "gpu_memory_utilization": 0.83,
+                }
+            },
+        )
+    assert response.status_code == 202, response.text
+    job = await saved_models.get_model_job(response.json()["job_id"])
+    assert job is not None
+    assert job["model_id"] == "model"
+    assert job["state"] == "QUEUED"
+    assert job["validation_overrides"] == {
+        "tensor_parallel_size": 1,
+        "max_model_len": 131072,
+        "max_num_seqs": 4,
+        "max_num_batched_tokens": 8192,
+        "gpu_memory_utilization": 0.83,
+    }
+    assert started == [job["id"]]
+    assert await saved_models.key_count() == 1
+    assert len(await saved_models.list_models()) == 3
 
 
 async def test_saved_profile_is_reachable_and_trust_route_is_audited(saved_models, tmp_path):

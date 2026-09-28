@@ -99,6 +99,7 @@ class CandidateShape:
     quantization: str | None
     eligible_gpu_sets: tuple[tuple[str, ...], ...]
     launch_args: dict[str, Any] = field(default_factory=dict)
+    gpu_memory_utilization_is_explicit: bool = False
 
 
 def build_candidate_shapes(
@@ -150,6 +151,7 @@ def build_candidate_shapes(
                         if gpu_memory_utilization is not None
                         else automatic_utilization
                     ),
+                    gpu_memory_utilization_is_explicit=gpu_memory_utilization is not None,
                     dtype=dtype,
                     quantization=quantization,
                     eligible_gpu_sets=tuple(viable_sets),
@@ -357,7 +359,11 @@ class ProfileValidator:
         conservative = backend == "native" and self.scheduler.validation_requires_maintenance
         from llm_rio.modes.validation import memory_budgets
 
-        budgets = memory_budgets(self.settings.serving_mode.value, candidate.gpu_memory_utilization)
+        budgets = memory_budgets(
+            self.settings.serving_mode.value,
+            candidate.gpu_memory_utilization,
+            explicit=candidate.gpu_memory_utilization_is_explicit,
+        )
         for index, budget in enumerate(budgets):
             attempt = replace(candidate, gpu_memory_utilization=budget)
             if conservative:
