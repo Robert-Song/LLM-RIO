@@ -40,8 +40,17 @@ class ProfilesController:
         self.app._sync_profile_verification_buttons(record)
 
     def _sync_profile_verification_buttons(self, profile: dict[str, Any]) -> None:
-        self.app.query_one("#profiles-activation", Button).label = (
-            "Disable selected" if profile.get("active") else "Enable selected"
+        button = self.app.query_one("#profiles-activation", Button)
+        button.label = "Disable selected" if profile.get("active") else "Enable selected"
+        eligibility = profile.get("eligibility")
+        blocked = isinstance(eligibility, dict) and not eligibility.get("allowed", False)
+        reason = eligibility.get("reason") if isinstance(eligibility, dict) else None
+        button.disabled = bool(blocked and not profile.get("active"))
+        button.tooltip = (
+            f"Prerequisite: {reason}. Run Validate/Revalidate or use "
+            "Advanced trust for compatible saved evidence."
+            if blocked
+            else None
         )
 
     def _open_trust_measurements(self, profile: dict[str, Any]) -> None:

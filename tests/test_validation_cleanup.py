@@ -384,6 +384,45 @@ async def test_automatic_registration_uses_tp2_when_tp1_validation_fails(
     assert validator.validated_tensor_parallel_sizes == [1, 2]
 
 
+async def test_registration_probes_when_artifact_size_hint_finds_no_placement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validator = RegistrationValidatorStub()
+    manager = registration_manager(validator)
+    inspected_weights: list[int] = []
+
+    def build_candidates(**kwargs: Any) -> list[CandidateShape]:
+        inspected_weights.append(kwargs["weight_bytes"])
+        return [] if kwargs["weight_bytes"] else [candidate_shape(1, (("GPU-0",),))]
+
+    monkeypatch.setattr(registration, "build_candidate_shapes", build_candidates)
+    assert await manager._validate_with_requeue(
+        job_id="job",
+        job={"model_id": "model", "nickname": "model"},
+        artifact_path=Path("/tmp/model"),
+        resolved_revision="revision",
+        inspection={
+            "weight_bytes": 10**12,
+            "max_model_len": 4096,
+            "dtype": "auto",
+            "quantization": None,
+        },
+    ) == ["tp1"]
+    assert inspected_weights == [10**12, 0]
+    assert validator.validated_tensor_parallel_sizes == [1]
+
+
+def test_inspection_leaves_unknown_weight_format_to_engine(tmp_path: Path) -> None:
+    (tmp_path / "checkpoint.custom").write_bytes(b"model data")
+    inspection = RegistrationManager._inspect(
+        tmp_path,
+        {"artifact_hashes": [{"path": "checkpoint.custom", "bytes": 10}]},
+    )
+    assert inspection["weight_bytes"] == 10
+    assert inspection["weight_files"] == ["checkpoint.custom"]
+    assert inspection["max_model_len_is_fallback"] is True
+
+
 async def test_registration_uses_persisted_validation_overrides(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

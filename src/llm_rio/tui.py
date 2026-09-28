@@ -682,8 +682,10 @@ class RioTui(App[ServiceLaunch | None]):
     ) -> None:
         return await self.models_controller._open_revalidation(record, profile)
 
-    async def _retry_model(self, record: dict[str, Any], overrides: dict[str, Any]) -> None:
-        return await self.models_controller._retry_model(record, overrides)
+    async def _retry_model(
+        self, record: dict[str, Any], overrides: dict[str, Any], *, profile_id: str | None = None
+    ) -> None:
+        return await self.models_controller._retry_model(record, overrides, profile_id=profile_id)
 
     async def _disable_model(self, record: dict[str, Any]) -> None:
         return await self.models_controller._disable_model(record)

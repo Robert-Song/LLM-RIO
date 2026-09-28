@@ -665,7 +665,7 @@ def test_tui_can_handoff_to_serve(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: ServingMode | None
 ) -> None:
     config = tmp_path / "alternate.toml"
-    config.write_text('serving_mode = "queue"\n')
+    config.write_text('serving_mode = "queue"\n[modes.queue]\nscale_window_seconds = 12\n')
     monkeypatch.delenv("LLMRIO_SERVING_MODE")
     served: list[Any] = []
     monkeypatch.setattr(tui_module, "run_tui", lambda: ServiceLaunch(config, mode))
@@ -682,8 +682,13 @@ def test_tui_can_handoff_to_serve(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", [None, *ServingMode])
 async def test_start_service_form_returns_selected_mode(
-    management_backend: dict[str, list[dict[str, Any]]], mode: ServingMode | None
+    management_backend: dict[str, list[dict[str, Any]]],
+    mode: ServingMode | None,
+    tmp_path: Path,
 ) -> None:
+    (tmp_path / "config.barra.toml").write_text(
+        'serving_mode = "vllm-sleep"\n[modes.vllm_sleep]\nidle_sleep_seconds = 12\n'
+    )
     app = RioTui()
     async with app.run_test(size=(130, 45)) as pilot:
         await pilot.pause()
@@ -698,6 +703,54 @@ async def test_start_service_form_returns_selected_mode(
         await pilot.click("#form-submit")
         await pilot.pause()
     assert app.return_value == ServiceLaunch(Path("config.barra.toml"), mode)
+
+
+@pytest.mark.asyncio
+async def test_start_service_keeps_invalid_configuration_form_open(
+    management_backend, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("LLMRIO_SERVING_MODE")
+    config = tmp_path / "beta.toml"
+    config.write_text('prism_weight_cache_mode = "ram"\nhf_token = "secret-never-display"\n')
+    messages: list[str] = []
+    app = RioTui()
+    async with app.run_test(size=(130, 45)) as pilot:
+        await pilot.pause()
+        await pilot.click("#nav-system")
+        await pilot.click("#system-start-service")
+        form = app.screen
+        monkeypatch.setattr(form, "notify", lambda message, **kwargs: messages.append(message))
+        form.query_one("#field-config", Input).value = str(config)
+        await pilot.click("#form-submit")
+        await pilot.pause()
+        assert app.screen is form
+        assert form.query_one("#field-config", Input).value == str(config)
+        assert "Beta settings are unsupported" in messages[-1]
+        assert "secret-never-display" not in messages[-1]
+        config.write_text('serving_mode = "queue"\n')
+        await pilot.pause(0.4)
+        await pilot.click("#form-submit")
+        await pilot.pause()
+    assert app.return_value == ServiceLaunch(config, None)
+
+
+@pytest.mark.asyncio
+async def test_service_forms_use_dotenv_configuration_selector(
+    management_backend, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("LLMRIO_SERVING_MODE")
+    config = tmp_path / "release.toml"
+    config.write_text('serving_mode = "queue"\n')
+    (tmp_path / "config.toml").write_text('prism_weight_cache_mode = "ram"\n')
+    (tmp_path / ".env").write_text(f"LLMRIO_CONFIG_FILE={config}\n")
+    app = RioTui()
+    async with app.run_test(size=(130, 45)) as pilot:
+        await pilot.pause()
+        await pilot.click("#nav-system")
+        for button in ("#system-doctor", "#system-start-service"):
+            await pilot.click(button)
+            assert app.screen.query_one("#field-config", Input).value == str(config)
+            await pilot.click("#form-cancel")
 
 
 @pytest.mark.asyncio
@@ -780,3 +833,55 @@ async def test_profile_revalidation_prefills_selected_profile(management_backend
         assert app.screen.query_one("#field-launch_args", TextArea).text == "{}"
         await pilot.click("#form-cancel")
     assert "revalidation_requests" not in management_backend
+
+
+@pytest.mark.asyncio
+async def test_tui_restores_form_values_after_remote_error(management_backend) -> None:
+    from llm_rio.ui.components import FieldSpec, FormModal
+
+    app = RioTui()
+    async with app.run_test(size=(130, 45)) as pilot:
+        await pilot.pause()
+
+        def submitted(values: dict[str, str | bool] | None) -> None:
+            if values is not None:
+
+                def fail() -> None:
+                    raise ValueError("server rejected update")
+
+                app.run_worker(app._call("Saving test form", fail), exit_on_error=False)
+
+        app.show_form(FormModal("Test", [FieldSpec("name", "Name")], "Save"), submitted)
+        await pilot.pause()
+        app.screen.query_one("#field-name", Input).value = "preserved"
+        await pilot.click("#form-submit")
+        await pilot.pause(0.3)
+        assert len(app.screen_stack) == 2
+        assert app.screen.query_one("#field-name", Input).value == "preserved"
+
+
+@pytest.mark.asyncio
+async def test_tui_rejects_duplicate_inflight_operation(management_backend) -> None:
+    import threading
+
+    app = RioTui()
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def slow() -> str:
+        nonlocal calls
+        calls += 1
+        entered.set()
+        release.wait(5)
+        return "done"
+
+    async with app.run_test(size=(130, 45)) as pilot:
+        await pilot.pause()
+        first = asyncio.create_task(app._call("Saving unique operation", slow))
+        assert await asyncio.to_thread(entered.wait, 2)
+        duplicate = await app._call("Saving unique operation", slow)
+        assert duplicate == (False, None)
+        release.set()
+        assert await first == (True, "done")
+    assert calls == 1

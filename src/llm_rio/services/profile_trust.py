@@ -61,7 +61,7 @@ async def trust_measurements(
         )
         if model["source_type"] == "local":
             eligible = eligible and local_artifact_unchanged(
-                artifact, json.loads(model["artifact_hashes_json"])
+                artifact, json.loads(model["artifact_hashes_json"]), verify_content=True
             )
         if not eligible:
             raise RioError(

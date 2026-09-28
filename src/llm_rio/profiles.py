@@ -121,31 +121,70 @@ def profile_verified_for_mode(
         return False
     if profile.vram_measurement_version != CURRENT_VRAM_MEASUREMENT_VERSION:
         return False
-    if profile.vram_baseline_mib_per_gpu is None:
+
+    def finite_nonnegative(value: object) -> bool:
+        return (
+            isinstance(value, int | float)
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value >= 0
+        )
+
+    if (
+        profile.gpu_count < 1
+        or not profile.eligible_gpu_sets
+        or any(
+            len(group) != profile.gpu_count or len(set(group)) != profile.gpu_count
+            for group in profile.eligible_gpu_sets
+        )
+    ):
         return False
-    required_vectors = (
+    if not all(
+        finite_nonnegative(value)
+        for value in (
+            profile.predicted_tokens_per_second,
+            profile.load_and_warmup_seconds,
+        )
+    ):
+        return False
+    required_vectors = [
         profile.idle_vram_mib_per_gpu,
         profile.peak_vram_mib_per_gpu,
         profile.gpu_headroom_mib_per_gpu,
         profile.vram_baseline_mib_per_gpu,
-    )
-    if any(len(values) != profile.gpu_count for values in required_vectors):
-        return False
-    if any(value < 0 for values in required_vectors for value in values):
+    ]
+    if ram_weight_cache_required:
+        if profile.engine is not Engine.VLLM:
+            return False
+        if not all(
+            finite_nonnegative(value)
+            for value in (
+                profile.host_cache_mib,
+                profile.weight_cache_offload_seconds,
+                profile.weight_cache_activation_seconds,
+            )
+        ):
+            return False
+        required_vectors.extend(
+            (
+                profile.sleep_vram_mib_per_gpu,
+                profile.wake_peak_vram_mib_per_gpu,
+            )
+        )
+    if any(
+        values is None
+        or len(values) != profile.gpu_count
+        or not all(finite_nonnegative(value) for value in values)
+        for values in required_vectors
+    ):
         return False
     if any(profile.gpu_headroom_mib_per_gpu):
         return False
-    if profile.wake_peak_vram_mib_per_gpu is not None and (
-        len(profile.wake_peak_vram_mib_per_gpu) != profile.gpu_count
-        or any(value < 0 for value in profile.wake_peak_vram_mib_per_gpu)
-    ):
-        return False
-    if ram_weight_cache_required and (
-        profile.engine is not Engine.VLLM
-        or profile.sleep_vram_mib_per_gpu is None
-        or len(profile.sleep_vram_mib_per_gpu) != profile.gpu_count
-        or any(value < 0 for value in profile.sleep_vram_mib_per_gpu)
-        or profile.wake_peak_vram_mib_per_gpu is None
+    if any(
+        idle > peak
+        for idle, peak in zip(
+            profile.idle_vram_mib_per_gpu, profile.peak_vram_mib_per_gpu, strict=True
+        )
     ):
         return False
 
@@ -411,10 +450,23 @@ class ProfileRepository:
                 "The source model artifact is not available on this machine",
                 status_code=409,
             )
+        if source_model.get("source_type") == "local":
+            from llm_rio.artifacts import local_artifact_unchanged
+
+            if not local_artifact_unchanged(
+                Path(str(source_model["artifact_path"])),
+                source_model.get("artifact_hashes") or [],
+                verify_content=True,
+            ):
+                raise RioError(
+                    "model_artifact_changed", "Revalidate changed local artifact", status_code=409
+                )
         source_records = [
             record
             for record in await self.records_for_model(str(source_model["id"]))
             if record.active
+            and record.profile.measurements_valid
+            and record.profile.model_revision == source_model.get("resolved_revision")
         ]
         if not source_records:
             raise RioError(
@@ -534,6 +586,22 @@ class ProfileRepository:
                     source_model.get("source_type", "huggingface"),
                     source_model.get("local_path"),
                     source_model.get("engine", "vllm"),
+                ),
+            )
+            from llm_rio.services.validation_jobs import profile_overrides
+
+            await connection.execute(
+                "INSERT INTO model_jobs (id, model_id, state, stage, requested_grants_json, "
+                "validation_overrides_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    str(uuid.uuid4()),
+                    model_id,
+                    "COMPLETED",
+                    "cloned",
+                    "[]",
+                    json.dumps(profile_overrides(cloned_profiles[0])),
+                    now,
+                    now,
                 ),
             )
             for profile_id, fingerprint, raw_key, profile_json, verified_at in cloned_profile_rows:

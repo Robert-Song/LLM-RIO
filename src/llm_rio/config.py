@@ -81,6 +81,9 @@ class Settings(BaseSettings):
 
     @property
     def residency(self) -> CacheSettings:
+        if self.serving_mode is ServingMode.QUEUE:
+            # Queue has no weight cache. Dormant sleep settings must not affect it.
+            return CacheSettings()
         if self.serving_mode is ServingMode.KV_CACHED:
             return self.modes.kv_cached
         return self.modes.vllm_sleep
@@ -120,6 +123,11 @@ class Settings(BaseSettings):
     def validate_settings(self) -> Settings:
         if self.worker_port_start > self.worker_port_end:
             raise ValueError("worker_port_start must not exceed worker_port_end")
+        # All named mode sections are schema-checked, but only serving_mode is active.
+        # Retaining another mode's settings permits CLI/TUI/environment overrides
+        # without rewriting the file or mixing the modes' runtime policies.
+        if self.serving_mode is not ServingMode.QUEUE and self.engines.enable_llama_cpp:
+            raise ValueError("engines.enable_llama_cpp is queue-only")
         return self
 
     def ensure_directories(self) -> None:

@@ -13,15 +13,26 @@ was running during initial inspection. Existing external allocations are not our
 Local beta databases were archived under ignored `db_backup/final-cleanup-baseline/`.
 
 ## Stages and acceptance evidence
-- [ ] Shared contracts, client, persistence ownership, launch specifications
-- [ ] Independent queue mode, including llama.cpp registration and validation
-- [ ] Independent native sleep mode
-- [ ] Experimental dependency/bootstrap isolation
-- [ ] Registration sources, profile identity, audited advanced trust
-- [ ] Interface cleanup and capability enforcement
-- [ ] Tracked documentation, reproducible install, CI and package checks
-- [ ] Hardware baselines and production model qualification
+The [follow-up implementation review](IMPLEMENTATION_REVIEW.md) found six
+reproducible defects and additional unfinished paths. The earlier checked stages
+described landed code, not completed acceptance; the checklist below corrects that.
+
+- [x] Fix process/service ownership and document reviewed shared/client boundaries
+- [x] Fix queue TP fallback and selected-profile llama.cpp revalidation
+- [x] Fix native sleep cache serialization and evidence validation
+- [x] Experimental dependency/bootstrap isolation
+- [x] Fix cloned/edited profile jobs, actual engine identity and trust eligibility
+- [ ] Prove all supported HTTP/CLI/TUI workflows and capability/role restrictions
+- [x] Tracked documentation, reproducible install, CI and package checks
+- [x] Design exhaustive final native acceptance and public-surface traceability
+- [x] Implement the real-GPU driver, independent oracles and manual evidence ledger
+- [ ] Execute the complete final native acceptance kit
+- [ ] Full hardware workflow qualification, including llama.cpp/GGUF and TP
 - [ ] 100 transitions and one-hour mixed-load soak per production mode
+
+Current software checks and the limited two-mode hardware smoke are recorded in
+[acceptance evidence](EVIDENCE.md). The [final acceptance design](FINAL_ACCEPTANCE.md)
+specifies the remaining execution work. Design coverage is not a passing result.
 
 ## Defects established during audit
 - TUI imports private CLI helpers and duplicates administration behavior.

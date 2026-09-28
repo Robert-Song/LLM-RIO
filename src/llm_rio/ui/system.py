@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import click
 from rich.panel import Panel
 from rich.pretty import Pretty
 from textual.widgets import (
@@ -31,6 +32,13 @@ class SystemController:
     def __init__(self, app: RioTui) -> None:
         self.app = app
 
+    @staticmethod
+    def _configuration_file() -> Path:
+        try:
+            return connection.settings().config_file
+        except click.ClickException:
+            return Path(os.environ.get("LLMRIO_CONFIG_FILE", "config.toml"))
+
     async def refresh_maintenance(self, *, notify_error: bool = True) -> None:
         ok, payload = await self.app._call(
             "Loading maintenance status",
@@ -44,12 +52,16 @@ class SystemController:
 
     async def refresh_service_info(self, *, notify_error: bool = True) -> None:
         def load_info() -> dict[str, str]:
-            config = Path(os.environ.get("LLMRIO_CONFIG_FILE", "config.toml"))
+            config = self._configuration_file()
             result = {
-                "API base URL": connection.base_url(),
                 "Config file": str(config.resolve()),
                 "Administrator credential": "unavailable",
             }
+            try:
+                result["API base URL"] = connection.base_url()
+            except click.ClickException as exc:
+                result["Configuration error"] = str(exc)
+                return result
             try:
                 connection.api_key()
             except Exception as exc:
@@ -90,7 +102,7 @@ class SystemController:
             )
 
     def _open_doctor(self) -> None:
-        config = os.environ.get("LLMRIO_CONFIG_FILE", "config.toml")
+        config = str(self._configuration_file())
         fields = (FieldSpec("config", "Configuration file", value=config, required=True),)
         self.app.show_form(
             FormModal("Host diagnostics", fields, "Run doctor"), self.app._doctor_result
@@ -119,7 +131,7 @@ class SystemController:
                 self.app.notify("Doctor checks passed.")
 
     def _open_start_service(self) -> None:
-        config = os.environ.get("LLMRIO_CONFIG_FILE", "config.toml")
+        config = str(self._configuration_file())
         fields = (
             FieldSpec(
                 "config",
@@ -134,12 +146,28 @@ class SystemController:
                 value="configured",
                 options=(("Use configuration / environment", "configured"),)
                 + tuple((mode.value, mode.value) for mode in ServingMode),
-                help_text="Choose queue, vllm-sleep, or kv-cached to override the configuration.",
+                help_text=(
+                    "Overrides serving_mode. Settings in other modes.* sections stay inactive."
+                ),
             ),
         )
         self.app.show_form(
-            FormModal("Start LLM-RIO service", fields, "Start service"), self.app._serve_result
+            FormModal(
+                "Start LLM-RIO service", fields, "Start service", validate=self._validate_serve
+            ),
+            self.app._serve_result,
         )
+
+    @staticmethod
+    def _validate_serve(values: FormResult) -> None:
+        mode = _str_value(values, "mode")
+        try:
+            connection.settings(
+                Path(_str_value(values, "config")),
+                mode=None if mode == "configured" else ServingMode(mode),
+            )
+        except click.ClickException as exc:
+            raise ValueError(str(exc)) from None
 
     def _serve_result(self, values: FormResult | None) -> None:
         if values is not None:

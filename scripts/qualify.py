@@ -12,6 +12,8 @@ import json
 import os
 import time
 import uuid
+from collections import Counter
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,26 @@ def completion_usage(payload: dict[str, Any]) -> int:
     if usage["completion_tokens"] < 0:
         raise ValueError("Negative completion-token usage")
     return int(usage["completion_tokens"])
+
+
+def accounting_matches(requests: list[dict[str, Any]], rows: list[dict[str, Any]]) -> bool:
+    """Compare authoritative response usage with one settled row per request."""
+    if len(rows) != len(requests) or any(
+        not isinstance(item.get("completion_tokens"), int) for item in requests
+    ):
+        return False
+    expected = Counter((item["model"], item["completion_tokens"]) for item in requests)
+    observed = Counter(
+        (row.get("model"), row.get("token_usage", {}).get("completion_tokens")) for row in rows
+    )
+    return expected == observed and all(
+        row.get("completion_status") == "COMPLETED"
+        and row.get("error_code") is None
+        and row.get("accepted_count") == 1
+        and row.get("completion_count") == 1
+        and isinstance(row.get("token_usage", {}).get("prompt_tokens"), int)
+        for row in rows
+    )
 
 
 async def request_sample(
@@ -109,6 +131,8 @@ async def qualify(args: argparse.Namespace) -> bool:
         models = args.models or callable_names
         if not models or set(models) - set(callable_names):
             raise SystemExit("Every selected model must have a callable validated profile")
+        if len(set(models)) < 2:
+            raise SystemExit("Mixed-load qualification requires at least two callable models")
         initial_status = await get("/admin/status")
         if initial_status["mode"] != "ACTIVE":
             raise SystemExit("Resume the dedicated qualification service before running traffic")
@@ -155,10 +179,12 @@ async def qualify(args: argparse.Namespace) -> bool:
                         for worker in status["workers"]:
                             worker_id, state = worker["worker_id"], worker["state"]
                             previous = states.get(worker_id)
-                            if state != previous and state in {"READY", "SLEEPING", "STOPPED"}:
-                                # An already-resident initial worker is not a transition.
-                                if previous is not None:
-                                    report["observed_transitions"] += 1
+                            if (
+                                previous is not None
+                                and state != previous
+                                and state in {"READY", "SLEEPING", "STOPPED"}
+                            ):
+                                report["observed_transitions"] += 1
                             states[worker_id] = state
                         output.write(
                             json.dumps(
@@ -173,10 +199,8 @@ async def qualify(args: argparse.Namespace) -> bool:
                         output.flush()
                     except (httpx.HTTPError, ValueError, KeyError) as exc:
                         telemetry_errors.append(str(exc))
-                    try:
+                    with suppress(TimeoutError):
                         await asyncio.wait_for(stopping.wait(), timeout=args.sample_interval)
-                    except TimeoutError:
-                        pass
 
         task = asyncio.create_task(sample())
         started = time.monotonic()
@@ -216,17 +240,25 @@ async def qualify(args: argparse.Namespace) -> bool:
             (args.output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
         requests = report["request_results"]
         rows = report["accounting"]["requests"]
-        report["traffic_gate_passed"] = (
-            bool(requests)
-            and all(item["ok"] for item in requests)
-            and not telemetry_errors
-            and report["traffic_seconds"] >= 3600
-            and report["observed_transitions"] >= args.minimum_transitions >= 100
-            and all(worker["state"] == "STOPPED" for worker in final["workers"])
-            and not final.get("queued_models")
-            and not final["validation"]["gpu_uuids"]
-            and len(rows) == len(requests)
-        )
+        ownership = final.get("resource_ownership", {})
+        report["gate_checks"] = {
+            "all_requests_succeeded": bool(requests) and all(item["ok"] for item in requests),
+            "telemetry_complete": not telemetry_errors,
+            "one_hour_load": report["traffic_seconds"] >= 3600,
+            "hundred_transitions": report["observed_transitions"]
+            >= args.minimum_transitions
+            >= 100,
+            "workers_stopped": all(
+                worker["state"] == "STOPPED" and worker["pid"] is None
+                for worker in final["workers"]
+            ),
+            "queues_drained": not final.get("queued_models"),
+            "resources_released": ownership.get("request_leases") == 0
+            and ownership.get("reserved_ports") == []
+            and ownership.get("validation_gpu_uuids") == [],
+            "accounting_matches": accounting_matches(requests, rows),
+        }
+        report["traffic_gate_passed"] = all(report["gate_checks"].values())
         (args.output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
         return bool(report["traffic_gate_passed"])
 

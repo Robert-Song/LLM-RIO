@@ -29,7 +29,6 @@ def queue_planner():
     return GreedyPlacementPlanner(
         wait_duration_seconds=5,
         minimum_residency_seconds=0,
-        fair_share_seconds=7200,
         queue_mode=True,
     )
 

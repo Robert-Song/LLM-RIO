@@ -25,6 +25,7 @@ from llm_rio.host_memory import (
 )
 from llm_rio.host_memory import sample_host_memory as sample_host_memory
 from llm_rio.host_memory import sample_process_group_memory as sample_process_group_memory
+from llm_rio.modes.contracts import ModePolicy
 from llm_rio.modes.lifecycle import WorkerLifecycle
 from llm_rio.ports import PortAllocator
 from llm_rio.process_cleanup import terminate_engine
@@ -73,6 +74,24 @@ class WorkerSupervisor:
         self._event_callback: WorkerEventCallback | None = None
         self.internal_api_key = f"rio_internal_{secrets.token_urlsafe(32)}"
         self.kvcached = detect_kvcached(settings.effective_kvcached_mode)
+        self._mode: ModePolicy | None = None
+
+    def bind_mode(self, mode: ModePolicy) -> None:
+        """Bind the scheduler's single selected policy before worker admission."""
+        if self._mode is not None:
+            raise RuntimeError("Worker supervisor mode is already bound")
+        self._mode = mode
+
+    def _profile_allowed(self, profile: PlacementProfile) -> bool:
+        if self._mode is not None:
+            return self._mode.eligibility(profile).allowed
+        # Standalone supervisor tests can exercise resource mechanics without a scheduler.
+        return profile_verified_for_mode(
+            profile,
+            kvcached_required=self.kvcached.enabled,
+            ram_weight_cache_required=self.ram_weight_cache_enabled,
+            queue_mode_required=self.settings.queue_mode_enabled,
+        )
 
     @property
     def lifecycle(self) -> WorkerLifecycle:
@@ -132,12 +151,7 @@ class WorkerSupervisor:
         Never infer that stopping a process has already released its GPU memory.
         """
         key = (profile.id, gpu_uuids)
-        if not profile_verified_for_mode(
-            profile,
-            kvcached_required=False,
-            ram_weight_cache_required=self.ram_weight_cache_enabled,
-            queue_mode_required=self.settings.queue_mode_enabled,
-        ):
+        if not self._profile_allowed(profile):
             return False
         while True:
             waking_worker = self.workers.get(waking_worker_id) if waking_worker_id else None
@@ -254,12 +268,7 @@ class WorkerSupervisor:
     ) -> WorkerPlacement:
         if len(gpu_uuids) != profile.gpu_count or gpu_uuids not in profile.eligible_gpu_sets:
             raise WorkerLaunchError("placement does not match a validated GPU set")
-        if not profile_verified_for_mode(
-            profile,
-            kvcached_required=self.kvcached.enabled,
-            ram_weight_cache_required=self.ram_weight_cache_enabled,
-            queue_mode_required=self.settings.queue_mode_enabled,
-        ):
+        if not self._profile_allowed(profile):
             raise WorkerLaunchError(
                 "placement profile is not verified for the configured vLLM memory backend"
             )

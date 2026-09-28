@@ -30,3 +30,10 @@ quota exhaustion produce explicit errors. Clients should inspect HTTP status and
 structured error payload, and avoid blindly retrying a streamed request after output.
 Use `X-Test-Run-ID` to associate qualification requests with authenticated
 `GET /admin/requests?test_run_id=…` accounting records.
+
+`response_format`, tools and reasoning options are forwarded to the selected engine.
+Their compatibility is determined by that engine and the artifact; basic registration
+probes do not certify every optional request feature. The final physical test kit
+includes feature requests and tool-result continuation for supported fixtures. An
+unsupported engine request must fail with reservation/lease cleanup, not a local
+capability flag that can never be acquired through validation.

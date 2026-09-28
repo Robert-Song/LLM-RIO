@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NotRequired, TypedDict, cast
 
 import click
 import httpx
@@ -101,13 +101,27 @@ def profile_record(nickname: str, selector: str) -> dict[str, Any]:
     raise click.ClickException("Placement profile selector is ambiguous.")
 
 
-class AdminClient:
-    """Shared typed HTTP operations; presentation belongs to CLI/TUI."""
+class ValidationJobResponse(TypedDict):
+    job_id: str
+    model_id: NotRequired[str]
+    validation_overrides: NotRequired[dict[str, Any]]
 
-    request = staticmethod(request)
-    key_records = staticmethod(key_records)
-    key_record = staticmethod(key_record)
-    model_records = staticmethod(model_records)
-    model_record = staticmethod(model_record)
-    model_profiles = staticmethod(model_profiles)
-    profile_record = staticmethod(profile_record)
+
+def validate_job(
+    job_id: str,
+    *,
+    profile_id: str | None = None,
+    overrides: dict[str, Any] | None = None,
+) -> ValidationJobResponse:
+    """The shared CLI/TUI contract for every real validation and retry action."""
+    payload: dict[str, Any] = {}
+    if profile_id is not None:
+        payload["profile_id"] = profile_id
+    if overrides is not None:
+        payload["validation_overrides"] = overrides
+    result = request(
+        "POST", f"/staff/model-jobs/{job_id}/retry", **({"json_body": payload} if payload else {})
+    )
+    if not isinstance(result, dict) or not isinstance(result.get("job_id"), str):
+        raise click.ClickException("The server returned an invalid validation job")
+    return cast(ValidationJobResponse, result)

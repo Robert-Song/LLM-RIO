@@ -11,8 +11,8 @@ from llm_rio.api.schemas import (
     ModelJobRetryRequest,
     RegisterModelRequest,
 )
-from llm_rio.domain import CatalogState
 from llm_rio.errors import RioError
+from llm_rio.services.validation_jobs import queue_validation
 
 router = APIRouter()
 
@@ -86,36 +86,24 @@ async def retry_model_job(
     _: StaffPrincipal,
     body: ModelJobRetryRequest | None = None,
 ) -> dict[str, object]:
-    job = await request.app.state.database.get_model_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
-    if job["state"] in {"QUEUED", "RUNNING"}:
-        raise HTTPException(status_code=409, detail="The model job is already running")
-    overrides = (
-        None
-        if body is None or body.validation_overrides is None
-        else body.validation_overrides.model_dump(exclude_none=True)
-    )
-    if overrides is not None:
-        await request.app.state.database.set_model_job_validation_overrides(job_id, overrides)
-    await request.app.state.database.update_model_job(
+    result = await queue_validation(
+        request.app.state.database,
         job_id,
-        job_state="QUEUED",
-        stage="resolve",
-        catalog_state=CatalogState.REQUESTED,
+        engines=request.app.state.scheduler.mode.capabilities.engines,
+        profile_id=body.profile_id if body else None,
+        overrides=(
+            body.validation_overrides.model_dump(exclude_none=True, exclude_unset=True)
+            if body and body.validation_overrides
+            else None
+        ),
     )
-    if overrides is not None:
-        await request.app.state.database.record_event(
-            "MODEL_JOB_RETRY_OVERRIDDEN",
-            str(job["model_id"]),
-            {"job_id": job_id, "validation_overrides": overrides},
-        )
+    await request.app.state.database.record_event(
+        "MODEL_VALIDATION_QUEUED",
+        str(result["model_id"]),
+        result,
+    )
     request.app.state.registration.start(job_id)
-    return {
-        "model_id": job["model_id"],
-        "job_id": job_id,
-        "validation_overrides": overrides if overrides is not None else job["validation_overrides"],
-    }
+    return result
 
 
 @router.get("/staff/models")
@@ -125,6 +113,7 @@ async def staff_models(request: Request, _: StaffPrincipal) -> dict[str, object]
 
 @router.post("/staff/models/{model_id}/disable", status_code=status.HTTP_202_ACCEPTED)
 async def disable_model(model_id: str, request: Request, _: StaffPrincipal) -> dict[str, str]:
+    await request.app.state.registration.cancel_model(model_id)
     if not await request.app.state.database.disable_model(model_id):
         raise HTTPException(status_code=404, detail="Model not found")
     for worker in request.app.state.supervisor.workers.values():

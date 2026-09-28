@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib.metadata
 import json
 import math
 import re
@@ -24,7 +23,7 @@ from llm_rio.domain import (
     MachineInventory,
     PlacementProfile,
 )
-from llm_rio.engines.identity import launch_binding
+from llm_rio.engines.identity import engine_identity, launch_binding
 from llm_rio.engines.launch import adapter
 from llm_rio.gpu_memory import read_gpu_memory
 from llm_rio.host_memory import sample_process_group_memory
@@ -437,6 +436,7 @@ class ProfileValidator:
         launch_args["enable_sleep_mode"] = ram_weight_cache_enabled
         parsers = detect_vllm_parser_configuration(model_path)
         launch_shape = replace(candidate, launch_args=launch_args)
+        measured_binding = launch_binding(self.settings, launch_shape, Engine.VLLM)
         spec = adapter(Engine.VLLM).launch(
             settings=self.settings,
             shape=launch_shape,
@@ -527,17 +527,16 @@ class ProfileValidator:
                     await sampler.stop()
                 finally:
                     await self._terminate(process, gpu_uuids=gpu_set)
-        try:
-            version = importlib.metadata.version("vllm")
-        except importlib.metadata.PackageNotFoundError:
-            version = "executable-managed"
+        if measured_binding != launch_binding(self.settings, launch_shape, Engine.VLLM):
+            raise ValidationError("engine_identity", "Engine changed during validation; retry")
+        version = engine_identity(self.settings, Engine.VLLM)["version"]
         return PlacementProfile(
             id=str(uuid.uuid4()),
             model_id=model_id,
             model_revision=model_revision,
             engine=Engine.VLLM,
             engine_version=version,
-            launch_binding=launch_binding(self.settings, launch_shape, Engine.VLLM),
+            launch_binding=measured_binding,
             machine_fingerprint=self.inventory.fingerprint,
             gpu_count=candidate.gpu_count,
             tensor_parallel_size=candidate.tensor_parallel_size,

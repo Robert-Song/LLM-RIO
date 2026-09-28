@@ -80,6 +80,7 @@ class DiagnosticsService:
                 "host_memory": host_cache,
             },
             "workers": workers,
+            "resource_ownership": scheduler.resource_ownership_snapshot(),
             "queued_models": {
                 models.get(model_id, model_id): len(scheduler.queues.for_model(model_id))
                 for model_id in scheduler.queues.pending_models()

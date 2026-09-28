@@ -56,6 +56,20 @@ class RegistrationManager:
                 self._run(job_id), name=f"model-registration-{job_id}"
             )
 
+    async def cancel_model(self, model_id: str) -> None:
+        rows = await self.database.fetchall(
+            "SELECT id FROM model_jobs WHERE model_id=?", (model_id,)
+        )
+        tasks = [self._tasks[row["id"]] for row in rows if row["id"] in self._tasks]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await self.database.execute(
+            "UPDATE model_jobs SET state='CANCELLED', stage='disabled', updated_at=? "
+            "WHERE model_id=? AND state IN ('QUEUED','RUNNING')",
+            (_now(), model_id),
+        )
+
     async def close(self) -> None:
         for task in self._tasks.values():
             task.cancel()
@@ -91,6 +105,10 @@ class RegistrationManager:
             job = await self.database.get_model_job(job_id)
             if job is None:
                 return
+            target = (job.get("validation_overrides") or {}).get("_target") or {}
+            job["engine"] = target.get("engine", job["engine"])
+            if job["engine"] not in self.validator.scheduler.mode.capabilities.engines:
+                raise ValidationError("engine", "Engine is unavailable in this serving mode")
             # A retry revalidates the cataloged artifact rather than following a
             # moving ref such as ``main``. New jobs have no resolved revision.
             resolved_revision = job.get("resolved_revision")
@@ -115,7 +133,7 @@ class RegistrationManager:
                     cache_dir=self.settings.model_store / "huggingface",
                     token=self.settings.hf_token,
                 )
-                if job.get("engine") == "llama.cpp":
+                if job.get("engine") == "llama.cpp" and not target.get("artifact"):
                     ggufs = sorted(Path(artifact_path).glob("*.gguf"))
                     if len(ggufs) != 1:
                         raise ValidationError(
@@ -126,6 +144,17 @@ class RegistrationManager:
                             ),
                         )
                     artifact_path = str(ggufs[0])
+            catalog_artifact_path = artifact_path
+            if target.get("artifact"):
+                selected = Path(target["artifact"]).resolve(strict=True)
+                root = Path(artifact_path).resolve(strict=True)
+                if selected != root and not selected.is_relative_to(root):
+                    raise ValidationError(
+                        "artifact", "Selected artifact is outside registered source"
+                    )
+                artifact_path = str(selected)
+            if job.get("engine") == "llama.cpp" and not Path(artifact_path).is_file():
+                raise ValidationError("artifact", "Select a GGUF file before validating llama.cpp")
             inspection: dict[str, Any]
             if job.get("engine") == "llama.cpp":
                 inspection = {
@@ -143,7 +172,7 @@ class RegistrationManager:
                 job_state="RUNNING",
                 stage="validation_pending",
                 catalog_state=CatalogState.VALIDATION_PENDING,
-                artifact_path=str(artifact_path),
+                artifact_path=str(catalog_artifact_path),
                 capabilities=inspection["capabilities"],
                 progress={"inspection": inspection},
             )
@@ -156,7 +185,27 @@ class RegistrationManager:
             )
             if not profiles:
                 raise ValidationError("validation", "no candidate placement passed validation")
+            if job.get("local_path"):
+                current_artifact = await asyncio.to_thread(
+                    local_manifest, Path(catalog_artifact_path)
+                )
+                if current_artifact["revision"] != resolved["revision"]:
+                    raise ValidationError(
+                        "artifact_changed", "Local artifact changed during validation"
+                    )
             async with self.database.transaction() as connection:
+                current = await (
+                    await connection.execute(
+                        "SELECT state FROM model_catalog WHERE id=?",
+                        (job["model_id"],),
+                    )
+                ).fetchone()
+                if current is None or current["state"] == CatalogState.DISABLED.value:
+                    await connection.execute(
+                        "UPDATE model_jobs SET state='CANCELLED', stage='disabled' WHERE id=?",
+                        (job_id,),
+                    )
+                    return
                 await connection.execute(
                     """
                     UPDATE model_profiles
@@ -200,7 +249,7 @@ class RegistrationManager:
                     (
                         CatalogState.AVAILABLE.value,
                         resolved["revision"],
-                        str(artifact_path),
+                        str(catalog_artifact_path),
                         json.dumps(resolved["artifact_hashes"]),
                         json.dumps(
                             sorted(
@@ -275,9 +324,7 @@ class RegistrationManager:
     @staticmethod
     def _inspect(path: Path, resolved: dict[str, Any]) -> dict[str, Any]:
         config_path = path / "config.json"
-        if not config_path.exists():
-            raise ValidationError("inspection", "config.json is missing")
-        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
         tokenizer_config_path = path / "tokenizer_config.json"
         tokenizer_config = (
             json.loads(tokenizer_config_path.read_text(encoding="utf-8"))
@@ -289,10 +336,14 @@ class RegistrationManager:
             for item in resolved["artifact_hashes"]
             if item["path"].endswith((".safetensors", ".bin", ".gguf"))
         ]
-        if not weight_files:
-            raise ValidationError("inspection", "no supported weight artifact was found")
+        # This is a sizing hint, not a format allowlist. vLLM's launch and probes
+        # decide compatibility, including formats unknown to this router.
+        size_files = weight_files or resolved["artifact_hashes"]
+        if not size_files:
+            raise ValidationError("inspection", "model artifact is empty")
         architectures = config.get("architectures") or []
-        text_cfg = config.get("text_config") if isinstance(config.get("text_config"), dict) else {}
+        raw_text_cfg = config.get("text_config")
+        text_cfg: dict[str, Any] = raw_text_cfg if isinstance(raw_text_cfg, dict) else {}
         tok_max_len = tokenizer_config.get("model_max_length")
         if not isinstance(tok_max_len, int) or tok_max_len >= 10_000_000:
             tok_max_len = None
@@ -304,7 +355,12 @@ class RegistrationManager:
             or tok_max_len
         )
         max_model_len = max(1, int(declared_max_model_len or 4096))
-        quantization = config.get("quantization_config", {}).get("quant_method")
+        quantization_config = config.get("quantization_config")
+        quantization = (
+            quantization_config.get("quant_method")
+            if isinstance(quantization_config, dict)
+            else None
+        )
         dtype_value = str(config.get("torch_dtype") or "auto").lower()
         dtype = {
             "float16": "half",
@@ -320,8 +376,8 @@ class RegistrationManager:
         capabilities = ["chat", "streaming"] if has_chat_template else ["completions"]
         return {
             "architectures": architectures,
-            "weight_bytes": sum(int(item["bytes"]) for item in weight_files),
-            "weight_files": [item["path"] for item in weight_files],
+            "weight_bytes": sum(int(item["bytes"]) for item in size_files),
+            "weight_files": [item["path"] for item in size_files],
             "max_model_len": max_model_len,
             "max_model_len_is_fallback": declared_max_model_len is None,
             "dtype": dtype,
@@ -352,7 +408,9 @@ class RegistrationManager:
         if isinstance(requested_max_model_len, int):
             max_model_len = (
                 requested_max_model_len
-                if source_max_model_len is None or inspection.get("max_model_len_is_fallback")
+                if overrides.get("_target")
+                or source_max_model_len is None
+                or inspection.get("max_model_len_is_fallback")
                 else min(source_max_model_len, requested_max_model_len)
             )
         candidates = build_candidate_shapes(
@@ -371,13 +429,51 @@ class RegistrationManager:
                 "max_num_batched_tokens", self.settings.engines.max_num_batched_tokens
             ),
         )
+        if not candidates:
+            # Metadata size is only a hint: repositories can contain alternate
+            # checkpoints and engines can load formats with different residency.
+            # Let the real engine launch establish whether any placement works.
+            candidates = build_candidate_shapes(
+                inventory=self.inventory,
+                weight_bytes=0,
+                max_model_len=max_model_len,
+                reserved_vram_mib=self.settings.reserved_vram_mib,
+                dtype=inspection["dtype"],
+                quantization=inspection["quantization"],
+                gpu_memory_utilization=overrides.get(
+                    "gpu_memory_utilization", self.settings.engines.gpu_memory_utilization
+                ),
+                max_model_len_limit=overrides.get(
+                    "max_model_len", self.settings.engines.max_model_len
+                ),
+                max_num_seqs=overrides.get("max_num_seqs", self.settings.engines.max_num_seqs),
+                max_num_batched_tokens=overrides.get(
+                    "max_num_batched_tokens", self.settings.engines.max_num_batched_tokens
+                ),
+            )
+        target = overrides.get("_target") or {}
         requested_tp = overrides.get("tensor_parallel_size")
-        if requested_tp is not None:
+        requested_count = (
+            target.get("gpu_count") if job.get("engine") == "llama.cpp" else requested_tp
+        )
+        if requested_count is not None:
             candidates = [
-                candidate
-                for candidate in candidates
-                if candidate.tensor_parallel_size == requested_tp
+                candidate for candidate in candidates if candidate.gpu_count == requested_count
             ]
+        if target.get("eligible_gpu_sets") and requested_tp == overrides.get(
+            "tensor_parallel_size"
+        ):
+            allowed = {tuple(group) for group in target["eligible_gpu_sets"]}
+            candidates = [
+                replace(
+                    candidate,
+                    eligible_gpu_sets=tuple(
+                        group for group in candidate.eligible_gpu_sets if group in allowed
+                    ),
+                )
+                for candidate in candidates
+            ]
+            candidates = [candidate for candidate in candidates if candidate.eligible_gpu_sets]
         launch_args = dict(overrides.get("launch_args") or {})
         dtype = launch_args.pop("dtype", inspection["dtype"])
         quantization = launch_args.pop("quantization", inspection["quantization"])

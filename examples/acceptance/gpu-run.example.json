@@ -1,0 +1,37 @@
+{
+  "mode": "queue",
+  "url": "http://127.0.0.1:18880",
+  "config_file": "/absolute/acceptance/queue.toml",
+  "managed_gpu_uuids": ["GPU-REPLACE-WITH-EXACT-UUID"],
+  "build_files": {
+    "wheel": "/absolute/checkout/dist/llm_rio-0.1.0-py3-none-any.whl",
+    "lock": "/absolute/checkout/uv.lock"
+  },
+  "seed": 20260923,
+  "models": [
+    {
+      "nickname": "accept-a",
+      "registration": {"local_path": "/absolute/existing/model-A", "engine": "vllm"},
+      "validation_overrides": {"max_model_len": 4096, "max_num_seqs": 4}
+    },
+    {
+      "nickname": "accept-b",
+      "registration": {
+        "huggingface_repo": "OWNER/ENGINE-SUPPORTED-MODEL-B",
+        "revision": "REPLACE-WITH-IMMUTABLE-REVISION",
+        "engine": "vllm"
+      },
+      "validation_overrides": {"max_model_len": 4096, "max_num_seqs": 4}
+    }
+  ],
+  "workload": {
+    "controlled_cycles": 100,
+    "soak_seconds": 3600,
+    "concurrency": 4,
+    "output_tokens": [16, 128, 256, 512],
+    "think_seconds": 1,
+    "operation_timeout_seconds": 1800,
+    "validation_timeout_seconds": 14400
+  },
+  "feature_requests": []
+}

@@ -12,7 +12,7 @@ from llm_rio.domain import (
     MachineInventory,
     PlacementProfile,
 )
-from llm_rio.engines.identity import launch_binding
+from llm_rio.engines.identity import engine_identity, launch_binding
 from llm_rio.engines.launch import adapter
 from llm_rio.process_cleanup import TeardownError
 from llm_rio.runtime import ResidencyScheduler
@@ -86,6 +86,7 @@ async def _probe_llama_cpp(
     candidate: CandidateShape,
     gpu_set: tuple[str, ...],
 ) -> PlacementProfile:
+    measured_binding = launch_binding(settings, candidate, Engine.LLAMA_CPP)
     port = await probes._reserve_validation_port()
     teardown_verified = True
     try:
@@ -149,7 +150,9 @@ async def _probe_llama_cpp(
                     exc.details.setdefault("log_path", str(log_path))
                 raise
             await probes._terminate(process, gpu_uuids=gpu_set)
-        engine_version = await _llama_cpp_version(settings.engines.llama_cpp_executable)
+        if measured_binding != launch_binding(settings, candidate, Engine.LLAMA_CPP):
+            raise ValidationError("engine_identity", "Engine changed during validation; retry")
+        engine_version = engine_identity(settings, Engine.LLAMA_CPP)["version"]
         return PlacementProfile(
             id=str(uuid.uuid4()),
             model_id=model_id,
@@ -157,7 +160,7 @@ async def _probe_llama_cpp(
             engine=Engine.LLAMA_CPP,
             serving_mode="queue",
             engine_version=engine_version,
-            launch_binding=launch_binding(settings, candidate, Engine.LLAMA_CPP),
+            launch_binding=measured_binding,
             machine_fingerprint=inventory.fingerprint,
             gpu_count=candidate.gpu_count,
             tensor_parallel_size=1,
@@ -192,18 +195,3 @@ async def _probe_llama_cpp(
     finally:
         if teardown_verified:
             await probes._release_validation_port(port)
-
-
-async def _llama_cpp_version(executable: str) -> str:
-    try:
-        process = await asyncio.create_subprocess_exec(
-            executable,
-            "--version",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        output, _ = await asyncio.wait_for(process.communicate(), timeout=10.0)
-    except (OSError, TimeoutError):
-        return "version-unavailable"
-    first_line = output.decode(errors="replace").splitlines()
-    return first_line[0][:200] if first_line else "version-unavailable"

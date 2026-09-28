@@ -36,7 +36,10 @@ class PlacementPlanner(Protocol):
 
 
 class ModePolicy(Protocol):
-    capabilities: ModeCapabilities
-    planner: PlacementPlanner
+    @property
+    def capabilities(self) -> ModeCapabilities: ...
+
+    @property
+    def planner(self) -> PlacementPlanner: ...
 
     def eligibility(self, profile: PlacementProfile) -> ProfileEligibility: ...

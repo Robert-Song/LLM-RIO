@@ -126,12 +126,8 @@ def _validate_request(
     )
     if max_n is not None and body.n > max_n:
         raise RioError("n_exceeded", "The requested number of choices is too high")
-    capabilities = set(model["capabilities"])
-    if body.response_format and "structured_output" not in capabilities:
-        raise RioError(
-            "structured_output_not_supported",
-            "Structured output was not validated for this model profile",
-        )
+    # Feature compatibility belongs to the selected engine. Forward response_format
+    # just like tool/reasoning fields; backend errors release the request reservation.
     reservation_output_tokens = (
         requested_output_tokens
         if requested_output_tokens is not None

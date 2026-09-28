@@ -285,9 +285,6 @@ class ModelsController:
         job_id = self.app._model_job_id(record)
         if job_id is None:
             return
-        if profile is not None and profile.get("engine") != "vllm":
-            self.app.notify("Revalidation currently supports vLLM profiles.", severity="warning")
-            return
         ok, job = await self.app._call(
             "Loading validation settings",
             lambda: client_api.request("GET", f"/staff/model-jobs/{job_id}"),
@@ -311,6 +308,7 @@ class ModelsController:
             }
             args = dict(profile.get("launch_args") or {})
             args.pop("enable_sleep_mode", None)
+            args.pop("model", None)
             for key in ("dtype", "quantization"):
                 if profile.get(key) is not None:
                     args[key] = profile[key]
@@ -342,7 +340,7 @@ class ModelsController:
         ) + (
             FieldSpec(
                 "launch_args",
-                "Extra vLLM arguments (JSON object)",
+                "Extra engine arguments (JSON object)",
                 multiline=True,
                 value=json.dumps(defaults.get("launch_args") or {}, indent=2),
                 help_text=(
@@ -356,7 +354,11 @@ class ModelsController:
         def finished(values: FormResult | None) -> None:
             if values is not None:
                 self.app.run_worker(
-                    self.app._retry_model(record, _revalidation_overrides(values)),
+                    self.app._retry_model(
+                        record,
+                        _revalidation_overrides(values),
+                        profile_id=str(profile["id"]) if profile else None,
+                    ),
                     exit_on_error=False,
                 )
 
@@ -370,17 +372,15 @@ class ModelsController:
             finished,
         )
 
-    async def _retry_model(self, record: dict[str, Any], overrides: dict[str, Any]) -> None:
+    async def _retry_model(
+        self, record: dict[str, Any], overrides: dict[str, Any], *, profile_id: str | None = None
+    ) -> None:
         job_id = self.app._model_job_id(record)
         if job_id is None:
             return
         ok, result = await self.app._call(
             "Queueing validation",
-            lambda: client_api.request(
-                "POST",
-                f"/staff/model-jobs/{job_id}/retry",
-                json_body={"validation_overrides": overrides},
-            ),
+            lambda: client_api.validate_job(job_id, profile_id=profile_id, overrides=overrides),
         )
         if ok:
             self.app.notify(f"Validation queued: {result}", timeout=10)

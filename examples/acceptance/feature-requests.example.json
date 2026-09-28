@@ -1,0 +1,26 @@
+[
+  {
+    "case_id": "REQ-07",
+    "expect_json": true,
+    "payload": {
+      "model": "REPLACE-WITH-JSON-SUPPORTED-FIXTURE",
+      "messages": [{"role": "user", "content": "Return JSON with one key named ok and value true."}],
+      "max_tokens": 512,
+      "response_format": {"type": "json_object"},
+      "stream": false
+    }
+  },
+  {
+    "case_id": "REQ-06",
+    "expect_tool_call": true,
+    "tool_result": "{\"temperature_c\": 20}",
+    "payload": {
+      "model": "REPLACE-WITH-TOOL-SUPPORTED-FIXTURE",
+      "messages": [{"role": "user", "content": "What is the weather in Paris? Use the weather tool."}],
+      "tools": [{"type": "function", "function": {"name": "weather", "description": "Read weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}],
+      "tool_choice": {"type": "function", "function": {"name": "weather"}},
+      "max_tokens": 512,
+      "stream": false
+    }
+  }
+]

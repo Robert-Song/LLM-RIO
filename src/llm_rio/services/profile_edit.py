@@ -136,7 +136,7 @@ def _apply_profile_edit(
     if "engine" in fields:
         updated = replace(updated, engine=request.engine or updated.engine)
 
-    launch_args = dict(updated.launch_args)
+    launch_args = {} if updated.engine is not profile.engine else dict(updated.launch_args)
     if "gguf_file" in fields:
         if updated.engine is not Engine.LLAMA_CPP:
             raise RioError(
@@ -168,7 +168,7 @@ def _apply_profile_edit(
                 )
             launch_args["n_gpu_layers"] = request.n_gpu_layers
         else:
-            launch_args.setdefault("n_gpu_layers", 99)
+            launch_args.setdefault("n_gpu_layers", 999)
         updated = replace(
             updated,
             dtype="gguf",

@@ -69,8 +69,25 @@ def main() -> None:
                 capture_output=True,
                 text=True,
             )
+    for script in ("native_acceptance.py", "record_native_acceptance.py"):
+        subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / script), "--help"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    import json
+
+    for example in (ROOT / "examples/acceptance").glob("*.json"):
+        json.loads(example.read_text())
     if errors:
         raise SystemExit("\n".join(errors))
+    subprocess.run(
+        [sys.executable, str(ROOT / "scripts/check_acceptance_plan.py")],
+        cwd=ROOT,
+        env=env,
+        check=True,
+    )
     print(f"Documentation links, {len(configs)} configs and CLI help passed.")
 
 

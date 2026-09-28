@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 
 from fastapi import APIRouter, Request
@@ -17,6 +18,7 @@ from llm_rio.api.inference_proxy import (
 )
 from llm_rio.api.inference_validation import _apply_model_defaults, _validate_request
 from llm_rio.api.schemas import ChatCompletionRequest
+from llm_rio.artifacts import local_artifact_unchanged
 from llm_rio.domain import CatalogState, PlacementProfile, Role, ServiceMode
 from llm_rio.errors import MaintenanceError, RioError
 from llm_rio.queueing import QueuedRequest
@@ -66,21 +68,21 @@ async def _resolve_model(request: Request, principal: Principal, nickname: str) 
             status_code=403,
             details={"available_models": available},
         )
-    if model.get("source_type") == "local":
-        from pathlib import Path
-
-        from llm_rio.artifacts import local_artifact_unchanged
-
-        if not local_artifact_unchanged(Path(model["artifact_path"]), model["artifact_hashes"]):
-            raise RioError(
-                "artifact_changed", "Local artifacts changed; revalidate the model", status_code=409
-            )
     if model["state"] != CatalogState.AVAILABLE.value:
         raise RioError(
             "model_unavailable",
             f"Model '{nickname}' is not available",
             status_code=409,
             details={"catalog_state": model["state"], "available_models": available},
+        )
+    if model.get("source_type") == "local" and (
+        not model.get("artifact_path")
+        or not local_artifact_unchanged(
+            Path(model["artifact_path"]), model.get("artifact_hashes") or []
+        )
+    ):
+        raise RioError(
+            "artifact_changed", "Local artifacts changed; revalidate the model", status_code=409
         )
     profiles = await request.app.state.profiles.for_model(model["id"])
     if not profiles:
@@ -120,6 +122,14 @@ async def list_models(request: Request, principal: CurrentPrincipal) -> dict[str
             if profiles
             else "verification_required"
         )
+        if model.get("source_type") == "local" and (
+            not model.get("artifact_path")
+            or not local_artifact_unchanged(
+                Path(model["artifact_path"]),
+                model.get("artifact_hashes") or [],
+            )
+        ):
+            state, routable_profiles = "artifact_changed", []
         data.append(
             {
                 "id": model["nickname"],

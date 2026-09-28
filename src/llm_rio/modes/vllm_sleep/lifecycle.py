@@ -100,7 +100,7 @@ class SleepLifecycle:
         """Evict least-recently-demanded sleeping workers until host pressure clears."""
         if not self.supervisor.ram_weight_cache_enabled:
             return True
-        host_cache_lock = getattr(self, "_host_cache_lock", None)
+        host_cache_lock = getattr(self.supervisor, "_host_cache_lock", None)
         if host_cache_lock is None:
             host_cache_lock = self.supervisor._host_cache_lock = asyncio.Lock()
         async with host_cache_lock:

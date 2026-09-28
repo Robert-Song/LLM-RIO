@@ -208,6 +208,9 @@ def _profile(
         vram_measurement_version=2,
         vram_baseline_mib_per_gpu=(0,) * len(gpu_set),
         wake_peak_vram_mib_per_gpu=wake_peak_mib or measured_peak,
+        host_cache_mib=100.0,
+        weight_cache_offload_seconds=0.1,
+        weight_cache_activation_seconds=0.1,
     )
 
 

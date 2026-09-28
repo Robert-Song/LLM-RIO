@@ -38,7 +38,7 @@ def Settings(**kwargs: Any) -> ReleaseSettings:
     }
     cache.pop("sleep_gpu_reserve_mib", None)
     native = {k: v for k, v in cache.items() if k != "max_workers_per_gpu"}
-    kwargs.setdefault("modes", {"vllm_sleep": native, "kv_cached": cache})
+    kwargs.setdefault("modes", {mode.replace("-", "_"): cache if mode == "kv-cached" else native})
     return ReleaseSettings(**kwargs)
 
 
@@ -49,6 +49,18 @@ def GreedyPlacementPlanner(**kwargs: Any) -> Any:
     kwargs.pop("prism_weight_cache_enabled", None)
     kwargs = {key.replace("prism_", "cache_"): value for key, value in kwargs.items()}
     cls = KVCachedPlanner if elastic else SleepPlanner if cached else QueuePlanner
+    if cls is QueuePlanner:
+        kwargs = {
+            key: value
+            for key, value in kwargs.items()
+            if key
+            in {
+                "wait_duration_seconds",
+                "minimum_residency_seconds",
+                "scale_window_seconds",
+                "minimum_marginal_efficiency",
+            }
+        }
     return cls(**kwargs)
 
 

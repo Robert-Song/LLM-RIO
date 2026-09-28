@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "run_id": "REPLACE_WITH_RUN_ID",
+  "case_id": "REQ-02",
+  "mode": "vllm-sleep",
+  "interface": "http",
+  "topology": "PHYSICAL_PLACEMENT_ID",
+  "variant": "cold-stream",
+  "status": "NOT_RUN",
+  "started_at": null,
+  "finished_at": null,
+  "manifest_sha256": null,
+  "tested_wheel_sha256": null,
+  "request_ids": [],
+  "expected_fault": null,
+  "assertions": {
+    "protocol_valid": null,
+    "per_request_usage_matches": null,
+    "quota_ledger_matches": null,
+    "resource_ownership_safe": null,
+    "cleanup_verified": null
+  },
+  "evidence": [],
+  "defects": [],
+  "not_applicable_reason": null
+}

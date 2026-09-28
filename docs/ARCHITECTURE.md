@@ -63,3 +63,35 @@ Experimental residency uses its own lifecycle with elastic KV placement. It shar
 verified teardown, telemetry, reservation, and accounting mechanisms with native modes.
 Failed transitions retain ownership until teardown succeeds; failures never permit a
 second worker to claim uncertain GPU capacity.
+
+## Reviewed release boundary decisions (AUD-10)
+
+The native planners/lifecycles independently own placement and residency decisions.
+Queue now owns replica scale-window/marginal-gain settings, and has no sleep-cache
+constructor arguments or unreachable preemption policy. Sleep owns host-cache
+pressure serialization. The following shared mechanisms are deliberate release
+boundaries, revising the initial proposal to move every state field into a mode:
+
+- The authoritative `WorkerPlacement` record keeps a superset of telemetry fields,
+  including sleep evidence. Keeping one record avoids competing lifetime owners and
+  makes diagnostic snapshots uniform. Queue never uses sleep policy to place work.
+- Common eligibility validates artifact/launch identity and measurement integrity;
+  the selected mode supplies the required evidence/backend contract. Duplicating
+  cryptographic binding or finite-measurement checks would risk divergent trust rules.
+- Common runtime executes preload/transition actions and owns reservations. Mode
+  planners decide placement; lifecycle implementations decide sleep and eviction.
+  Shared deadline/fairness inputs are configuration, not runtime mode switches.
+- Engine adapters own deterministic launch construction. Validators and engine
+  transport own asynchronous probe sequences, coordinated with shared GPU/port
+  reservations. Moving those sequences into the launch-only adapter would introduce
+  a runtime dependency cycle without changing ownership.
+- CLI/TUI share a functional administration client. Validation has a typed request
+  operation and typed response; extensible engine/catalog payloads remain JSON
+  dictionaries. The unused class facade was removed. This is not a generated,
+  fully typed SDK and should not be described as one.
+
+A single application constructs exactly one mode. Process-lifetime database/GPU
+locks precede startup reconciliation. Backup acquires the database owner lock.
+Validation-job changes occur in one transaction, including duplicate-submit checks
+and the selected profile snapshot; launching starts only after that transaction.
+The test kit checks the running source fingerprint against the recorded wheel.

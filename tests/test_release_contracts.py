@@ -30,6 +30,24 @@ def test_explicit_mode_required_and_legacy_settings_rejected(monkeypatch):
         Settings(serving_mode="queue", prism_weight_cache_mode="ram")
 
 
+def test_inactive_mode_settings_do_not_affect_queue(monkeypatch):
+    monkeypatch.delenv("LLMRIO_SERVING_MODE", raising=False)
+    settings = Settings(
+        serving_mode="queue",
+        modes={"vllm_sleep": {"idle_sleep_seconds": 10, "preload_models": ["*"]}},
+    )
+    assert settings.modes.vllm_sleep.idle_sleep_seconds == 10
+    assert settings.residency.preload_models == []
+    assert settings.residency.idle_sleep_seconds != 10
+    assert not settings.ram_weight_cache_enabled
+
+
+def test_incompatible_active_engine_settings_are_rejected(monkeypatch):
+    monkeypatch.delenv("LLMRIO_SERVING_MODE", raising=False)
+    with pytest.raises(ValidationError, match="queue-only"):
+        Settings(serving_mode="vllm-sleep", engines={"enable_llama_cpp": True})
+
+
 def test_local_artifact_content_identity_and_change_detection(tmp_path):
     model = tmp_path / "model"
     model.mkdir()
@@ -60,13 +78,8 @@ def test_local_gguf_launch_is_shared_and_queue_only(tmp_path):
     assert spec.command.count("--model") == 1
     assert spec.command.count("--n-gpu-layers") == 1
     assert "--enable-sleep-mode" not in spec.command
-    with pytest.raises(ValueError, match="queue mode"):
-        adapter(Engine.LLAMA_CPP).launch(
-            **{
-                **args,
-                "settings": Settings(serving_mode="vllm-sleep", engines={"enable_llama_cpp": True}),
-            }
-        )
+    with pytest.raises(ValueError, match="queue-only"):
+        Settings(serving_mode="vllm-sleep", engines={"enable_llama_cpp": True})
 
 
 async def test_advanced_trust_preserves_evidence_and_audits_actor(saved_models):
@@ -135,7 +148,9 @@ def test_archive_preserves_source_and_exports_only_catalog(tmp_path, monkeypatch
     original = source.read_bytes()
     monkeypatch.chdir(Path(__file__).resolve().parents[1])
     destination = tmp_path / "archive"
-    result = archive(source, destination)
+    config = tmp_path / "config.toml"
+    config.write_text('serving_mode = "queue"\n')
+    result = archive(source, destination, config)
     assert result["models"] == 1
     assert source.read_bytes() == original
     assert (destination / vault.name).read_bytes() == b"vault"
@@ -144,4 +159,4 @@ def test_archive_preserves_source_and_exports_only_catalog(tmp_path, monkeypatch
         == "/models/model"
     )
     with pytest.raises(FileExistsError):
-        archive(source, destination)
+        archive(source, destination, config)

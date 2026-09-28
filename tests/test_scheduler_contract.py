@@ -66,6 +66,9 @@ def make_profile(
         vram_baseline_mib_per_gpu=(0,) * gpu_count,
         wake_peak_vram_mib_per_gpu=(idle_vram_mib,) * gpu_count,
         sleep_vram_mib_per_gpu=(1,) * gpu_count,
+        host_cache_mib=10.0,
+        weight_cache_offload_seconds=0.1,
+        weight_cache_activation_seconds=0.1,
     )
 
 

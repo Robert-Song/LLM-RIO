@@ -14,17 +14,28 @@
 
    `--server-stopped` is an operator assertion: the utility cannot stop or identify every
    remote owner. SQLite backup and integrity checking happen before a completion manifest
-   is written. A directory without `manifest.json` is an incomplete archive.
+   is written. The release database ownership lock must be available, matching config
+   is required, and every copied live or revoked credential must decrypt and match its
+   stored hash. Deleted keys use non-authenticating tombstones; their identity, disabled
+   state and decrypted marker must agree instead.
+   A directory without `manifest.json` is an incomplete archive.
 3. Verify the manifest hashes, preserve archive permissions, and retain its credential-free
    `catalog.json`/`catalog.csv`. The catalog contains names, source revisions, and artifact
    paths. The database/vault/config are sensitive even though the catalog is credential-free.
-4. Start release state at a new path, normally `state/release/llm-rio.db`, with newly generated
-   credentials. Release startup refuses existing unversioned beta databases. Re-register
-   and validate artifacts; do not import beta verification booleans or edit schema versions.
+4. Start release state at a new path, normally `state/release/llm-rio.db`. Release startup
+   refuses existing unversioned beta databases. This workspace's controlled user/model
+   migration is recorded in [DATA_MIGRATION.md](release/DATA_MIGRATION.md); it preserved
+   live API keys and reused only complete profiles that could be bound safely to the
+   selected release mode. For another installation, archive the matching beta database,
+   vault, and config before considering migration. Do not edit schema versions by hand.
 
 The initial lab archive in this workspace is under ignored
 `db_backup/final-cleanup-baseline/`; it is local evidence, not part of a published package.
 Original databases and model files are preserved.
+
+The release migration is a one-time operation against a pristine release database. Its
+utility refuses an already populated target; its dry-run and application steps are
+documented in [the migration record](release/DATA_MIGRATION.md).
 
 ## Registration and validation
 
@@ -37,7 +48,11 @@ serving-time change detection, while validation rebuilds the full content manife
 
 Native GPU probes require maintenance. Drain waits for admitted requests, verifies engine
 teardown, then permits validation. Review the persisted job stage and engine log on error.
-`models validate NAME` retries the same workflow and always runs probes. Model-specific
+`models validate NAME` retries the same workflow and always runs probes.
+Use `models validate NAME --profile ID` to probe the selected edited/cloned profile,
+including its engine, artifact, launch arguments and measured placement set. Clones
+have a persisted validation job. Launch edits drain existing workers after admitted
+work completes; invalidated workers cannot accept new work. Model-specific
 context, concurrency and launch overrides are entered in the TUI validation form or the
 validation API. Failed validation leaves the model requiring administrator review.
 
@@ -82,3 +97,5 @@ previous code **and environment**, previous configuration, and matching archived
 and vault into a separate location. Start only that installation. Never run old code against
 the release schema, or old and new services concurrently on the same managed GPUs. Retain
 new-state diagnostics separately so failed qualification can be investigated.
+
+The executable final test kit is [MANUAL_GPU_TEST.md](release/MANUAL_GPU_TEST.md).

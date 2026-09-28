@@ -223,6 +223,9 @@ async def test_retry_api_persists_tp_and_engine_arguments(
     )
     app = create_app(settings(tmp_path))
     app.state.database = saved_models
+    app.state.scheduler = SimpleNamespace(
+        mode=SimpleNamespace(capabilities=SimpleNamespace(engines=("vllm",)))
+    )
     app.state.registration = SimpleNamespace(start=Mock())
     app.dependency_overrides[current_principal] = lambda: Principal(
         "admin", "admin", Role.ADMIN, "account", True

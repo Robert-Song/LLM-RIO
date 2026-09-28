@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "status": "TEMPLATE_REQUIRES_RESOLUTION",
+  "run_id": "REPLACE_WITH_UNIQUE_RUN_ID",
+  "modes": [
+    "queue",
+    "vllm-sleep"
+  ],
+  "seed": 20260923,
+  "build": {
+    "revision": "REPLACE_WITH_COMMIT",
+    "dirty_patch_sha256": null,
+    "wheel_sha256": "REQUIRED",
+    "lock_sha256": "REQUIRED",
+    "engine_environment_identity": "ACTUAL_EXECUTED_ENGINE_ENVIRONMENT_REQUIRED"
+  },
+  "isolation": {
+    "state_root": "/absolute/disposable/acceptance/run",
+    "managed_gpu_uuids": [
+      "OPERATOR_SELECTED_GPU_UUID"
+    ],
+    "exclusive_owner_verified": false,
+    "queue_api_url": "http://127.0.0.1:18880",
+    "sleep_api_url": "http://127.0.0.1:18881",
+    "credential_sources": "ENVIRONMENT_OR_PROTECTED_VAULT_NO_SECRETS_IN_MANIFEST"
+  },
+  "fixtures": {
+    "A": {
+      "source": "OPERATOR_SELECTED",
+      "revision": "PINNED",
+      "manifest_sha256": "REQUIRED"
+    },
+    "B": {
+      "source": "DISTINCT_ARTIFACT",
+      "revision": "PINNED",
+      "manifest_sha256": "REQUIRED"
+    },
+    "C": {
+      "source": "ORDERING_AND_EVICTION_FIXTURE",
+      "revision": "PINNED"
+    },
+    "H": {
+      "source": "HUGGING_FACE_REPOSITORY",
+      "revision": "IMMUTABLE_SHA"
+    },
+    "L": {
+      "source": "DISPOSABLE_LOCAL_COPY",
+      "path": "/absolute/test/artifact"
+    },
+    "T": {
+      "required": true,
+      "measured_profile_ids": []
+    },
+    "R": {
+      "required": true,
+      "measured_profile_ids": []
+    },
+    "F": {
+      "tools": "RESOLVE",
+      "reasoning": "RESOLVE",
+      "structured_output": "RESOLVE",
+      "multimodal": "RESOLVE"
+    },
+    "G": {
+      "backend_enabled": false,
+      "source": null,
+      "llama_server_identity": null
+    }
+  },
+  "required_simulated_gpu_counts": [
+    1,
+    2,
+    4,
+    8
+  ],
+  "physical_topologies": [],
+  "workload": {
+    "controlled_cycles_per_mode": 100,
+    "healthy_soak_seconds_per_mode": 3600,
+    "independent_accounts": 2,
+    "interactive_output_tokens": [
+      16,
+      128
+    ],
+    "batch_output_tokens": [
+      256,
+      1024
+    ],
+    "interactive_think_seconds": [
+      1,
+      5
+    ],
+    "burst_concurrency": "RESOLVE_ABOVE_VERIFIED_CAPACITY",
+    "stream_fraction": 0.6,
+    "faults_in_healthy_soak": false
+  },
+  "thresholds": {
+    "unexplained_errors": 0,
+    "leaked_owned_resources": 0,
+    "accounting_mismatches": 0,
+    "cold_start_deadline_seconds": "RESOLVE_FROM_MEASURED_PROFILE",
+    "wake_deadline_seconds": "RESOLVE_FROM_MEASURED_PROFILE",
+    "fair_progress_deadline_seconds": "RESOLVE_FROM_RESIDENCY_DRAIN_LOAD_BUDGET",
+    "throughput_regression_review_fraction": 0.1,
+    "p95_latency_regression_review_fraction": 0.1
+  },
+  "predeclared_not_applicable": [],
+  "open_findings": [],
+  "pending_evidence": "Run the native GPU kit and all applicable manual cases; code fixes are not hardware approval"
+}

@@ -146,6 +146,7 @@ class ModelValidationOverrides(BaseModel):
 class ModelJobRetryRequest(BaseModel):
     """Optional replacement validation limits for a requeued registration job."""
 
+    profile_id: str | None = None
     validation_overrides: ModelValidationOverrides | None = None
 
 

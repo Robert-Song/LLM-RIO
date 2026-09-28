@@ -412,6 +412,8 @@ async def _stream_backend(
                 for choice in choices:
                     observed_completion += _completion_tokens(choice.get("delta") or {})
             yield chunk
+            if saw_done:
+                break
         if not saw_done:
             error_code = "worker_stream_incomplete"
             event = {
@@ -423,7 +425,8 @@ async def _stream_backend(
             }
             yield f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n".encode()
     except asyncio.CancelledError:
-        error_code = "client_disconnected"
+        if not saw_done:
+            error_code = "client_disconnected"
         raise
     except TimeoutError:
         error_code = "worker_stream_idle_timeout"

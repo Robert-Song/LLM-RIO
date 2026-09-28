@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from llm_rio.config import ServingMode, Settings
-from llm_rio.domain import MachineInventory, PlacementProfile
+from llm_rio.domain import CURRENT_VRAM_MEASUREMENT_VERSION, MachineInventory, PlacementProfile
 from llm_rio.engines.identity import launch_binding
 from llm_rio.modes.contracts import ModeCapabilities, PlacementPlanner, ProfileEligibility
 from llm_rio.profiles import profile_verified_for_mode
@@ -19,7 +19,17 @@ class SelectedMode:
     def eligibility(self, profile: PlacementProfile) -> ProfileEligibility:
         if profile.engine.value not in self.capabilities.engines:
             return ProfileEligibility(False, "unsupported_engine")
-        if profile.launch_binding != launch_binding(self.settings, profile, profile.engine):
+        if not profile.measurements_valid:
+            return ProfileEligibility(False, "measurements_invalid")
+        if profile.serving_mode != self.capabilities.name:
+            return ProfileEligibility(False, "mode_mismatch")
+        if profile.vram_measurement_version != CURRENT_VRAM_MEASUREMENT_VERSION:
+            return ProfileEligibility(False, "measurement_format_unsupported")
+        try:
+            current_binding = launch_binding(self.settings, profile, profile.engine)
+        except (OSError, RuntimeError, ValueError):
+            return ProfileEligibility(False, "engine_identity_unavailable")
+        if profile.launch_binding != current_binding:
             return ProfileEligibility(False, "launch_configuration_changed")
         allowed = profile_verified_for_mode(
             profile,
@@ -42,7 +52,11 @@ def create_mode(settings: Settings, inventory: MachineInventory) -> SelectedMode
     if settings.serving_mode is ServingMode.QUEUE:
         from llm_rio.modes.queue.planner import QueuePlanner
 
-        planner = QueuePlanner(**kwargs)
+        planner = QueuePlanner(
+            wait_duration_seconds=settings.wait_duration_seconds,
+            minimum_residency_seconds=settings.minimum_residency_seconds,
+            **settings.modes.queue.model_dump(),
+        )
         engines = ("vllm", "llama.cpp") if settings.engines.enable_llama_cpp else ("vllm",)
         capabilities = ModeCapabilities("queue", False, engines, False, True)
     elif settings.serving_mode is ServingMode.VLLM_SLEEP:

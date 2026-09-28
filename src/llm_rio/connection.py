@@ -2,19 +2,53 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import tomllib
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 import click
+from pydantic import ValidationError
+from pydantic_settings import SettingsError
 
-from llm_rio.config import Settings
+from llm_rio.config import ServingMode, Settings
 from llm_rio.security import ApiKeyVault, default_key_vault_path
 
 
-def settings(config: Path | None = None) -> Settings:
+def settings(config: Path | None = None, *, mode: ServingMode | None = None) -> Settings:
     options: dict[str, Any] = {} if config is None else {"config_file": config}
-    return Settings(**options)
+    if config is not None and not config.is_file():
+        raise click.ClickException(f"Configuration file not found: {config}")
+    if mode is not None:
+        options["serving_mode"] = mode
+    try:
+        resolved = Settings(**options)
+    except ValidationError as exc:
+        errors = exc.errors(include_input=False, include_context=False, include_url=False)
+        details = "\n".join(
+            f"  {'.'.join(map(str, error['loc'])) or 'settings'}: {error['msg']}"
+            for error in errors
+        )
+        hint = (
+            "Select serving_mode = 'queue', 'vllm-sleep', or 'kv-cached' in TOML, "
+            "LLMRIO_SERVING_MODE, or serve --mode."
+        )
+        if any(
+            str(part).startswith("prism_") or part == "kvcached_mode"
+            for error in errors
+            for part in error["loc"]
+        ):
+            hint += (
+                " Beta settings are unsupported: preserve the old configuration and database, "
+                "then use a release configuration with a new database "
+                "(see docs/CONFIGURATION.md and examples/config/)."
+            )
+        raise click.ClickException(f"Invalid configuration:\n{details}\n{hint}") from None
+    except (OSError, tomllib.TOMLDecodeError, SettingsError) as exc:
+        raise click.ClickException(f"Cannot load configuration: {exc}") from None
+    if not resolved.config_file.is_file() and ("config_file" in resolved.model_fields_set):
+        raise click.ClickException(f"Configuration file not found: {resolved.config_file}")
+    return resolved
 
 
 def base_url() -> str:

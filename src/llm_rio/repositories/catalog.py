@@ -124,7 +124,10 @@ class CatalogRepository:
                     job_id,
                 ),
             )
-            updates = ["state = ?", "updated_at = ?"]
+            updates = [
+                "state = CASE WHEN state = 'DISABLED' THEN state ELSE ? END",
+                "updated_at = ?",
+            ]
             values: list[Any] = [catalog_state.value, _now()]
             for column, value in (
                 ("resolved_revision", resolved_revision),

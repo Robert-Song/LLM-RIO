@@ -14,15 +14,16 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: uv sync --locked --extra dev
       - run: uv run --no-sync pytest -q
-      - run: uv run --no-sync ruff check src tests scripts/check_docs.py scripts/qualify.py
-      - run: uv run --no-sync ruff format --check src tests scripts/check_docs.py scripts/qualify.py
+      - run: uv run --no-sync ruff check src tests scripts/check_docs.py scripts/qualify.py scripts/check_acceptance_plan.py scripts/audit_native_release.py scripts/native_acceptance.py scripts/record_native_acceptance.py
+      - run: uv run --no-sync ruff format --check src tests scripts/check_docs.py scripts/qualify.py scripts/check_acceptance_plan.py scripts/audit_native_release.py scripts/native_acceptance.py scripts/record_native_acceptance.py
       - run: uv run --no-sync mypy src/llm_rio
       - run: uv run --no-sync python scripts/check_docs.py
       - run: uv build
       - name: Install native wheel without experimental dependency
         run: |
+          uv export --locked --no-dev --no-emit-project --no-hashes --format requirements-txt --output-file /tmp/rio-native-dependencies.txt
           uv venv /tmp/rio-package
-          uv pip install --python /tmp/rio-package/bin/python dist/*.whl
+          uv pip install --python /tmp/rio-package/bin/python --constraint /tmp/rio-native-dependencies.txt dist/*.whl
           cd /tmp
           /tmp/rio-package/bin/python -m llm_rio --help
           /tmp/rio-package/bin/python -c "import importlib.util; assert importlib.util.find_spec('kvcached') is None"

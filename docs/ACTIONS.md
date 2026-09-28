@@ -22,19 +22,19 @@ All CLI entries are prefixed by `llm-rio` (or `./llmctl`).
 | List catalog/jobs | `GET /staff/models` | `models list` | Models → Refresh | Staff |
 | Register source | `POST /staff/models` | `models add NAME REPO --revision SHA`, or `--local-path PATH --engine vllm` | Models → Add model | Staff; absolute server-local path or HF repo; unsupported engine/path 422 |
 | Review validation | `GET /staff/model-jobs/{job_id}` | `models review NAME` | Models → Review job | Staff; includes failed stage and diagnostics |
-| Validate/revalidate/retry | `POST /staff/model-jobs/{job_id}/retry` | `models validate NAME --max-model-len N` | Models/Profiles → Validate/Revalidate | Staff; always probes, retains other saved overrides; native probes wait for maintenance; running job 409 |
+| Validate/revalidate/retry | `POST /staff/model-jobs/{job_id}/retry` | `models validate NAME --profile ID --max-model-len N` | Models/Profiles → Validate/Revalidate | Staff; optional `profile_id` selects exact engine/artifact/launch; always probes, merges changed overrides; native probes wait for maintenance; running job 409 |
 | Disable catalog model | `POST /staff/models/{model_id}/disable` | `models disable NAME` | Models → Disable | Staff; drains admitted work; successful revalidation restores availability |
 | Model access | `POST /staff/model-access` | `models access KEY`, `models grant KEY NAME`, `models revoke KEY NAME` | Users → Change model access; Models → Change user access | Staff; missing model/key 404 |
 | Replace grants | `PUT /staff/keys/{key_id}/model-grants` | Use grant/revoke to adjust set | Same access forms | Staff; validates full requested set |
 | Request defaults | `PATCH /admin/models/{model_id}` | `models defaults NAME --values '{"temperature":0}'` | Models → Edit model | Admin; schema validation; null clears a field |
 | Clone logical model | `POST /admin/models/{model_id}/clone` | `models clone-profile SOURCE NEW` | Models → Clone model | Admin; shared artifact, separate queue/grants; launch changes invalidate evidence |
 | List profiles/evidence | `GET /admin/models/{model_id}/profiles` | `models profiles NAME --saved --json` | Models → Profiles; Advanced source selector | Admin; saved evidence includes older machine fingerprints |
-| Edit launch profile | `PATCH /admin/models/{model_id}/profiles/{profile_id}` | `models profile-edit NAME PROFILE ...` | Profiles → Edit selected | Admin; engine capability enforced; launch changes require probes; conflicting profile 409 |
+| Edit launch profile | `PATCH /admin/models/{model_id}/profiles/{profile_id}` | `models profile-edit NAME PROFILE ...` | Profiles → Edit selected | Admin; engine capability enforced; launch changes invalidate evidence and drain workers; conflicting profile 409 |
 | Enable/disable profile | `POST /admin/models/{model_id}/profiles/{profile_id}/enable`, `POST /admin/models/{model_id}/profiles/{profile_id}/disable` | `models profile-state NAME PROFILE --enable` or `--disable` | Profiles → one state-appropriate Enable/Disable button | Admin; activation does not manufacture eligibility; disable drains workers |
 | Advanced trust | `POST /admin/models/{model_id}/profiles/{profile_id}/trust` | `models trust-measurements NAME ID --reason TEXT` | Profiles → Advanced → Trust saved measurements | Admin; nonblank reason, compatible artifact/mode/engine/settings/UUIDs and complete evidence; 409 if invalid/incompatible; actor/source audited |
 | Drain/resume | `POST /admin/maintenance` | `maintenance drain`, `maintenance resume` | Maintenance → Drain/Resume | Admin; resume blocked while validation owns GPUs |
 | Maintenance status | `GET /admin/maintenance` | `maintenance status` | Maintenance → Refresh status | Admin |
-| Qualification accounting | `GET /admin/requests?test_run_id=ID` | Qualification tool | Dashboard shows live requests | Admin; malformed ID 422 |
+| Qualification accounting | `GET /admin/requests?test_run_id=ID` | Qualification tool | Dashboard shows live requests | Admin; includes per-ID reservation state, charge and ledger delta; malformed ID 422 |
 | Start service | Process launch, no HTTP operation | `serve --mode queue --config PATH` | Diagnostics → Start service | Host operator; explicit mode, fresh schema, exclusive GPU ownership |
 | Host diagnostics | Local inspection | `doctor --json` | Diagnostics → Run doctor | Host operator; does not load a model |
 

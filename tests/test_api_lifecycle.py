@@ -124,6 +124,7 @@ async def test_profile_edit_endpoint_supplies_managed_gpu_count(tmp_path: Path) 
     app.state.database = SimpleNamespace(
         model_by_id=AsyncMock(return_value={"id": "model"}), record_event=AsyncMock()
     )
+    app.state.supervisor = SimpleNamespace(workers={}, drain=AsyncMock())
     app.state.profiles = SimpleNamespace(
         records_for_model=AsyncMock(return_value=[StoredProfile(profile=profile, active=True)]),
         update=AsyncMock(return_value=True),

@@ -37,7 +37,9 @@ def local_manifest(path: Path) -> dict[str, Any]:
     return {"revision": f"local:{identity}", "download_bytes": 0, "artifact_hashes": records}
 
 
-def local_artifact_unchanged(path: Path, records: list[dict[str, Any]]) -> bool:
+def local_artifact_unchanged(
+    path: Path, records: list[dict[str, Any]], *, verify_content: bool = False
+) -> bool:
     try:
         root = path.resolve(strict=True)
         files = (
@@ -53,6 +55,10 @@ def local_artifact_unchanged(path: Path, records: list[dict[str, Any]]) -> bool:
             stat = item.stat()
             if stat.st_size != record["bytes"] or stat.st_mtime_ns != record["mtime_ns"]:
                 return False
+            if verify_content:
+                with item.open("rb") as stream:
+                    if hashlib.file_digest(stream, "sha256").hexdigest() != record["sha256"]:
+                        return False
         return True
     except (OSError, KeyError, TypeError):
         return False

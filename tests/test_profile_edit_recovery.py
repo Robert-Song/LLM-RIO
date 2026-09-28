@@ -17,7 +17,7 @@ from llm_rio.api.schemas import ProfileEditRequest
 from llm_rio.domain import Role
 from llm_rio.inventory import candidate_gpu_sets
 from llm_rio.modes.factory import create_mode
-from llm_rio.profiles import StoredProfile
+from llm_rio.profiles import StoredProfile, invalidate_profile_measurements
 from llm_rio.registration import RegistrationManager
 from llm_rio.security import Principal
 from llm_rio.services.profile_edit import _apply_profile_edit
@@ -54,7 +54,9 @@ async def test_profile_edit_reports_recovery_action(tmp_path, duplicate):
         "key", "admin", Role.ADMIN, "account", True
     )
     base = replace(make_profile("profile", "model", ("GPU-0",)), memory_backend="native")
-    conflict = replace(base, id="existing-profile", max_model_len=131072)
+    conflict = invalidate_profile_measurements(
+        replace(base, id="existing-profile", max_model_len=131072)
+    )
     records = [StoredProfile(base, True), StoredProfile(conflict, False)]
     app.state.settings = settings(tmp_path)
     app.state.inventory = inventory()
@@ -62,6 +64,7 @@ async def test_profile_edit_reports_recovery_action(tmp_path, duplicate):
     app.state.database = SimpleNamespace(
         model_by_id=AsyncMock(return_value={"id": "model"}), record_event=AsyncMock()
     )
+    app.state.supervisor = SimpleNamespace(workers={}, drain=AsyncMock())
     app.state.profiles = SimpleNamespace(
         records_for_model=AsyncMock(return_value=records),
         update=AsyncMock(
@@ -84,7 +87,7 @@ async def test_profile_edit_reports_recovery_action(tmp_path, duplicate):
         app.state.database.record_event.assert_not_awaited()
     else:
         assert response.status_code == 200
-        assert response.json()["verification_required"] == ["native"]
+        assert response.json()["verification_required"] == ["measurements_invalid"]
         assert response.json()["profile"]["vram_measurement_version"] == 0
 
 
@@ -126,7 +129,7 @@ async def test_real_validation_override_can_exceed_only_fallback(
     assert captured[0]["max_model_len"] == (declared_limit or 131072)
 
 
-def test_retry_context_override_preserves_other_validation_limits(monkeypatch):
+def test_retry_context_override_sends_only_changed_limit(monkeypatch):
     calls = []
     from llm_rio.commands import models
 
@@ -146,5 +149,5 @@ def test_retry_context_override_preserves_other_validation_limits(monkeypatch):
     assert calls[-1] == (
         "POST",
         "/staff/model-jobs/job/retry",
-        {"json_body": {"validation_overrides": {"max_num_seqs": 8, "max_model_len": 131072}}},
+        {"json_body": {"validation_overrides": {"max_model_len": 131072}}},
     )

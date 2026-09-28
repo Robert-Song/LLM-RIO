@@ -257,3 +257,144 @@ def test_dotenv_selects_configuration_file(tmp_path) -> None:
     selected.write_text('machine_id = "dotenv"\n')
     (tmp_path / ".env").write_text(f"LLMRIO_CONFIG_FILE={selected}\n")
     assert Settings().machine_id == "dotenv"
+
+
+@pytest.mark.parametrize("command", [["serve"], ["doctor"], ["status"]])
+def test_cli_reports_beta_configuration_without_traceback_or_secrets(
+    tmp_path, monkeypatch, command
+) -> None:
+    monkeypatch.delenv("LLMRIO_SERVING_MODE")
+    (tmp_path / "config.toml").write_text(
+        'prism_weight_cache_mode = "ram"\nhf_token = "never-display-this-token"\n'
+    )
+    result = CliRunner().invoke(cli_module.app, command)
+    assert result.exit_code == 1
+    assert "Invalid configuration" in result.output
+    assert "serving_mode" in result.output
+    assert "Beta settings are unsupported" in result.output
+    assert "Traceback" not in result.output
+    assert "never-display-this-token" not in result.output
+    assert not (tmp_path / "state").exists()
+
+
+@pytest.mark.parametrize("selector", ["cli", "environment", "dotenv"])
+def test_cli_rejects_missing_explicit_configuration(tmp_path, monkeypatch, selector) -> None:
+    path = tmp_path / "typo.toml"
+    args = ["serve"]
+    if selector == "cli":
+        args += ["--config", str(path)]
+    elif selector == "environment":
+        monkeypatch.setenv("LLMRIO_CONFIG_FILE", str(path))
+    else:
+        (tmp_path / ".env").write_text(f"LLMRIO_CONFIG_FILE={path}\n")
+    result = CliRunner().invoke(cli_module.app, args)
+    assert result.exit_code == 1
+    assert "Configuration file not found" in result.output
+    assert not (tmp_path / "state").exists()
+
+
+@pytest.mark.parametrize("selector", ["cli", "environment", "dotenv"])
+def test_serve_resolves_release_configuration_over_beta_default(
+    tmp_path, monkeypatch, selector
+) -> None:
+    monkeypatch.delenv("LLMRIO_SERVING_MODE")
+    (tmp_path / "config.toml").write_text('prism_weight_cache_mode = "ram"\n')
+    path = tmp_path / "release.toml"
+    path.write_text('serving_mode = "queue"\napi_port = 8123\n')
+    served = []
+    monkeypatch.setattr(cli_module, "create_app", lambda settings: settings)
+    monkeypatch.setattr(cli_module.uvicorn, "run", lambda app, **kwargs: served.append(app))
+    args = ["serve"]
+    if selector == "cli":
+        args += ["--config", str(path)]
+    elif selector == "environment":
+        monkeypatch.setenv("LLMRIO_CONFIG_FILE", str(path))
+    else:
+        (tmp_path / ".env").write_text(f"LLMRIO_CONFIG_FILE={path}\n")
+    result = CliRunner().invoke(cli_module.app, args)
+    assert result.exit_code == 0, result.output
+    assert len(served) == 1
+    assert served[0].config_file == path
+    assert served[0].serving_mode.value == "queue"
+    assert served[0].api_port == 8123
+
+
+@pytest.mark.parametrize(
+    "content, env",
+    [
+        ('hf_token = "private"\n', {}),
+        ('serving_mode = "queue"\n[broken', {}),
+        ('serving_mode = "queue"\n', {"LLMRIO_MANAGED_GPU_UUIDS": "invalid-json"}),
+    ],
+)
+def test_cli_reports_missing_mode_malformed_toml_and_environment(
+    tmp_path, monkeypatch, content, env
+) -> None:
+    monkeypatch.delenv("LLMRIO_SERVING_MODE")
+    (tmp_path / "config.toml").write_text(content)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    result = CliRunner().invoke(cli_module.app, ["serve"])
+    assert result.exit_code == 1
+    assert "configuration" in result.output.lower()
+    assert "Traceback" not in result.output
+    assert "private" not in result.output
+
+
+@pytest.mark.parametrize("selector", ["file", "cli", "environment", "dotenv"])
+@pytest.mark.parametrize("mode", ["queue", "vllm-sleep"])
+def test_mode_selection_with_both_native_configuration_sections(
+    tmp_path, monkeypatch, selector, mode
+) -> None:
+    monkeypatch.delenv("LLMRIO_SERVING_MODE")
+    other = "vllm-sleep" if mode == "queue" else "queue"
+    config = tmp_path / "config.toml"
+    config.write_text(
+        f'serving_mode = "{mode if selector == "file" else other}"\n'
+        "[modes.queue]\nscale_window_seconds = 12\n"
+        "[modes.vllm_sleep]\nidle_sleep_seconds = 17\n"
+        'preload_models = ["saved-sleep-model"]\nhost_cache_max_gib = 100\n'
+    )
+    original = config.read_bytes()
+    if selector == "environment":
+        monkeypatch.setenv("LLMRIO_SERVING_MODE", mode)
+    elif selector == "dotenv":
+        (tmp_path / ".env").write_text(f"LLMRIO_SERVING_MODE={mode}\n")
+    args = ["serve", "--mode", mode] if selector == "cli" else ["serve"]
+    served = []
+    monkeypatch.setattr(cli_module, "create_app", lambda settings: settings)
+    monkeypatch.setattr(cli_module.uvicorn, "run", lambda app, **kwargs: served.append(app))
+    result = CliRunner().invoke(cli_module.app, args)
+    assert result.exit_code == 0, result.output
+    assert len(served) == 1
+    settings = served[0]
+    assert settings.serving_mode.value == mode
+    assert settings.modes.queue.scale_window_seconds == 12
+    assert settings.modes.vllm_sleep.idle_sleep_seconds == 17
+    if mode == "queue":
+        assert settings.residency.preload_models == []
+        assert settings.residency.host_cache_max_gib is None
+        assert not settings.ram_weight_cache_enabled
+    else:
+        assert settings.residency.preload_models == ["saved-sleep-model"]
+        assert settings.residency.host_cache_max_gib == 100
+    assert config.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "[modes.vllm_sleep]\nmisspelled_option = 5\n",
+        "[modes.vllm_sleep]\nidle_sleep_seconds = -1\n",
+        "[modes.unknown]\nsetting = 1\n",
+    ],
+)
+def test_dormant_mode_sections_still_reject_unknown_and_invalid_settings(
+    tmp_path, monkeypatch, extra
+) -> None:
+    monkeypatch.delenv("LLMRIO_SERVING_MODE")
+    (tmp_path / "config.toml").write_text('serving_mode = "queue"\n' + extra)
+    result = CliRunner().invoke(cli_module.app, ["serve"])
+    assert result.exit_code == 1
+    assert "Invalid configuration" in result.output
+    assert not (tmp_path / "state").exists()

@@ -1,4 +1,12 @@
+Use [the final runnable GPU kit](MANUAL_GPU_TEST.md) for the release gate.
+The older `scripts/qualify.py` collector below is diagnostic only and cannot certify
+the full release. The new driver plus per-case manual evidence replaces that role.
+
 # Release qualification
+
+The [final native acceptance design](FINAL_ACCEPTANCE.md) and
+[case catalog](ACCEPTANCE_CASES.md) are the detailed release specification.
+Close the [implementation review findings](IMPLEMENTATION_REVIEW.md) first.
 
 A deployment manifest records host/GPU UUID inventory, dependency versions, source artifact
 revisions, effective profile placements, and verified request limits. It describes the
@@ -35,10 +43,12 @@ For each native mode:
    stuck leases, or accounting mismatches. Investigate regressions against the pre-change
    hardware baseline before release.
 
-The generic `scripts/qualify.py` tool collects traffic/telemetry/accounting evidence and
-checks its observed transitions and duration; it does not replace context/TP/operator
-acceptance. Select any callable models using `--models`, or use the service's current
-callable catalog. Supply credentials through environment variables; reports contain no keys.
+The generic `scripts/qualify.py` tool collects supplementary traffic/telemetry
+evidence. It cannot certify final acceptance: transition polling and aggregate
+completion-token matching do not prove lifecycle or per-request ledger invariants
+(review AUD-09). Select at least two callable models using `--models`, or use the
+service's current callable catalog if it has at least two. Supply credentials
+through environment variables; reports contain no keys.
 Store generated reports under ignored `docs/release/results/`. Missing evidence is a
 pending gate, never a pass. Experimental results are reported separately.
 

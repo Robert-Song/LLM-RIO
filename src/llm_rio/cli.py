@@ -20,7 +20,7 @@ from llm_rio.commands.common import (
     _print,
 )
 from llm_rio.commands.common import app as app
-from llm_rio.config import ServingMode, Settings
+from llm_rio.config import ServingMode
 from llm_rio.connection import settings as _settings
 from llm_rio.inventory import InventoryError, discover_inventory
 
@@ -28,15 +28,12 @@ from llm_rio.inventory import InventoryError, discover_inventory
 @app.command()
 def serve(
     config: Path | None = typer.Option(None, "--config", help="TOML configuration file"),
-    mode: ServingMode | None = typer.Option(None, "--mode", help="Model residency mode"),
+    mode: ServingMode | None = typer.Option(
+        None, "--mode", help="Select the active mode; other mode sections stay inactive."
+    ),
 ) -> None:
     """Run the machine-local API and scheduler."""
-    options: dict[str, Any] = {}
-    if config is not None:
-        options["config_file"] = config
-    if mode is not None:
-        options["serving_mode"] = mode
-    settings = Settings(**options)
+    settings = _settings(config, mode=mode)
     log_config = copy.deepcopy(uvicorn.config.LOGGING_CONFIG)
     log_config["formatters"]["default"]["fmt"] = "%(asctime)s | %(levelprefix)s %(message)s"
     uvicorn.run(

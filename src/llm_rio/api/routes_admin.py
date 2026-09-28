@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import asdict
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 
@@ -20,9 +22,9 @@ from llm_rio.errors import RioError
 from llm_rio.inventory import candidate_gpu_sets
 from llm_rio.profiles import (
     StoredProfile,
+    launch_configuration_changed,
     profile_key,
     profile_to_dict,
-    profile_verified_for_mode,
 )
 from llm_rio.security import issue_api_key
 from llm_rio.services.diagnostics import DiagnosticsService
@@ -123,8 +125,14 @@ async def list_model_profiles(
     if model is None:
         raise HTTPException(status_code=404, detail="Model not found")
     records = await request.app.state.profiles.records_for_model(model_id)
+    mode = request.app.state.scheduler.mode
+    data = []
+    for record in records:
+        payload = _profile_payload(record)
+        payload["eligibility"] = asdict(mode.eligibility(record.profile))
+        data.append(payload)
     return {
-        "data": [_profile_payload(record) for record in records],
+        "data": data,
         "saved_measurements": [
             _profile_payload(record)
             for record in await request.app.state.profiles.records_for_model(
@@ -293,7 +301,8 @@ async def update_model_profile(
         },
     )
     drained_worker_ids: list[str] = []
-    if body.restart_workers:
+    launch_changed = launch_configuration_changed(selected.profile, updated)
+    if body.restart_workers or launch_changed:
         for worker in list(request.app.state.supervisor.workers.values()):
             if worker.model_id == model_id:
                 drained_worker_ids.append(worker.id)
@@ -303,13 +312,12 @@ async def update_model_profile(
             StoredProfile(profile=updated, active=body.make_default or selected.active)
         ),
         "drained_worker_ids": drained_worker_ids,
-        "restart_required": not body.restart_workers,
+        "restart_required": not (body.restart_workers or launch_changed),
+        "eligibility": asdict(request.app.state.scheduler.mode.eligibility(updated)),
         "verification_required": (
             []
-            if profile_verified_for_mode(
-                updated, kvcached_required=updated.memory_backend == "kvcached"
-            )
-            else [updated.memory_backend]
+            if request.app.state.scheduler.mode.eligibility(updated).allowed
+            else [request.app.state.scheduler.mode.eligibility(updated).reason]
         ),
     }
 
@@ -350,6 +358,38 @@ async def set_model_profile_active(
     model = await database.model_by_id(model_id)
     if model is None:
         raise HTTPException(status_code=404, detail="Model not found")
+    if active:
+        records = await request.app.state.profiles.records_for_model(model_id)
+        selected = next((record for record in records if record.profile.id == profile_id), None)
+        if selected is None:
+            raise HTTPException(status_code=404, detail="Placement profile not found")
+        eligibility = request.app.state.scheduler.mode.eligibility(selected.profile)
+        if selected.profile.model_revision != model.get("resolved_revision"):
+            raise RioError(
+                "profile_ineligible",
+                "Artifact revision changed; run Validate/Revalidate",
+                status_code=409,
+                details={"reason": "artifact_revision_changed"},
+            )
+        if not eligibility.allowed:
+            raise RioError(
+                "profile_ineligible",
+                "Run Validate/Revalidate before enabling",
+                status_code=409,
+                details={"reason": eligibility.reason},
+            )
+        if model.get("source_type") == "local":
+            from llm_rio.artifacts import local_artifact_unchanged
+
+            if not local_artifact_unchanged(
+                Path(str(model["artifact_path"])), model.get("artifact_hashes") or []
+            ):
+                raise RioError(
+                    "profile_ineligible",
+                    "Local artifact changed; run Validate/Revalidate",
+                    status_code=409,
+                    details={"reason": "artifact_changed"},
+                )
     saved = await request.app.state.profiles.set_active(
         model_id=model_id, profile_id=profile_id, active=active
     )
@@ -422,7 +462,16 @@ async def maintenance_status(request: Request, _: AdminPrincipal) -> dict[str, o
 async def capabilities(request: Request, _: AdminPrincipal) -> dict[str, object]:
     from dataclasses import asdict
 
+    from llm_rio.operations.build_identity import application_identity
+
+    settings = request.app.state.settings
     return {
+        "application": application_identity(),
+        "configuration": {
+            "database_path": str(request.app.state.settings.database_path.resolve()),
+            "managed_gpu_uuids": [gpu.uuid for gpu in request.app.state.inventory.gpus],
+            "quota_charge_requested_maximum": settings.quota_charge_requested_maximum,
+        },
         **asdict(request.app.state.scheduler.mode.capabilities),
         "actions": [
             "register",

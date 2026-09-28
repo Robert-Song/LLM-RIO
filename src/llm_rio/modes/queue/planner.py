@@ -20,25 +20,13 @@ class QueuePlanner:
         *,
         wait_duration_seconds: float,
         minimum_residency_seconds: float,
-        fair_share_seconds: float,
         scale_window_seconds: float = 30.0,
         minimum_marginal_efficiency: float = 0.05,
-        gpu_vram_mib: dict[str, int] | None = None,
-        reserved_vram_mib: int = 0,
-        cache_max_workers_per_gpu: int = 1,
-        cache_sleep_gpu_reserve_mib: int = 1536,
-        cache_idle_sleep_seconds: float = 45.0,
     ) -> None:
         self.wait_duration_seconds = wait_duration_seconds
         self.minimum_residency_seconds = minimum_residency_seconds
-        self.fair_share_seconds = fair_share_seconds
         self.scale_window_seconds = scale_window_seconds
         self.minimum_marginal_efficiency = minimum_marginal_efficiency
-        self.gpu_vram_mib = gpu_vram_mib or {}
-        self.reserved_vram_mib = reserved_vram_mib
-        self.cache_max_workers_per_gpu = cache_max_workers_per_gpu
-        self.cache_sleep_gpu_reserve_mib = cache_sleep_gpu_reserve_mib
-        self.cache_idle_sleep_seconds = cache_idle_sleep_seconds
 
     def plan(
         self,
@@ -84,7 +72,7 @@ class QueuePlanner:
                         StartPlacement(profile, gpu_set, "cold_backlog")
                         for profile, gpu_set in starts
                     ]
-                drain = self._choose_preemption(
+                drain = self._choose_queue_preemption(
                     now=now,
                     candidates=candidates,
                     workers=active,
@@ -128,7 +116,7 @@ class QueuePlanner:
                     for profile, gpu_set in useful
                 ]
             if not starts:
-                drain = self._choose_preemption(
+                drain = self._choose_queue_preemption(
                     now=now,
                     candidates=candidates,
                     workers=active,
@@ -146,7 +134,10 @@ class QueuePlanner:
         """Fill free GPUs with independent instances of the smallest validated shape."""
         if not profiles:
             return []
-        smallest_gpu_count = min(profile.gpu_count for profile in profiles)
+        first = cls._smallest_fitting(profiles, free)
+        if first is None:
+            return []
+        smallest_gpu_count = first[0].gpu_count
         candidates = [profile for profile in profiles if profile.gpu_count == smallest_gpu_count]
         remaining = set(free)
         result: list[tuple[PlacementProfile, tuple[str, ...]]] = []
@@ -220,90 +211,6 @@ class QueuePlanner:
             if options
             else None
         )
-
-    def _choose_preemption(
-        self,
-        *,
-        now: datetime,
-        candidates: list[PlacementProfile],
-        workers: list[WorkerPlacement],
-        pressure: QueuePressure,
-        pressure_by_model: dict[str, QueuePressure],
-    ) -> list[WorkerPlacement] | None:
-        return self._choose_queue_preemption(
-            now=now,
-            candidates=candidates,
-            workers=workers,
-            pressure=pressure,
-            pressure_by_model=pressure_by_model,
-        )
-        smallest_gpu_count = min(profile.gpu_count for profile in candidates)
-        compatible_gpus = {
-            gpu
-            for profile in candidates
-            if profile.gpu_count == smallest_gpu_count
-            for gpu_set in profile.eligible_gpu_sets
-            for gpu in gpu_set
-        }
-        idle_blockers = [
-            worker
-            for worker in workers
-            if worker.model_id not in pressure_by_model
-            and (not worker.admitted_request_ids)
-            and self._residency_satisfied(worker, now)
-            and bool(set(worker.gpu_uuids) & compatible_gpus)
-        ]
-        if idle_blockers:
-            return sorted(
-                idle_blockers, key=lambda worker: worker.profile.predicted_tokens_per_second
-            )
-        resident_counts: dict[str, int] = {}
-        for worker in workers:
-            if worker.state in {RuntimeState.LOADING, RuntimeState.READY}:
-                resident_counts[worker.model_id] = resident_counts.get(worker.model_id, 0) + 1
-        for profile in sorted(candidates, key=lambda item: item.gpu_count):
-            for required_set in profile.eligible_gpu_sets:
-                blockers = [
-                    worker for worker in workers if set(worker.gpu_uuids) & set(required_set)
-                ]
-                if any(worker.model_id == pressure.model_id for worker in blockers):
-                    continue
-                if any(worker.model_id not in pressure_by_model for worker in blockers):
-                    continue
-                if not blockers or any(
-                    worker.state is RuntimeState.DRAINING for worker in blockers
-                ):
-                    continue
-                selected_counts: dict[str, int] = {}
-                drainable = True
-                for worker in blockers:
-                    if worker.model_id not in pressure_by_model:
-                        continue
-                    ready_at = worker.ready_at or now
-                    fair_wait_started = max(pressure.oldest_enqueued_at, ready_at)
-                    starvation_override = (
-                        now - fair_wait_started
-                    ).total_seconds() >= self.fair_share_seconds
-                    if starvation_override:
-                        continue
-                    if not self._residency_satisfied(worker, now):
-                        drainable = False
-                        break
-                    already_selected = selected_counts.get(worker.model_id, 0)
-                    remaining = resident_counts.get(worker.model_id, 0) - already_selected - 1
-                    if remaining < 1:
-                        drainable = False
-                        break
-                    selected_counts[worker.model_id] = already_selected + 1
-                if drainable:
-                    return sorted(
-                        blockers,
-                        key=lambda worker: (
-                            worker.model_id in pressure_by_model,
-                            worker.profile.predicted_tokens_per_second,
-                        ),
-                    )
-        return None
 
     @staticmethod
     def _smallest_fitting(

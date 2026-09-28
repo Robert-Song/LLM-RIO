@@ -171,3 +171,31 @@ async def test_malformed_stream_is_failed_and_finalized(context, raw) -> None:
     assert settlements[0]["actual_tokens"] != lease.estimated_tokens
     assert response.is_closed
     assert released == [lease]
+
+
+async def test_client_closing_after_done_is_a_completed_request(context):
+    import asyncio
+
+    request, lease, settlements, released = context
+    request.app.state.settings.quota_charge_requested_maximum = False
+    raw = (
+        b'data: {"choices":[],"usage":{"prompt_tokens":3,'
+        b'"completion_tokens":0,"total_tokens":3}}\n\n'
+        b"data: [DONE]\n\n"
+    )
+    response = httpx.Response(200, stream=ResponseStream([raw]))
+    iterator = _stream_backend(
+        request=request,
+        payload={"model": "model"},
+        lease=lease,
+        reservation_id="reservation",
+        prompt_estimate=3,
+        response=response,
+    )
+    assert await anext(iterator) == raw
+    with pytest.raises(asyncio.CancelledError):
+        await iterator.athrow(asyncio.CancelledError())
+    assert settlements[0]["error_code"] is None
+    assert settlements[0]["actual_tokens"] == 3
+    assert released == [lease]
+    assert response.is_closed

@@ -1,0 +1,5691 @@
+{
+  "schema_version": 1,
+  "title": "Final native user acceptance design",
+  "status": "DESIGNED_NOT_EXECUTED",
+  "modes": [
+    "queue",
+    "vllm-sleep"
+  ],
+  "excluded_modes": [
+    "kv-cached"
+  ],
+  "cases": [
+    {
+      "id": "CFG-01",
+      "group": "Installation and configuration",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "install",
+      "actor": "operator",
+      "requires": "Clean checkout, empty test root, operator-owned ports and devices",
+      "steps": [
+        "Install locked router/dev environment from a clean checkout",
+        "build wheel and install it into a second fresh environment",
+        "invoke every CLI help command"
+      ],
+      "expected": [
+        "Install and help succeed without experimental dependencies or bootstrap activation",
+        "record revision, wheel hash and lock hash"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "CFG-02",
+      "group": "Installation and configuration",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "install",
+      "actor": "operator",
+      "requires": "Clean checkout, empty test root, operator-owned ports and devices",
+      "steps": [
+        "Start once from CLI mode, once from environment mode, and once from TOML mode"
+      ],
+      "expected": [
+        "Selected mode and capability response match each source",
+        "no implicit mode"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "CFG-03",
+      "group": "Installation and configuration",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "install",
+      "actor": "operator",
+      "requires": "Clean checkout, empty test root, operator-owned ports and devices",
+      "steps": [
+        "Omit mode",
+        "use an unknown mode",
+        "supply retired prism settings and unknown nested settings",
+        "Submit the invalid configuration through bare ./llmctl, Diagnostics -> Start service; correct it and resubmit"
+      ],
+      "expected": [
+        "Actionable configuration failure before engine spawn",
+        "existing database and artifacts unchanged",
+        "Start form remains open with values retained on configuration error; no credential values or traceback; corrected settings can start"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "CFG-04",
+      "group": "Installation and configuration",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "install",
+      "actor": "operator",
+      "requires": "Clean checkout, empty test root, operator-owned ports and devices",
+      "steps": [
+        "Use conflicting CLI/environment/TOML values for config selector, API port and mode",
+        "repeat from a different working directory",
+        "Keep beta config.toml present; select a release file using .env; run bare ./llmctl and start via Diagnostics, then stop and restart"
+      ],
+      "expected": [
+        "One documented precedence applies to CLI/TUI/server",
+        "LLMRIO_CONFIG_FILE is honored when no explicit selector is supplied",
+        "Doctor, start form and server use the selected release file; health and authenticated capabilities succeed with a stable admin credential after restart"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "CFG-05",
+      "group": "Installation and configuration",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "install",
+      "actor": "operator",
+      "requires": "Clean checkout, empty test root, operator-owned ports and devices",
+      "steps": [
+        "Keep valid queue and sleep mode sections together; select each mode through TOML, CLI, environment and TUI",
+        "Separately enable llama.cpp in sleep mode",
+        "Provide unknown settings, invalid ranges and reversed port range"
+      ],
+      "expected": [
+        "Only the selected mode's settings affect execution; queue does not inherit sleep preloads or memory policy",
+        "Unknown or invalid settings and incompatible active engine options are rejected at startup with offending field and prerequisite",
+        "No partial release state on configuration errors"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "CFG-06",
+      "group": "Installation and configuration",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "install",
+      "actor": "operator",
+      "requires": "Clean checkout, empty test root, operator-owned ports and devices",
+      "steps": [
+        "Start against a fresh release path",
+        "stop and restart it"
+      ],
+      "expected": [
+        "Exactly one bootstrap admin and versioned schema",
+        "original credential remains usable after restart",
+        "no duplicate accounts"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "CFG-07",
+      "group": "Installation and configuration",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "install",
+      "actor": "operator",
+      "requires": "Clean checkout, empty test root, operator-owned ports and devices",
+      "steps": [
+        "Point new code at a COPY of a beta database and vault",
+        "attempt startup"
+      ],
+      "expected": [
+        "Startup refuses before schema or vault mutation",
+        "hashes of copied source remain unchanged"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "CFG-08",
+      "group": "Installation and configuration",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "install",
+      "actor": "operator",
+      "requires": "Clean checkout, empty test root, operator-owned ports and devices",
+      "steps": [
+        "Use missing or nonexecutable engine",
+        "invalid config path",
+        "unwritable model/log/database paths",
+        "occupied API port"
+      ],
+      "expected": [
+        "Clear bounded failure identifying cause",
+        "no leftover service or engine process"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "CFG-09",
+      "group": "Installation and configuration",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "install",
+      "actor": "operator",
+      "requires": "Clean checkout, empty test root, operator-owned ports and devices",
+      "steps": [
+        "Select GPUs by UUID and alternate CUDA visibility ordering",
+        "specify missing/duplicate UUIDs and unsupported device mapping"
+      ],
+      "expected": [
+        "Only intended UUIDs can be allocated",
+        "invalid selection is explicit",
+        "no implicit reuse of unrelated GPUs"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "CFG-10",
+      "group": "Installation and configuration",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "install",
+      "actor": "operator",
+      "requires": "Clean checkout, empty test root, operator-owned ports and devices",
+      "steps": [
+        "Use external vLLM environment",
+        "validate a profile",
+        "upgrade its engine while keeping launcher script unchanged",
+        "restart"
+      ],
+      "expected": [
+        "Old profile becomes ineligible until revalidation",
+        "recorded engine identity comes from the executed engine"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "CFG-11",
+      "group": "Installation and configuration",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "install",
+      "actor": "operator",
+      "requires": "Clean checkout, empty test root, operator-owned ports and devices",
+      "steps": [
+        "Change measurement-affecting engine environment and launch defaults",
+        "then change log level only"
+      ],
+      "expected": [
+        "Measurement-affecting drift blocks old evidence",
+        "unrelated logging changes do not fabricate or erase measurements"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "CFG-12",
+      "group": "Installation and configuration",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "install",
+      "actor": "operator",
+      "requires": "Clean checkout, empty test root, operator-owned ports and devices",
+      "steps": [
+        "Exhaust or occupy private worker ports while sending inference and validation requests",
+        "free a port and retry"
+      ],
+      "expected": [
+        "Allocator never collides",
+        "failed work is recoverable",
+        "uncertain teardown retains ownership"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "CFG-13",
+      "group": "Installation and configuration",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "install",
+      "actor": "operator",
+      "requires": "Clean checkout, empty test root, operator-owned ports and devices",
+      "steps": [
+        "Start a second service against the SAME test database while first serves",
+        "also test separate test databases sharing test GPUs"
+      ],
+      "expected": [
+        "Second owner is refused or explicitly blocked before it can terminate or allocate against first owner",
+        "original stream survives"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "CFG-14",
+      "group": "Installation and configuration",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "install",
+      "actor": "operator",
+      "requires": "Clean checkout, empty test root, operator-owned ports and devices",
+      "steps": [
+        "Run doctor with healthy inventory, missing telemetry, absent engine, and no GPUs",
+        "inspect JSON and TUI result"
+      ],
+      "expected": [
+        "Diagnostics identify prerequisites without loading a model",
+        "exit/report semantics agree"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "CFG-15",
+      "group": "Installation and configuration",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "install",
+      "actor": "operator",
+      "requires": "Clean checkout, empty test root, operator-owned ports and devices",
+      "steps": [
+        "Start native mode with experimental activation variables inherited from shell"
+      ],
+      "expected": [
+        "Actual engine launch environment has no active experimental patch/bootstrap",
+        "native import isolation verified"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "CFG-16",
+      "group": "Installation and configuration",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "install",
+      "actor": "operator",
+      "requires": "Clean checkout, empty test root, operator-owned ports and devices",
+      "steps": [
+        "Vary validation idle window, scheduler tick and idle/residency timing within documented ranges"
+      ],
+      "expected": [
+        "Observed scheduling and validation delays follow active settings",
+        "accepted settings are not silently ignored"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "IAM-01",
+      "group": "Identity, access and quotas",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "unauthenticated",
+      "requires": "Admin, staff, two user keys, two quota accounts, A and B validated",
+      "steps": [
+        "Call every protected route with no bearer, invalid bearer and malformed scheme",
+        "call health"
+      ],
+      "expected": [
+        "Protected routes return 401 without mutation",
+        "health returns only its documented public status"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "IAM-02",
+      "group": "Identity, access and quotas",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "staff/user-a",
+      "requires": "Admin, staff, two user keys, two quota accounts, A and B validated",
+      "steps": [
+        "Call every route with each role and attempt each supported CLI/TUI action"
+      ],
+      "expected": [
+        "Role matrix enforced by server",
+        "forbidden actions return 403 and UI explains unavailable controls",
+        "no credential disclosure"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "IAM-03",
+      "group": "Identity, access and quotas",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "Admin, staff, two user keys, two quota accounts, A and B validated",
+      "steps": [
+        "Create admin/staff/user keys, generated and custom credentials",
+        "list/show/copy them through supported interfaces"
+      ],
+      "expected": [
+        "One created identity and account",
+        "credentials work only for assigned role",
+        "secrets stay out of acceptance reports"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "IAM-04",
+      "group": "Identity, access and quotas",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "Admin, staff, two user keys, two quota accounts, A and B validated",
+      "steps": [
+        "Create duplicate nickname, malformed custom token, missing quota account and nonexistent grant",
+        "repeat submission concurrently"
+      ],
+      "expected": [
+        "Deterministic documented 4xx",
+        "no partial key/account/grant",
+        "duplicate submission has one effect"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "IAM-05",
+      "group": "Identity, access and quotas",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "Admin, staff, two user keys, two quota accounts, A and B validated",
+      "steps": [
+        "Rotate a key while a request is active",
+        "use old and new secrets for subsequent requests"
+      ],
+      "expected": [
+        "New secret authenticates and old secret fails",
+        "accepted work completes or follows documented cancellation policy without double settlement"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "IAM-06",
+      "group": "Identity, access and quotas",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "Admin, staff, two user keys, two quota accounts, A and B validated",
+      "steps": [
+        "Revoke then restore a user key during queued/active work",
+        "retry after each change"
+      ],
+      "expected": [
+        "New requests denied while revoked and accepted after restore",
+        "existing-work policy is explicit and accounting remains correct"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "IAM-07",
+      "group": "Identity, access and quotas",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "Admin, staff, two user keys, two quota accounts, A and B validated",
+      "steps": [
+        "Delete a key with prior usage and attempt restore/authentication"
+      ],
+      "expected": [
+        "Credential is unusable",
+        "audit and charged usage remain",
+        "missing-key actions return 404"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "IAM-08",
+      "group": "Identity, access and quotas",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "staff",
+      "requires": "Admin, staff, two user keys, two quota accounts, A and B validated",
+      "steps": [
+        "Grant A, revoke A, replace full model grant set with B",
+        "exercise user-side and model-side access forms"
+      ],
+      "expected": [
+        "User list and requests agree with grants after each action",
+        "no access granted implicitly"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "IAM-09",
+      "group": "Identity, access and quotas",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "staff",
+      "requires": "Admin, staff, two user keys, two quota accounts, A and B validated",
+      "steps": [
+        "Replace grants with one valid and one nonexistent model",
+        "use a missing key",
+        "submit empty replacement"
+      ],
+      "expected": [
+        "Invalid replacement is atomic and changes nothing",
+        "empty replacement removes all grants"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "IAM-10",
+      "group": "Identity, access and quotas",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "Admin, staff, two user keys, two quota accounts, A and B validated",
+      "steps": [
+        "List visible models",
+        "request hidden, missing, disabled and pending model names"
+      ],
+      "expected": [
+        "No unauthorized execution",
+        "stable 403/404/409 or documented revalidation error",
+        "available-model hints respect visibility"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "IAM-11",
+      "group": "Identity, access and quotas",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "Admin, staff, two user keys, two quota accounts, A and B validated",
+      "steps": [
+        "Set finite quota and unlimited quota",
+        "change quota while requests are reserved"
+      ],
+      "expected": [
+        "No lost reservations",
+        "limit/unlimited state visible consistently in usage and UI"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "IAM-12",
+      "group": "Identity, access and quotas",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a/user-b",
+      "requires": "Admin, staff, two user keys, two quota accounts, A and B validated",
+      "steps": [
+        "Send simultaneous requests sharing one account with total reserve above remaining quota",
+        "repeat with independent accounts"
+      ],
+      "expected": [
+        "Atomic acceptance permits only funded reservations",
+        "rejected requests return quota_exceeded 429",
+        "account isolation holds"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "IAM-13",
+      "group": "Identity, access and quotas",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "Admin, staff, two user keys, two quota accounts, A and B validated",
+      "steps": [
+        "Spend exactly remaining reservable credit",
+        "request just over limit",
+        "complete under requested maximum"
+      ],
+      "expected": [
+        "Boundary behavior is consistent",
+        "unused reservation refunded once",
+        "observed actual usage reconciles"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "IAM-14",
+      "group": "Identity, access and quotas",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "Admin, staff, two user keys, two quota accounts, A and B validated",
+      "steps": [
+        "Reset usage while prior requests have settled and while one remains active",
+        "query lifetime and current-period totals"
+      ],
+      "expected": [
+        "Reset does not delete lifetime audit or corrupt live reservations",
+        "subsequent settlement occurs once"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "IAM-15",
+      "group": "Identity, access and quotas",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "Admin, staff, two user keys, two quota accounts, A and B validated",
+      "steps": [
+        "Compact settled usage twice while other calls are queued/streaming",
+        "replay an old request identifier afterward"
+      ],
+      "expected": [
+        "Compaction excludes live work, preserves balances/totals and duplicate protection, and is idempotent"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "IAM-16",
+      "group": "Identity, access and quotas",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "Admin, staff, two user keys, two quota accounts, A and B validated",
+      "steps": [
+        "Read own usage from API and supported CLI",
+        "attempt to inspect another user through lower-role paths"
+      ],
+      "expected": [
+        "Only permitted usage is visible",
+        "active reserves, period totals and lifetime totals reconcile"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REG-01",
+      "group": "Registration and validation jobs",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "staff",
+      "requires": "Two distinct engine-supported artifacts A/B, pinned HF source H, disposable local copy L",
+      "steps": [
+        "Register pinned HF revision H with grant to user-a",
+        "review job until native maintenance prerequisite appears",
+        "drain",
+        "complete validation",
+        "resume and infer"
+      ],
+      "expected": [
+        "Resolved immutable revision persisted",
+        "probes really launch",
+        "user can infer only after eligible profile publication"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REG-02",
+      "group": "Registration and validation jobs",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "staff",
+      "requires": "Two distinct engine-supported artifacts A/B, pinned HF source H, disposable local copy L",
+      "steps": [
+        "Register existing local directory L",
+        "validate and infer",
+        "compare source inode/path/content before and after"
+      ],
+      "expected": [
+        "Local files reused without copying or deleting",
+        "complete manifest and pinned identity recorded"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REG-03",
+      "group": "Registration and validation jobs",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "staff",
+      "requires": "Two distinct engine-supported artifacts A/B, pinned HF source H, disposable local copy L",
+      "steps": [
+        "Register missing/relative/empty paths, wrong source type, both sources, neither source, invalid revision, missing grants"
+      ],
+      "expected": [
+        "Actionable 4xx or persisted failed job as appropriate",
+        "no worker/reservation leak or partial grants"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REG-04",
+      "group": "Registration and validation jobs",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "staff",
+      "requires": "Two distinct engine-supported artifacts A/B, pinned HF source H, disposable local copy L",
+      "steps": [
+        "Register a vLLM-supported artifact with nonstandard metadata or weight extension"
+      ],
+      "expected": [
+        "Inspection is advisory",
+        "actual engine probe decides compatibility",
+        "no router architecture allowlist"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REG-05",
+      "group": "Registration and validation jobs",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a/admin",
+      "requires": "Two distinct engine-supported artifacts A/B, pinned HF source H, disposable local copy L",
+      "steps": [
+        "Request a local model immediately after registration and before artifact_path is populated"
+      ],
+      "expected": [
+        "Documented model-unavailable response instead of 500",
+        "no quota reservation or engine start"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REG-06",
+      "group": "Registration and validation jobs",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "staff",
+      "requires": "Two distinct engine-supported artifacts A/B, pinned HF source H, disposable local copy L",
+      "steps": [
+        "Submit two identical registrations concurrently and repeat a pending validation request"
+      ],
+      "expected": [
+        "One logical operation or explicit 409 conflict",
+        "no duplicate validation worker or partial catalog row"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REG-07",
+      "group": "Registration and validation jobs",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "staff",
+      "requires": "Two distinct engine-supported artifacts A/B, pinned HF source H, disposable local copy L",
+      "steps": [
+        "Run validation while ACTIVE with production requests",
+        "enter maintenance during a long stream"
+      ],
+      "expected": [
+        "Native validation waits",
+        "admitted production finishes",
+        "only verified maintenance-ready GPUs are acquired"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REG-08",
+      "group": "Registration and validation jobs",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "Two distinct engine-supported artifacts A/B, pinned HF source H, disposable local copy L",
+      "steps": [
+        "Try resume while validation owns any GPU",
+        "inspect status from API/CLI/TUI"
+      ],
+      "expected": [
+        "409 validation_in_progress with prerequisites",
+        "no serving launch competes with probes"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REG-09",
+      "group": "Registration and validation jobs",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "staff",
+      "requires": "Two distinct engine-supported artifacts A/B, pinned HF source H, disposable local copy L",
+      "steps": [
+        "Validate with explicit TP, context, sequence count, batch tokens, GPU utilization, dtype and allowed launch arguments"
+      ],
+      "expected": [
+        "Persisted job and accepted LaunchSpec preserve exact requested effective values or explicitly report a measured retry adjustment"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REG-10",
+      "group": "Registration and validation jobs",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "staff",
+      "requires": "Two distinct engine-supported artifacts A/B, pinned HF source H, disposable local copy L",
+      "steps": [
+        "Retry a failed job with only context changed",
+        "then explicitly clear/change another override"
+      ],
+      "expected": [
+        "Unchanged saved fields preserved",
+        "clear semantics documented",
+        "retries always execute probes"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REG-11",
+      "group": "Registration and validation jobs",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "staff",
+      "requires": "Two distinct engine-supported artifacts A/B, pinned HF source H, disposable local copy L",
+      "steps": [
+        "Force download/auth/disk/engine-start/generation-probe failure one at a time",
+        "inspect and retry"
+      ],
+      "expected": [
+        "Failure stage, actionable diagnostics and redacted log path saved",
+        "one retry recovers without duplicate profile publication"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REG-12",
+      "group": "Registration and validation jobs",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "Two distinct engine-supported artifacts A/B, pinned HF source H, disposable local copy L",
+      "steps": [
+        "Interrupt service during download, launch, probe and final publication",
+        "restart and review same job"
+      ],
+      "expected": [
+        "No orphan engine",
+        "persisted job reaches recoverable state",
+        "profile publication and catalog availability are atomic"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REG-13",
+      "group": "Registration and validation jobs",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "staff",
+      "requires": "Two distinct engine-supported artifacts A/B, pinned HF source H, disposable local copy L",
+      "steps": [
+        "Queue validation for A and B",
+        "attempt duplicate retries while first is running"
+      ],
+      "expected": [
+        "Jobs serialize shared validation ownership",
+        "disjoint probes stay within their reservations",
+        "no stale running job"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REG-14",
+      "group": "Registration and validation jobs",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "staff",
+      "requires": "Two distinct engine-supported artifacts A/B, pinned HF source H, disposable local copy L",
+      "steps": [
+        "Validate all eligible single-GPU placements",
+        "make one fail",
+        "validate explicit TP across heterogeneous/ineligible sets"
+      ],
+      "expected": [
+        "Only measured successful UUID sets published",
+        "unsupported or unprobed placement cannot serve"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REG-15",
+      "group": "Registration and validation jobs",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "Two distinct engine-supported artifacts A/B, pinned HF source H, disposable local copy L",
+      "steps": [
+        "Introduce external GPU memory pressure and then missing telemetry during validation",
+        "remove each condition"
+      ],
+      "expected": [
+        "Validation waits/fails closed with reason",
+        "baseline drift is rejected",
+        "it never treats absent telemetry as free memory"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REG-16",
+      "group": "Registration and validation jobs",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "staff",
+      "requires": "Two distinct engine-supported artifacts A/B, pinned HF source H, disposable local copy L",
+      "steps": [
+        "Validate same artifact twice without changes and once after source revision/content changes"
+      ],
+      "expected": [
+        "Probes run every time",
+        "changed identity invalidates prior serving eligibility",
+        "profile row/key references remain consistent"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REG-17",
+      "group": "Registration and validation jobs",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "Two distinct engine-supported artifacts A/B, pinned HF source H, disposable local copy L",
+      "steps": [
+        "Change, remove, add or replace a local file after validation",
+        "exercise new request, cold start, preload, sleeping wake and clone"
+      ],
+      "expected": [
+        "Detected change blocks serving/clone until revalidation",
+        "no stale warm worker bypass",
+        "manifest reconciles after successful probes"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REG-18",
+      "group": "Registration and validation jobs",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "Two distinct engine-supported artifacts A/B, pinned HF source H, disposable local copy L",
+      "steps": [
+        "Modify a disposable local artifact during hashing and during validation"
+      ],
+      "expected": [
+        "Unstable artifact cannot publish misleading evidence",
+        "retry after stable content succeeds"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REG-19",
+      "group": "Registration and validation jobs",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "staff",
+      "requires": "Two distinct engine-supported artifacts A/B, pinned HF source H, disposable local copy L",
+      "steps": [
+        "Disable catalog model while READY, queued, sleeping and validating",
+        "wait for job completion and attempt inference"
+      ],
+      "expected": [
+        "Admitted-work policy is explicit",
+        "no new work while disabled",
+        "concurrent job cannot silently undo a later disable decision"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REG-20",
+      "group": "Registration and validation jobs",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "staff",
+      "requires": "Two distinct engine-supported artifacts A/B, pinned HF source H, disposable local copy L",
+      "steps": [
+        "Revalidate HF artifact after branch/tag advances while an immutable revision is requested"
+      ],
+      "expected": [
+        "Original pinned revision remains reproducible",
+        "intentional revision change creates new identity and eligibility"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "PRO-01",
+      "group": "Profiles, clones and trust",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "A/B validated, saved evidence copy, admin and limited user",
+      "steps": [
+        "List current active/inactive profiles and saved measurements from another fingerprint"
+      ],
+      "expected": [
+        "All entries have stable IDs, eligibility reason, effective launch identity and administrative state"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "PRO-02",
+      "group": "Profiles, clones and trust",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "A/B validated, saved evidence copy, admin and limited user",
+      "steps": [
+        "Disable profile with queued and active work",
+        "re-enable unchanged measured profile"
+      ],
+      "expected": [
+        "New admission stops for disabled profile, admitted work drains, eligible enable succeeds without fabricating probes"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "PRO-03",
+      "group": "Profiles, clones and trust",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "A/B validated, saved evidence copy, admin and limited user",
+      "steps": [
+        "Attempt enable with invalidated, wrong-mode, wrong-engine, changed-artifact and obsolete-format evidence"
+      ],
+      "expected": [
+        "409 with stable reason",
+        "no worker launch and no trust side effect"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "PRO-04",
+      "group": "Profiles, clones and trust",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "A/B validated, saved evidence copy, admin and limited user",
+      "steps": [
+        "Edit each measurement-affecting field separately, with restart enabled and disabled",
+        "infer before revalidation"
+      ],
+      "expected": [
+        "Evidence invalidated",
+        "stale workers cannot accept new requests under changed limits",
+        "admitted requests obey documented drain policy"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "PRO-05",
+      "group": "Profiles, clones and trust",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "A/B validated, saved evidence copy, admin and limited user",
+      "steps": [
+        "Edit to an existing active and then inactive profile configuration"
+      ],
+      "expected": [
+        "409 identifies existing profile and recovery action",
+        "transaction does not partially edit or duplicate"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "PRO-06",
+      "group": "Profiles, clones and trust",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "A/B validated, saved evidence copy, admin and limited user",
+      "steps": [
+        "Edit a profile then Validate/Revalidate it from API, CLI and TUI"
+      ],
+      "expected": [
+        "Selected profile engine, artifact and complete launch settings reach real probes",
+        "replacements reflect the edit, not old job defaults"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "PRO-07",
+      "group": "Profiles, clones and trust",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "A/B validated, saved evidence copy, admin and limited user",
+      "steps": [
+        "Clone A with only generation defaults",
+        "grant clone separately",
+        "infer from original and clone concurrently"
+      ],
+      "expected": [
+        "Artifact shared without copy",
+        "separate queues/grants/accounting",
+        "unchanged measured launch may be reused only when eligible"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "PRO-08",
+      "group": "Profiles, clones and trust",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "A/B validated, saved evidence copy, admin and limited user",
+      "steps": [
+        "Clone A with larger context or YaRN changes",
+        "validate clone",
+        "infer to new limit"
+      ],
+      "expected": [
+        "Clone has a persisted validation workflow",
+        "invalidated evidence cannot be enabled/trusted",
+        "requested clone launch survives validation"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "PRO-09",
+      "group": "Profiles, clones and trust",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "A/B validated, saved evidence copy, admin and limited user",
+      "steps": [
+        "Clone after source profile disable, launch drift, artifact change or missing artifact"
+      ],
+      "expected": [
+        "Clone refused with actionable prerequisite",
+        "no unusable partial catalog entry"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "PRO-10",
+      "group": "Profiles, clones and trust",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "A/B validated, saved evidence copy, admin and limited user",
+      "steps": [
+        "Change temperature/top_p/top_k/min_p/penalties/reasoning defaults",
+        "send omitted, explicit and null request values"
+      ],
+      "expected": [
+        "Defaults apply only according to documented omission/null rules",
+        "explicit request wins",
+        "no launch evidence invalidation for generation-only defaults"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "PRO-11",
+      "group": "Profiles, clones and trust",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "A/B validated, saved evidence copy, admin and limited user",
+      "steps": [
+        "Trust eligible saved evidence after changing only permitted machine fingerprint fields",
+        "supply reason"
+      ],
+      "expected": [
+        "Same artifact, GPU UUIDs, mode, engine and launch required",
+        "audit records actor, reason, source and affected profile",
+        "no probe claimed"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "PRO-12",
+      "group": "Profiles, clones and trust",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin/staff",
+      "requires": "A/B validated, saved evidence copy, admin and limited user",
+      "steps": [
+        "Trust with missing/blank/oversized reason, nonadmin actor, missing source, changed GPU, changed engine or launch"
+      ],
+      "expected": [
+        "403/404/409/422 as appropriate",
+        "no new profile or partial trust audit"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "PRO-13",
+      "group": "Profiles, clones and trust",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "A/B validated, saved evidence copy, admin and limited user",
+      "steps": [
+        "Trust evidence missing RAM/sleep/wake fields, wrong vector lengths, negative or nonfinite values, obsolete format or invalidation marker"
+      ],
+      "expected": [
+        "All incomplete/invalid evidence is rejected",
+        "override cannot invent measurements"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "PRO-14",
+      "group": "Profiles, clones and trust",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "A/B validated, saved evidence copy, admin and limited user",
+      "steps": [
+        "Revalidate a previously trusted profile and inspect provenance and measurement timestamp"
+      ],
+      "expected": [
+        "New real evidence replaces override eligibility cleanly",
+        "previous audit remains attributable"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "PRO-15",
+      "group": "Profiles, clones and trust",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "A/B validated, saved evidence copy, admin and limited user",
+      "steps": [
+        "Change one engine library/version without changing wrapper executable",
+        "change relevant environment",
+        "restore old values"
+      ],
+      "expected": [
+        "Version/configuration mismatch blocks serving and trust until real revalidation",
+        "no false assurance from wrapper hash alone"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "PRO-16",
+      "group": "Profiles, clones and trust",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "A/B validated, saved evidence copy, admin and limited user",
+      "steps": [
+        "Race edit/enable/trust/revalidate for the same profile with concurrent requests"
+      ],
+      "expected": [
+        "One coherent saved state and eligibility decision",
+        "no invalid profile routed or orphan duplicate row"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REQ-01",
+      "group": "Inference protocol and limits",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B validated; capability-selected tool/reasoning/vision/structured-output fixtures when supported",
+      "steps": [
+        "Send first nonstreaming chat to a cold model then repeat warm"
+      ],
+      "expected": [
+        "200 OpenAI-shaped body",
+        "correct model/request identity, choices and authoritative usage",
+        "one reservation and settlement each"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REQ-02",
+      "group": "Inference protocol and limits",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B validated; capability-selected tool/reasoning/vision/structured-output fixtures when supported",
+      "steps": [
+        "Stream first cold and subsequent warm requests using a real SSE client"
+      ],
+      "expected": [
+        "Incremental valid UTF-8 events, final usage and exactly one DONE",
+        "no missing/truncated chunks",
+        "first-token and total latency recorded"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REQ-03",
+      "group": "Inference protocol and limits",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B validated; capability-selected tool/reasoning/vision/structured-output fixtures when supported",
+      "steps": [
+        "Run multi-turn system/user/assistant conversation with Unicode and multiline content"
+      ],
+      "expected": [
+        "Messages reach engine intact",
+        "valid response and usage",
+        "no cross-user conversation or output mixing"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REQ-04",
+      "group": "Inference protocol and limits",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B validated; capability-selected tool/reasoning/vision/structured-output fixtures when supported",
+      "steps": [
+        "Send every exposed sampling field and passthrough engine extension with deterministic seed where supported"
+      ],
+      "expected": [
+        "Fields forwarded once and overrides preserved",
+        "engine-rejected options produce bounded meaningful error"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REQ-05",
+      "group": "Inference protocol and limits",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B validated; capability-selected tool/reasoning/vision/structured-output fixtures when supported",
+      "steps": [
+        "Send tool definitions, auto/none/named tool choice, parallel calls and tool result continuation",
+        "repeat streamed"
+      ],
+      "expected": [
+        "Tool IDs, names, arguments and deltas preserved",
+        "router does not invent or strip engine tool output"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REQ-06",
+      "group": "Inference protocol and limits",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B validated; capability-selected tool/reasoning/vision/structured-output fixtures when supported",
+      "steps": [
+        "Send each supported reasoning effort and inspect reasoning fields streamed/nonstreamed"
+      ],
+      "expected": [
+        "Engine reasoning and content channels preserved",
+        "unsupported value errors are explicit"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REQ-07",
+      "group": "Inference protocol and limits",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B validated; capability-selected tool/reasoning/vision/structured-output fixtures when supported",
+      "steps": [
+        "Send json_object and json_schema response_format on a model/engine that supports them"
+      ],
+      "expected": [
+        "Validated supported formats remain usable",
+        "router does not advertise an action that registration can never qualify"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REQ-08",
+      "group": "Inference protocol and limits",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B validated; capability-selected tool/reasoning/vision/structured-output fixtures when supported",
+      "steps": [
+        "Send supported image/audio/video or other multimodal message parts with fixture URLs/bytes"
+      ],
+      "expected": [
+        "Payload forwarded intact",
+        "engine support decides result",
+        "accounting/limits policy is explicit and no payload stored in metrics"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REQ-09",
+      "group": "Inference protocol and limits",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B validated; capability-selected tool/reasoning/vision/structured-output fixtures when supported",
+      "steps": [
+        "Exercise prompt/output/context boundaries at below/equal/above verified limit with exact engine-tokenized fixtures"
+      ],
+      "expected": [
+        "In-range calls succeed",
+        "out-of-range errors are clear",
+        "no unexplained engine OOM or reserve/accounting mismatch"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REQ-10",
+      "group": "Inference protocol and limits",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B validated; capability-selected tool/reasoning/vision/structured-output fixtures when supported",
+      "steps": [
+        "Omit output limit",
+        "set max_tokens",
+        "set max_completion_tokens",
+        "set both equal and conflicting"
+      ],
+      "expected": [
+        "One documented effective limit reaches engine",
+        "server cap applies",
+        "alias conflicts handled deterministically"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REQ-11",
+      "group": "Inference protocol and limits",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B validated; capability-selected tool/reasoning/vision/structured-output fixtures when supported",
+      "steps": [
+        "Send n=1, configured maximum and maximum+1 with streaming/nonstreaming"
+      ],
+      "expected": [
+        "All choices indexed and forwarded",
+        "output reserve covers all choices",
+        "n limit enforced with no engine work on rejection"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REQ-12",
+      "group": "Inference protocol and limits",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B validated; capability-selected tool/reasoning/vision/structured-output fixtures when supported",
+      "steps": [
+        "Send empty messages, wrong JSON types, malformed JSON, unknown model, oversized IDs and invalid numeric values"
+      ],
+      "expected": [
+        "Stable documented 4xx",
+        "response stays OpenAI error-shaped",
+        "no 500 or resource/quota leak"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REQ-13",
+      "group": "Inference protocol and limits",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a/user-b",
+      "requires": "A/B validated; capability-selected tool/reasoning/vision/structured-output fixtures when supported",
+      "steps": [
+        "Submit identical X-Request-ID and Idempotency-Key concurrently, after completion and after compaction"
+      ],
+      "expected": [
+        "Duplicate operation cannot charge or execute twice",
+        "account scoping and cross-key behavior documented and tested"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REQ-14",
+      "group": "Inference protocol and limits",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B validated; capability-selected tool/reasoning/vision/structured-output fixtures when supported",
+      "steps": [
+        "Disconnect while queued, while cold-starting, before stream headers, midstream and after final event"
+      ],
+      "expected": [
+        "Cancellation reaches ownership cleanup",
+        "no stuck lease/reservation",
+        "partial usage charged according to documented evidence policy"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REQ-15",
+      "group": "Inference protocol and limits",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B validated; capability-selected tool/reasoning/vision/structured-output fixtures when supported",
+      "steps": [
+        "Use slow consumer and abruptly reset TCP connection while other tenants send traffic"
+      ],
+      "expected": [
+        "Bounded buffering and cleanup",
+        "healthy users keep progressing",
+        "no unbounded memory growth"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REQ-16",
+      "group": "Inference protocol and limits",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B validated; capability-selected tool/reasoning/vision/structured-output fixtures when supported",
+      "steps": [
+        "Exercise configured nonstream timeout, stream-idle timeout and drain watchdog using controlled stalls"
+      ],
+      "expected": [
+        "Terminal error/stream event within bound",
+        "one settlement and release",
+        "unsafe worker is not reused"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REQ-17",
+      "group": "Inference protocol and limits",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B validated; capability-selected tool/reasoning/vision/structured-output fixtures when supported",
+      "steps": [
+        "Trigger genuine engine input error and engine 4xx/5xx",
+        "submit healthy request afterward"
+      ],
+      "expected": [
+        "Safe error forwarded",
+        "failed request settlement correct",
+        "healthy traffic recovers without service restart"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REQ-18",
+      "group": "Inference protocol and limits",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "observer",
+      "requires": "A/B validated; capability-selected tool/reasoning/vision/structured-output fixtures when supported",
+      "steps": [
+        "Inject authoritative zero usage, missing usage and malformed/negative usage from a controlled engine protocol fixture"
+      ],
+      "expected": [
+        "Zero is never replaced by estimate",
+        "missing-usage policy explicit",
+        "malformed response fails once without charging a fabricated maximum"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REQ-19",
+      "group": "Inference protocol and limits",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "observer",
+      "requires": "A/B validated; capability-selected tool/reasoning/vision/structured-output fixtures when supported",
+      "steps": [
+        "Inject split Unicode, multiline SSE, missing DONE, duplicate terminal frame, malformed JSON and partial choices"
+      ],
+      "expected": [
+        "SSE framing remains correct or returns one terminal protocol error",
+        "finalization idempotent",
+        "no byte corruption"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REQ-20",
+      "group": "Inference protocol and limits",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a/user-b",
+      "requires": "A/B validated; capability-selected tool/reasoning/vision/structured-output fixtures when supported",
+      "steps": [
+        "Send interleaved streaming/nonstreaming calls to A and B from both tenants"
+      ],
+      "expected": [
+        "Outputs, request IDs, model names and token charges remain attached to the right request/account"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REQ-21",
+      "group": "Inference protocol and limits",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "observer",
+      "requires": "A/B validated; capability-selected tool/reasoning/vision/structured-output fixtures when supported",
+      "steps": [
+        "Compare every successful response usage to its request-ID ledger and account delta under actual-usage and requested-maximum charging"
+      ],
+      "expected": [
+        "Prompt/completion/total usage and configured charge reconcile per request",
+        "totals, refunds and compaction all agree"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "REQ-22",
+      "group": "Inference protocol and limits",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B validated; capability-selected tool/reasoning/vision/structured-output fixtures when supported",
+      "steps": [
+        "Request a model whose artifact/profile is invalid while v1/models is queried in parallel"
+      ],
+      "expected": [
+        "Model list callable state agrees with actual routing eligibility",
+        "no misleading callable flag"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "QUE-01",
+      "group": "Queue scheduling",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B incompatible simultaneous residency, independently validated TP and replica profiles",
+      "steps": [
+        "Start service idle",
+        "register/validate and resume with no user traffic",
+        "then send one cold request"
+      ],
+      "expected": [
+        "No queue worker starts before real demand",
+        "launches and ready state explain request admission"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "QUE-02",
+      "group": "Queue scheduling",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B incompatible simultaneous residency, independently validated TP and replica profiles",
+      "steps": [
+        "Finish last request and wait across idle timeout and minimum residency boundaries"
+      ],
+      "expected": [
+        "Worker drains only after admitted work completes and policy timing permits",
+        "GPU context and port released before reuse"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "QUE-03",
+      "group": "Queue scheduling",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "user-a/user-b",
+      "requires": "A/B incompatible simultaneous residency, independently validated TP and replica profiles",
+      "steps": [
+        "Run a long A stream",
+        "queue older B backlog then newer C backlog against the same GPU"
+      ],
+      "expected": [
+        "Admitted A survives drain",
+        "oldest incompatible backlog obtains freed capacity first",
+        "C cannot steal reserved placement"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "QUE-04",
+      "group": "Queue scheduling",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "user-a/user-b",
+      "requires": "A/B incompatible simultaneous residency, independently validated TP and replica profiles",
+      "steps": [
+        "Keep older resident A backlog and submit newer B",
+        "later reverse oldest-backlog ordering"
+      ],
+      "expected": [
+        "Documented oldest-backlog policy is observed without permanent starvation",
+        "fair-share setting has a defined tested effect or is removed"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "QUE-05",
+      "group": "Queue scheduling",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "user-a/user-b",
+      "requires": "A/B incompatible simultaneous residency, independently validated TP and replica profiles",
+      "steps": [
+        "Send high-volume short requests and fewer long requests sharing a model across tenants"
+      ],
+      "expected": [
+        "DRR uses reserved token cost, preserves within-tenant order and bounded service progress",
+        "same-account keys cannot multiply fair share"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "QUE-06",
+      "group": "Queue scheduling",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B incompatible simultaneous residency, independently validated TP and replica profiles",
+      "steps": [
+        "Send a burst exceeding per-model and per-tenant queue limits while workers are saturated"
+      ],
+      "expected": [
+        "Only queued work consumes queue capacity",
+        "429 queue_full refunds reservation",
+        "accepted work continues"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "QUE-07",
+      "group": "Queue scheduling",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B incompatible simultaneous residency, independently validated TP and replica profiles",
+      "steps": [
+        "Hold one TP1-only placement busy while a validated larger TP set is completely free",
+        "request the waiting model"
+      ],
+      "expected": [
+        "Planner uses a fitting validated TP alternative instead of stalling on the globally smallest shape"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "QUE-08",
+      "group": "Queue scheduling",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B incompatible simultaneous residency, independently validated TP and replica profiles",
+      "steps": [
+        "Request a TP model while only part of its GPU set is free and younger single-GPU work arrives"
+      ],
+      "expected": [
+        "No partial TP launch",
+        "required GPUs are not stolen by younger work",
+        "launch waits for every blocker teardown"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "QUE-09",
+      "group": "Queue scheduling",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B incompatible simultaneous residency, independently validated TP and replica profiles",
+      "steps": [
+        "Saturate one model across 1/2/4/8 simulated GPU inventories and available physical GPUs"
+      ],
+      "expected": [
+        "Independent workers/ports/PIDs and disjoint reservations",
+        "replica scaling matches useful demand and validated sets"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "QUE-10",
+      "group": "Queue scheduling",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "user-a/user-b",
+      "requires": "A/B incompatible simultaneous residency, independently validated TP and replica profiles",
+      "steps": [
+        "Add second-model demand after replicas occupy the host",
+        "finish and cancel selected requests"
+      ],
+      "expected": [
+        "Reclaim appropriate replicas without killing admitted work",
+        "surviving replicas keep progress and accounting"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "QUE-11",
+      "group": "Queue scheduling",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "A/B incompatible simultaneous residency, independently validated TP and replica profiles",
+      "steps": [
+        "Introduce external allocation after planning but before launch",
+        "then release it"
+      ],
+      "expected": [
+        "Live per-GPU check defers unsafe launch",
+        "subsequent request recovers",
+        "unrelated process remains untouched"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "QUE-12",
+      "group": "Queue scheduling",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "A/B incompatible simultaneous residency, independently validated TP and replica profiles",
+      "steps": [
+        "Make telemetry unavailable during admission and teardown",
+        "restore it"
+      ],
+      "expected": [
+        "No inference of free GPU capacity",
+        "ownership retained on uncertainty",
+        "recovery makes progress without manual ledger edits"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "QUE-13",
+      "group": "Queue scheduling",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "A/B incompatible simultaneous residency, independently validated TP and replica profiles",
+      "steps": [
+        "Make graceful stop fail and require forced kill",
+        "then make verified teardown fail"
+      ],
+      "expected": [
+        "Kill escalation targets owned process group only",
+        "unverified STOPPING worker keeps GPU/port",
+        "no subsequent conflicting launch"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "QUE-14",
+      "group": "Queue scheduling",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B incompatible simultaneous residency, independently validated TP and replica profiles",
+      "steps": [
+        "Cancel the last queued request during cold startup then request another model"
+      ],
+      "expected": [
+        "No stranded promise/reserve",
+        "unnecessary worker follows bounded cleanup",
+        "other model proceeds after verified release"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "QUE-15",
+      "group": "Queue scheduling",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "A/B incompatible simultaneous residency, independently validated TP and replica profiles",
+      "steps": [
+        "Fail one replica or one TP child while other workers serve"
+      ],
+      "expected": [
+        "Failure remains scoped",
+        "affected requests settle once",
+        "no overlapping replacement before process-group teardown"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "QUE-16",
+      "group": "Queue scheduling",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "observer",
+      "requires": "A/B incompatible simultaneous residency, independently validated TP and replica profiles",
+      "steps": [
+        "Inspect native engine command and issue internal sleep attempt in controlled engine contract lane"
+      ],
+      "expected": [
+        "Queue launch does not enable sleep or experimental runtime",
+        "no automatic llama.cpp fallback after vLLM failure"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SLP-01",
+      "group": "Native vLLM sleep residency",
+      "modes": [
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B/C with measured residual/wake/RAM evidence and constrained shared GPU; controlled pressure helpers",
+      "steps": [
+        "Serve A, wait configured idle interval, observe native sleep, then stream to A"
+      ],
+      "expected": [
+        "Level-1 sleep and wake retain PID",
+        "output valid after wake",
+        "no cold launch substituted without explicit eviction reason"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SLP-02",
+      "group": "Native vLLM sleep residency",
+      "modes": [
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a/user-b",
+      "requires": "A/B/C with measured residual/wake/RAM evidence and constrained shared GPU; controlled pressure helpers",
+      "steps": [
+        "Keep an A stream active and queue incompatible B"
+      ],
+      "expected": [
+        "A drains admitted work before offload",
+        "B gains admission only after safe residency transition",
+        "no interrupted healthy stream"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SLP-03",
+      "group": "Native vLLM sleep residency",
+      "modes": [
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B/C with measured residual/wake/RAM evidence and constrained shared GPU; controlled pressure helpers",
+      "steps": [
+        "Alternate A/B/A and compare cached wake with cold candidate on another placement"
+      ],
+      "expected": [
+        "Eligible cached worker is preferred according to policy",
+        "activation and queue waits recorded separately"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SLP-04",
+      "group": "Native vLLM sleep residency",
+      "modes": [
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B/C with measured residual/wake/RAM evidence and constrained shared GPU; controlled pressure helpers",
+      "steps": [
+        "Send concurrent requests to a sleeping A and requests arriving during OFFLOADING/WAKING"
+      ],
+      "expected": [
+        "Exactly one transition for that worker",
+        "work waits until READY",
+        "no duplicate load or overlapping wake"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SLP-05",
+      "group": "Native vLLM sleep residency",
+      "modes": [
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "observer",
+      "requires": "A/B/C with measured residual/wake/RAM evidence and constrained shared GPU; controlled pressure helpers",
+      "steps": [
+        "Compare measured sleeping residual and wake peak with live per-GPU usage under repeated transitions"
+      ],
+      "expected": [
+        "Admission budgets include current residuals and wake peaks",
+        "topology and measurement format remain consistent"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SLP-06",
+      "group": "Native vLLM sleep residency",
+      "modes": [
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "A/B/C with measured residual/wake/RAM evidence and constrained shared GPU; controlled pressure helpers",
+      "steps": [
+        "Pressure one GPU of a sleeping TP worker",
+        "wake it"
+      ],
+      "expected": [
+        "All TP GPUs checked independently",
+        "worker does not partially wake or use unmeasured UUID set"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SLP-07",
+      "group": "Native vLLM sleep residency",
+      "modes": [
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "A/B/C with measured residual/wake/RAM evidence and constrained shared GPU; controlled pressure helpers",
+      "steps": [
+        "Add external GPU pressure and wake A with other sleepers present"
+      ],
+      "expected": [
+        "Only eligible idle sleepers evicted in LRU order",
+        "busy workers and unrelated GPU allocations untouched",
+        "memory rechecked after each stop"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SLP-08",
+      "group": "Native vLLM sleep residency",
+      "modes": [
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "A/B/C with measured residual/wake/RAM evidence and constrained shared GPU; controlled pressure helpers",
+      "steps": [
+        "Make target residual unaccountable",
+        "retry wake after telemetry recovers"
+      ],
+      "expected": [
+        "No guessed residual credit",
+        "explicit cold fallback only after verified target teardown or bounded deferral"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SLP-09",
+      "group": "Native vLLM sleep residency",
+      "modes": [
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "A/B/C with measured residual/wake/RAM evidence and constrained shared GPU; controlled pressure helpers",
+      "steps": [
+        "Run cache population beyond host_cache_max_gib with A/B/C"
+      ],
+      "expected": [
+        "LRU sleeping workers evicted until measured budget satisfied",
+        "no active-request eviction or unbounded RSS/PSS"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SLP-10",
+      "group": "Native vLLM sleep residency",
+      "modes": [
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "A/B/C with measured residual/wake/RAM evidence and constrained shared GPU; controlled pressure helpers",
+      "steps": [
+        "Reduce available host memory below configured reserve using a bounded isolated helper"
+      ],
+      "expected": [
+        "RAM headroom policy blocks/evicts cache and reports reason",
+        "unrelated host process is never targeted"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SLP-11",
+      "group": "Native vLLM sleep residency",
+      "modes": [
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "A/B/C with measured residual/wake/RAM evidence and constrained shared GPU; controlled pressure helpers",
+      "steps": [
+        "Exercise cache swap usage at zero/below/equal/above configured threshold under dedicated cgroup"
+      ],
+      "expected": [
+        "Swap policy uses documented accounting source",
+        "prevents unsupported swapping",
+        "recovery returns to a usable state"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SLP-12",
+      "group": "Native vLLM sleep residency",
+      "modes": [
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "A/B/C with measured residual/wake/RAM evidence and constrained shared GPU; controlled pressure helpers",
+      "steps": [
+        "Remove or fail host process-memory telemetry",
+        "use cgroup limits lower than host RAM"
+      ],
+      "expected": [
+        "No false zero-memory safety claim",
+        "fallback accounting is conservative and labeled",
+        "actual cgroup limit honored"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SLP-13",
+      "group": "Native vLLM sleep residency",
+      "modes": [
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "observer",
+      "requires": "A/B/C with measured residual/wake/RAM evidence and constrained shared GPU; controlled pressure helpers",
+      "steps": [
+        "Trigger simultaneous cache-budget enforcement from scheduler, status refresh and offload completion"
+      ],
+      "expected": [
+        "One serialized decision at a time",
+        "no excess/stale eviction or inconsistent host-cache totals"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SLP-14",
+      "group": "Native vLLM sleep residency",
+      "modes": [
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "A/B/C with measured residual/wake/RAM evidence and constrained shared GPU; controlled pressure helpers",
+      "steps": [
+        "Make sleep endpoint fail, hang or return invalid transition response while other workers serve"
+      ],
+      "expected": [
+        "Worker becomes unroutable and is safely stopped",
+        "callers receive bounded error",
+        "no phantom SLEEPING or leaked port"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SLP-15",
+      "group": "Native vLLM sleep residency",
+      "modes": [
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "A/B/C with measured residual/wake/RAM evidence and constrained shared GPU; controlled pressure helpers",
+      "steps": [
+        "Make wake endpoint fail/hang or kill the sleeping engine before wake"
+      ],
+      "expected": [
+        "No phantom READY worker",
+        "failed request settles",
+        "replacement launches only after verified teardown"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SLP-16",
+      "group": "Native vLLM sleep residency",
+      "modes": [
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "A/B/C with measured residual/wake/RAM evidence and constrained shared GPU; controlled pressure helpers",
+      "steps": [
+        "Preload named models, repeated selectors and wildcard",
+        "include missing/disabled/ineligible artifacts"
+      ],
+      "expected": [
+        "Only configured eligible models preload",
+        "startup stays within memory budgets",
+        "skipped models have clear reasons"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SLP-17",
+      "group": "Native vLLM sleep residency",
+      "modes": [
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "A/B/C with measured residual/wake/RAM evidence and constrained shared GPU; controlled pressure helpers",
+      "steps": [
+        "Send interactive traffic during a multi-model preload"
+      ],
+      "expected": [
+        "Real backlog progresses ahead of speculative warming",
+        "no prolonged user starvation or simultaneous unsafe starts"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SLP-18",
+      "group": "Native vLLM sleep residency",
+      "modes": [
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "A/B/C with measured residual/wake/RAM evidence and constrained shared GPU; controlled pressure helpers",
+      "steps": [
+        "Enter maintenance while READY, SLEEPING, OFFLOADING and WAKING",
+        "then validate and resume"
+      ],
+      "expected": [
+        "All retained engines/contexts fully unload for maintenance",
+        "validation never shares cached GPU state"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SLP-19",
+      "group": "Native vLLM sleep residency",
+      "modes": [
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "A/B/C with measured residual/wake/RAM evidence and constrained shared GPU; controlled pressure helpers",
+      "steps": [
+        "Disable/edit/revalidate a sleeping profile and request its model"
+      ],
+      "expected": [
+        "Old sleeping worker cannot revive invalid evidence",
+        "new request uses newly eligible launch or is rejected"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SLP-20",
+      "group": "Native vLLM sleep residency",
+      "modes": [
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "A/B/C with measured residual/wake/RAM evidence and constrained shared GPU; controlled pressure helpers",
+      "steps": [
+        "Restart service with saved cached-worker state and surviving processes"
+      ],
+      "expected": [
+        "Recovery treats cache as nonrecoverable unless explicitly verified",
+        "old groups reconciled before new admission",
+        "no duplicate engine ownership"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SLP-21",
+      "group": "Native vLLM sleep residency",
+      "modes": [
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "user-a/user-b",
+      "requires": "A/B/C with measured residual/wake/RAM evidence and constrained shared GPU; controlled pressure helpers",
+      "steps": [
+        "Run different request sizes and model-switch rates while cache pressure causes repeated eviction"
+      ],
+      "expected": [
+        "Correct model responses, fair progress and stable RAM/VRAM/ports",
+        "eviction versus wake reasons explain latency"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SLP-22",
+      "group": "Native vLLM sleep residency",
+      "modes": [
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "observer",
+      "requires": "A/B/C with measured residual/wake/RAM evidence and constrained shared GPU; controlled pressure helpers",
+      "steps": [
+        "Test minimum residency, idle sleep and transition timeout at exact boundaries"
+      ],
+      "expected": [
+        "No premature offload of admitted work",
+        "settings have observable documented effect",
+        "no stuck transition after timeout"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "LCP-01",
+      "group": "Optional queue llama.cpp backend",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "staff",
+      "requires": "Explicit llama.cpp-enabled lane, installed pinned llama-server and operator-selected GGUF",
+      "steps": [
+        "Register local GGUF with engine llama.cpp",
+        "drain for validation",
+        "resume and infer"
+      ],
+      "expected": [
+        "Shared allocator and full probes used",
+        "measured profile is queue-only and no vLLM process starts"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "LCP-02",
+      "group": "Optional queue llama.cpp backend",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "staff",
+      "requires": "Explicit llama.cpp-enabled lane, installed pinned llama-server and operator-selected GGUF",
+      "steps": [
+        "Register pinned HF GGUF repository with one GGUF",
+        "then try an ambiguous multi-GGUF source"
+      ],
+      "expected": [
+        "Explicit single artifact selected and identity recorded",
+        "ambiguity explains local-file selection requirement"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "LCP-03",
+      "group": "Optional queue llama.cpp backend",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "Explicit llama.cpp-enabled lane, installed pinned llama-server and operator-selected GGUF",
+      "steps": [
+        "Compare validation and serving effective argv/environment/artifact/GPU placement"
+      ],
+      "expected": [
+        "Identical measurement-affecting launch specification",
+        "context/parallel/offload/split choices preserved"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "LCP-04",
+      "group": "Optional queue llama.cpp backend",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "Explicit llama.cpp-enabled lane, installed pinned llama-server and operator-selected GGUF",
+      "steps": [
+        "Run nonstreaming, streaming, concurrency, cancellation and multi-turn calls through public chat API"
+      ],
+      "expected": [
+        "Same protocol, access, quotas and disconnect guarantees as queue/vLLM"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "LCP-05",
+      "group": "Optional queue llama.cpp backend",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "Explicit llama.cpp-enabled lane, installed pinned llama-server and operator-selected GGUF",
+      "steps": [
+        "Edit GGUF path/offload/context",
+        "Validate/Revalidate selected profile in CLI/TUI/API"
+      ],
+      "expected": [
+        "Correct engine/artifact/settings re-probed",
+        "no vLLM-only TUI dead end or silent old-settings retry"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "LCP-06",
+      "group": "Optional queue llama.cpp backend",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "Explicit llama.cpp-enabled lane, installed pinned llama-server and operator-selected GGUF",
+      "steps": [
+        "Occupy old hard-coded validation port and exhaust shared allocator",
+        "then retry"
+      ],
+      "expected": [
+        "No fixed-port dependence",
+        "failed teardown retains allocator reservation",
+        "recovery reuses only freed port"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "LCP-07",
+      "group": "Optional queue llama.cpp backend",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "Explicit llama.cpp-enabled lane, installed pinned llama-server and operator-selected GGUF",
+      "steps": [
+        "Kill GGUF worker and fail one cleanup step while other queue models run"
+      ],
+      "expected": [
+        "Same verified process-group/GPU teardown as vLLM",
+        "no automatic engine substitution"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "LCP-08",
+      "group": "Optional queue llama.cpp backend",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "Explicit llama.cpp-enabled lane, installed pinned llama-server and operator-selected GGUF",
+      "steps": [
+        "Attempt llama.cpp registration/profile switch with feature disabled or in sleep mode"
+      ],
+      "expected": [
+        "Unsupported combination rejected before subprocess launch",
+        "UI hides or explains unavailable action"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "LCP-09",
+      "group": "Optional queue llama.cpp backend",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "Explicit llama.cpp-enabled lane, installed pinned llama-server and operator-selected GGUF",
+      "steps": [
+        "Change GGUF contents and llama-server version",
+        "attempt trust and inference"
+      ],
+      "expected": [
+        "Detected artifact/engine drift invalidates saved eligibility",
+        "probes required"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "LCP-10",
+      "group": "Optional queue llama.cpp backend",
+      "modes": [
+        "queue"
+      ],
+      "lane": "real-service",
+      "actor": "user-a",
+      "requires": "Explicit llama.cpp-enabled lane, installed pinned llama-server and operator-selected GGUF",
+      "steps": [
+        "Exercise multi-GPU llama placement if advertised and alternate it with vLLM on managed GPUs"
+      ],
+      "expected": [
+        "Profile placement/labels match actual engine GPU usage",
+        "no leaked reservations or false TP claim"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "OPS-01",
+      "group": "Maintenance, failures and recovery",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "Dedicated instance, exact owned PID inventory, disposable database copies for storage faults",
+      "steps": [
+        "Drain while calls are queued, active and streaming",
+        "query status and submit new calls"
+      ],
+      "expected": [
+        "Queued/new calls receive documented maintenance errors/refunds",
+        "admitted calls finish",
+        "ready only after all workers stop"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "OPS-02",
+      "group": "Maintenance, failures and recovery",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "Dedicated instance, exact owned PID inventory, disposable database copies for storage faults",
+      "steps": [
+        "Repeat drain/resume from all interfaces including simultaneous calls"
+      ],
+      "expected": [
+        "Idempotent state transitions or explicit conflict",
+        "no double settlement or lost maintenance state"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "OPS-03",
+      "group": "Maintenance, failures and recovery",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "Dedicated instance, exact owned PID inventory, disposable database copies for storage faults",
+      "steps": [
+        "Gracefully stop while idle, serving and validating",
+        "restart"
+      ],
+      "expected": [
+        "Documented shutdown handling, no orphan worker, recoverable pending jobs and consistent service mode"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "OPS-04",
+      "group": "Maintenance, failures and recovery",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "Dedicated instance, exact owned PID inventory, disposable database copies for storage faults",
+      "steps": [
+        "Abruptly kill only test router during queued/active/sleeping/validating phases",
+        "restart"
+      ],
+      "expected": [
+        "Orphan reservations reconciled once",
+        "owned surviving workers/probes terminated or startup fails closed",
+        "no double charges"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "OPS-05",
+      "group": "Maintenance, failures and recovery",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "Dedicated instance, exact owned PID inventory, disposable database copies for storage faults",
+      "steps": [
+        "Simulate parent exit with surviving TP children and PID reuse unrelated to service"
+      ],
+      "expected": [
+        "Recovery verifies ownership",
+        "never kills reused unrelated PID",
+        "cannot clear unresolved GPU ownership"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "OPS-06",
+      "group": "Maintenance, failures and recovery",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "Dedicated instance, exact owned PID inventory, disposable database copies for storage faults",
+      "steps": [
+        "Inject SQLite busy, disk-full and write failure at reserve/admit/settle/profile publish/worker persist"
+      ],
+      "expected": [
+        "Transactions atomic",
+        "errors visible",
+        "owned resources eventually clean",
+        "no profile published without complete evidence"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "OPS-07",
+      "group": "Maintenance, failures and recovery",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "Dedicated instance, exact owned PID inventory, disposable database copies for storage faults",
+      "steps": [
+        "Inject cancellation between reservation and enqueue, admission and headers, settlement and lease release"
+      ],
+      "expected": [
+        "Terminal request status, ledger and resource cleanup agree",
+        "repeated finalization harmless"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "OPS-08",
+      "group": "Maintenance, failures and recovery",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "Dedicated instance, exact owned PID inventory, disposable database copies for storage faults",
+      "steps": [
+        "Disconnect public network and kill private engine transport before headers and during stream"
+      ],
+      "expected": [
+        "Finite failures and correct refunds/partial usage",
+        "reconnecting user can complete healthy request"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "OPS-09",
+      "group": "Maintenance, failures and recovery",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "Dedicated instance, exact owned PID inventory, disposable database copies for storage faults",
+      "steps": [
+        "Create slow/no-health engine startup and trigger shutdown midway"
+      ],
+      "expected": [
+        "Startup timeout or interruption leaves no child process, port or GPU reservation",
+        "diagnostic points to engine log"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "OPS-10",
+      "group": "Maintenance, failures and recovery",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "Dedicated instance, exact owned PID inventory, disposable database copies for storage faults",
+      "steps": [
+        "Trigger unknown NVML/process inspection during shutdown and startup recovery"
+      ],
+      "expected": [
+        "Uncertainty retains ownership and blocks unsafe reuse",
+        "explicit recovery status, never silent success"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "OPS-11",
+      "group": "Maintenance, failures and recovery",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "admin",
+      "requires": "Dedicated instance, exact owned PID inventory, disposable database copies for storage faults",
+      "steps": [
+        "Archive stopped test DB, vault, config and revision",
+        "restore to isolated location",
+        "authenticate and infer after validation"
+      ],
+      "expected": [
+        "Snapshot integrity and credential decryption verified",
+        "exported catalog contains no secret",
+        "source files unchanged"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "OPS-12",
+      "group": "Maintenance, failures and recovery",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "Dedicated instance, exact owned PID inventory, disposable database copies for storage faults",
+      "steps": [
+        "Try archive with missing/wrong vault, active owner, existing destination and inconsistent schema"
+      ],
+      "expected": [
+        "Cannot claim verified rollback backup",
+        "error identifies missing prerequisite",
+        "source remains untouched"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "OPS-13",
+      "group": "Maintenance, failures and recovery",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "operator",
+      "requires": "Dedicated instance, exact owned PID inventory, disposable database copies for storage faults",
+      "steps": [
+        "Roll back to previous isolated code/environment/state after stopping new service"
+      ],
+      "expected": [
+        "Old code never opens new schema",
+        "no concurrent GPU owners",
+        "previous credentials/catalog behave as archived"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "OPS-14",
+      "group": "Maintenance, failures and recovery",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "observer",
+      "requires": "Dedicated instance, exact owned PID inventory, disposable database copies for storage faults",
+      "steps": [
+        "Scrutinize logs, CLI errors, reports and exceptions from every failure case"
+      ],
+      "expected": [
+        "Secrets and sensitive prompt/media content excluded from metrics",
+        "diagnostics retain needed request/worker/error identity"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "OPS-15",
+      "group": "Maintenance, failures and recovery",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "real-service",
+      "actor": "observer",
+      "requires": "Dedicated instance, exact owned PID inventory, disposable database copies for storage faults",
+      "steps": [
+        "After each case and final drain compare API, SQLite, process groups, NVML and bound ports"
+      ],
+      "expected": [
+        "No stuck lease/live reservation/queued request/unowned worker/port",
+        "terminal accounting remains exactly once"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "UI-01",
+      "group": "Real CLI and TUI operator journeys",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "tui",
+      "actor": "admin",
+      "requires": "Installed CLI and headless Textual Pilot bound to the real test service; terminal capture for manual spot-check",
+      "steps": [
+        "Launch no-argument CLI and interactive command",
+        "navigate every page and Back/Quit control"
+      ],
+      "expected": [
+        "One service-start location",
+        "current mode/experimental status accurate",
+        "no duplicate or dead navigation"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "UI-02",
+      "group": "Real CLI and TUI operator journeys",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "tui",
+      "actor": "admin",
+      "requires": "Installed CLI and headless Textual Pilot bound to the real test service; terminal capture for manual spot-check",
+      "steps": [
+        "Execute every command leaf and every visible action from the surface map against real API",
+        "verify via independent GET"
+      ],
+      "expected": [
+        "Same business outcome, prerequisite and errors on API/CLI/TUI",
+        "no private helper mock substitutes for endpoint execution"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "UI-03",
+      "group": "Real CLI and TUI operator journeys",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "tui",
+      "actor": "admin",
+      "requires": "Installed CLI and headless Textual Pilot bound to the real test service; terminal capture for manual spot-check",
+      "steps": [
+        "Run create/edit/register/trust forms with local validation failure, HTTP 4xx, 5xx, timeout and recovery"
+      ],
+      "expected": [
+        "Values retained and correction resubmits once",
+        "no accidental operation on stale selected object"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "UI-04",
+      "group": "Real CLI and TUI operator journeys",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "tui",
+      "actor": "admin",
+      "requires": "Installed CLI and headless Textual Pilot bound to the real test service; terminal capture for manual spot-check",
+      "steps": [
+        "Double-click/press Enter repeatedly and refresh while a mutation is in flight"
+      ],
+      "expected": [
+        "At most one mutation",
+        "controls remain disabled or show pending state",
+        "reset correctly after success and failure"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "UI-05",
+      "group": "Real CLI and TUI operator journeys",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "tui",
+      "actor": "admin",
+      "requires": "Installed CLI and headless Textual Pilot bound to the real test service; terminal capture for manual spot-check",
+      "steps": [
+        "Select middle row, sort/refresh as rows change, remove selected row and refresh again"
+      ],
+      "expected": [
+        "Stable object identity retained when present",
+        "safe fallback when gone",
+        "no action applied by stale row index"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "UI-06",
+      "group": "Real CLI and TUI operator journeys",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "tui",
+      "actor": "admin",
+      "requires": "Installed CLI and headless Textual Pilot bound to the real test service; terminal capture for manual spot-check",
+      "steps": [
+        "Resize to 80x24, 120x40 and larger",
+        "use keyboard-only forms, scrolling and modal buttons"
+      ],
+      "expected": [
+        "Labels, fields and actions reachable",
+        "focused text visible",
+        "no clipped destructive action or duplicate control"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "UI-07",
+      "group": "Real CLI and TUI operator journeys",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "tui",
+      "actor": "staff/user-a",
+      "requires": "Installed CLI and headless Textual Pilot bound to the real test service; terminal capture for manual spot-check",
+      "steps": [
+        "Use lower-role credentials and navigate management screens",
+        "force-click unavailable actions"
+      ],
+      "expected": [
+        "UI communicates role/prerequisite",
+        "server still enforces permissions",
+        "forbidden actions cannot mutate state"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "UI-08",
+      "group": "Real CLI and TUI operator journeys",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "tui",
+      "actor": "admin",
+      "requires": "Installed CLI and headless Textual Pilot bound to the real test service; terminal capture for manual spot-check",
+      "steps": [
+        "Observe profile Enable/Disable control for active, inactive and ineligible profile states"
+      ],
+      "expected": [
+        "Exactly one state-appropriate action",
+        "unavailable enable explains revalidation/trust prerequisite"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "UI-09",
+      "group": "Real CLI and TUI operator journeys",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "tui",
+      "actor": "admin",
+      "requires": "Installed CLI and headless Textual Pilot bound to the real test service; terminal capture for manual spot-check",
+      "steps": [
+        "Select saved evidence from older fingerprint",
+        "submit Advanced trust with missing then valid reason"
+      ],
+      "expected": [
+        "Source and affected profile clear",
+        "no bulk/both-backend verification toggle",
+        "actor/reason audited"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "UI-10",
+      "group": "Real CLI and TUI operator journeys",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "tui",
+      "actor": "admin",
+      "requires": "Installed CLI and headless Textual Pilot bound to the real test service; terminal capture for manual spot-check",
+      "steps": [
+        "Use dashboard refresh and maintenance status while traffic runs"
+      ],
+      "expected": [
+        "Refresh only refreshes",
+        "values reconcile with real usage/worker state",
+        "selection and scroll remain stable"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "UI-11",
+      "group": "Real CLI and TUI operator journeys",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "tui",
+      "actor": "operator",
+      "requires": "Installed CLI and headless Textual Pilot bound to the real test service; terminal capture for manual spot-check",
+      "steps": [
+        "Inspect connection info with environment key, local vault key and remote URL",
+        "start service from TUI"
+      ],
+      "expected": [
+        "Credential source accurately labeled without revealing secret",
+        "same config resolver",
+        "selected explicit mode reaches server"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "UI-12",
+      "group": "Real CLI and TUI operator journeys",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "tui",
+      "actor": "admin",
+      "requires": "Installed CLI and headless Textual Pilot bound to the real test service; terminal capture for manual spot-check",
+      "steps": [
+        "Cancel form and destructive confirmation via button and Escape",
+        "confirm once afterward"
+      ],
+      "expected": [
+        "Cancel mutates nothing and preserves underlying selection",
+        "confirmation results in one operation"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "UI-13",
+      "group": "Real CLI and TUI operator journeys",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "tui",
+      "actor": "admin",
+      "requires": "Installed CLI and headless Textual Pilot bound to the real test service; terminal capture for manual spot-check",
+      "steps": [
+        "Copy selected key then rotate/revoke it and refresh"
+      ],
+      "expected": [
+        "Clipboard uses the selected current credential",
+        "copy does not expose keys in logs or operate on stale row"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "UI-14",
+      "group": "Real CLI and TUI operator journeys",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "tui",
+      "actor": "staff",
+      "requires": "Installed CLI and headless Textual Pilot bound to the real test service; terminal capture for manual spot-check",
+      "steps": [
+        "Run registration, failure review and revalidation entirely through TUI with real persisted jobs"
+      ],
+      "expected": [
+        "Form values and job progress survive errors/restarts",
+        "selected engine/context/overrides match actual probe"
+      ],
+      "evidence": [
+        "case-journal",
+        "interface-transcript"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SOAK-01",
+      "group": "Controlled transitions and final soak",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "physical",
+      "actor": "operator",
+      "requires": "All blockers closed, exact tested wheel/config/engine versions, A/B distinct artifacts, independent observers",
+      "steps": [
+        "Run the previous code/environment with the same request trace and isolated prior state",
+        "record three baseline trials"
+      ],
+      "expected": [
+        "Comparable latency/throughput/queue/memory baseline and variability recorded before judging regression"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SOAK-02",
+      "group": "Controlled transitions and final soak",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "physical",
+      "actor": "user-a/user-b",
+      "requires": "All blockers closed, exact tested wheel/config/engine versions, A/B distinct artifacts, independent observers",
+      "steps": [
+        "Execute 100 complete controlled A/B residency cycles with a valid request before and after each switch"
+      ],
+      "expected": [
+        "Each cycle proven by events plus PID/NVML observations",
+        "at least 100 actual transitions",
+        "no count from requests or polling artifacts alone"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SOAK-03",
+      "group": "Controlled transitions and final soak",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "physical",
+      "actor": "user-a/user-b/staff",
+      "requires": "All blockers closed, exact tested wheel/config/engine versions, A/B distinct artifacts, independent observers",
+      "steps": [
+        "Run 60 continuous minutes of seeded mixed interactive/batch/stream traffic with two accounts and at least two distinct artifacts"
+      ],
+      "expected": [
+        "One full hour of measured load",
+        "no unexplained error, starvation, accounting mismatch or resource leak",
+        "complete latency and throughput distributions"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SOAK-04",
+      "group": "Controlled transitions and final soak",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "physical",
+      "actor": "operator",
+      "requires": "All blockers closed, exact tested wheel/config/engine versions, A/B distinct artifacts, independent observers",
+      "steps": [
+        "Run bounded fault/recovery schedule separately after healthy soak",
+        "then repeat clean traffic and drain"
+      ],
+      "expected": [
+        "Every injected error is attributed to expected cause",
+        "recovery bounded",
+        "healthy-soak success is not diluted by ignored errors"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    },
+    {
+      "id": "SOAK-05",
+      "group": "Controlled transitions and final soak",
+      "modes": [
+        "queue",
+        "vllm-sleep"
+      ],
+      "lane": "physical",
+      "actor": "observer",
+      "requires": "All blockers closed, exact tested wheel/config/engine versions, A/B distinct artifacts, independent observers",
+      "steps": [
+        "Reconcile every request ID, complete cycle, terminal worker, GPU/process owner, port and quota ledger row",
+        "verify artifact/config hashes unchanged"
+      ],
+      "expected": [
+        "Signed machine-readable result per case/mode/surface",
+        "missing/skipped/xfail case is not a pass",
+        "zero unresolved release blocker"
+      ],
+      "evidence": [
+        "case-journal",
+        "request-ledger",
+        "resource-timeline"
+      ],
+      "status": "designed"
+    }
+  ],
+  "surfaces": {
+    "api": {
+      "DELETE /admin/keys/{key_id}": [
+        "IAM-07"
+      ],
+      "GET /admin/capabilities": [
+        "CFG-02",
+        "IAM-02",
+        "LCP-08",
+        "UI-01"
+      ],
+      "GET /admin/dashboard": [
+        "UI-10",
+        "OPS-15",
+        "SOAK-03"
+      ],
+      "GET /admin/keys": [
+        "IAM-03",
+        "IAM-02",
+        "UI-13"
+      ],
+      "GET /admin/maintenance": [
+        "OPS-01",
+        "REG-08"
+      ],
+      "GET /admin/models/{model_id}/profiles": [
+        "PRO-01",
+        "PRO-11",
+        "REG-14"
+      ],
+      "GET /admin/requests": [
+        "REQ-21",
+        "OPS-15",
+        "SOAK-05"
+      ],
+      "GET /admin/status": [
+        "OPS-15",
+        "SLP-05",
+        "SOAK-02"
+      ],
+      "GET /health": [
+        "IAM-01",
+        "CFG-06"
+      ],
+      "GET /staff/model-jobs/{job_id}": [
+        "REG-01",
+        "REG-11",
+        "REG-12"
+      ],
+      "GET /staff/models": [
+        "REG-01",
+        "REG-02",
+        "REG-19"
+      ],
+      "GET /v1/me/usage": [
+        "IAM-16",
+        "REQ-21"
+      ],
+      "GET /v1/models": [
+        "IAM-10",
+        "REQ-22"
+      ],
+      "PATCH /admin/models/{model_id}": [
+        "PRO-10"
+      ],
+      "PATCH /admin/models/{model_id}/profiles/{profile_id}": [
+        "PRO-04",
+        "PRO-05",
+        "PRO-06",
+        "LCP-05"
+      ],
+      "POST /admin/keys": [
+        "IAM-03",
+        "IAM-04"
+      ],
+      "POST /admin/keys/{key_id}/restore": [
+        "IAM-06"
+      ],
+      "POST /admin/keys/{key_id}/revoke": [
+        "IAM-06"
+      ],
+      "POST /admin/keys/{key_id}/rotate": [
+        "IAM-05"
+      ],
+      "POST /admin/keys/{key_id}/usage/reset": [
+        "IAM-14"
+      ],
+      "POST /admin/maintenance": [
+        "OPS-01",
+        "OPS-02",
+        "REG-08",
+        "SLP-18"
+      ],
+      "POST /admin/models/{model_id}/clone": [
+        "PRO-07",
+        "PRO-08",
+        "PRO-09"
+      ],
+      "POST /admin/models/{model_id}/profiles/{profile_id}/trust": [
+        "PRO-11",
+        "PRO-12",
+        "PRO-13",
+        "PRO-14"
+      ],
+      "POST /admin/models/{model_id}/profiles/{profile_id}/{action}": [
+        "PRO-02",
+        "PRO-03",
+        "PRO-16"
+      ],
+      "POST /admin/usage/summarize": [
+        "IAM-15"
+      ],
+      "POST /staff/model-access": [
+        "IAM-08",
+        "IAM-09"
+      ],
+      "POST /staff/model-jobs/{job_id}/retry": [
+        "REG-09",
+        "REG-10",
+        "REG-11",
+        "PRO-06",
+        "PRO-08",
+        "LCP-05"
+      ],
+      "POST /staff/models": [
+        "REG-01",
+        "REG-02",
+        "REG-03",
+        "REG-06",
+        "LCP-01",
+        "LCP-02"
+      ],
+      "POST /staff/models/{model_id}/disable": [
+        "REG-19"
+      ],
+      "POST /v1/chat/completions": [
+        "REQ-01",
+        "REQ-02",
+        "REQ-03",
+        "REQ-04",
+        "REQ-05",
+        "REQ-06",
+        "REQ-07",
+        "REQ-08",
+        "REQ-09",
+        "REQ-10",
+        "REQ-11",
+        "REQ-12",
+        "REQ-13",
+        "REQ-14",
+        "REQ-15",
+        "REQ-16",
+        "REQ-17",
+        "REQ-18",
+        "REQ-19",
+        "REQ-20",
+        "REQ-21",
+        "QUE-03",
+        "SLP-01"
+      ],
+      "PUT /admin/keys/{key_id}/quota": [
+        "IAM-11",
+        "IAM-12",
+        "IAM-13"
+      ],
+      "PUT /staff/keys/{key_id}/model-grants": [
+        "IAM-08",
+        "IAM-09"
+      ]
+    },
+    "cli": {
+      "capabilities": [
+        "CFG-02",
+        "LCP-08"
+      ],
+      "doctor": [
+        "CFG-14"
+      ],
+      "interactive": [
+        "UI-01",
+        "UI-02"
+      ],
+      "keys create": [
+        "IAM-03",
+        "IAM-04"
+      ],
+      "keys delete": [
+        "IAM-07"
+      ],
+      "keys list": [
+        "IAM-03"
+      ],
+      "keys quota": [
+        "IAM-11",
+        "IAM-13"
+      ],
+      "keys reset-usage": [
+        "IAM-14"
+      ],
+      "keys restore": [
+        "IAM-06"
+      ],
+      "keys revoke": [
+        "IAM-06"
+      ],
+      "keys rotate": [
+        "IAM-05"
+      ],
+      "keys show": [
+        "IAM-03"
+      ],
+      "keys usage": [
+        "IAM-16"
+      ],
+      "maintenance drain": [
+        "OPS-01",
+        "OPS-02"
+      ],
+      "maintenance resume": [
+        "OPS-02",
+        "REG-08"
+      ],
+      "maintenance status": [
+        "OPS-01"
+      ],
+      "models access": [
+        "IAM-08"
+      ],
+      "models add": [
+        "REG-01",
+        "REG-02",
+        "REG-03",
+        "LCP-01"
+      ],
+      "models clone-profile": [
+        "PRO-07",
+        "PRO-08"
+      ],
+      "models defaults": [
+        "PRO-10"
+      ],
+      "models disable": [
+        "REG-19"
+      ],
+      "models grant": [
+        "IAM-08",
+        "IAM-09"
+      ],
+      "models list": [
+        "REG-01",
+        "REG-19"
+      ],
+      "models profile-edit": [
+        "PRO-04",
+        "PRO-05",
+        "LCP-05"
+      ],
+      "models profile-state": [
+        "PRO-02",
+        "PRO-03"
+      ],
+      "models profiles": [
+        "PRO-01"
+      ],
+      "models review": [
+        "REG-11"
+      ],
+      "models revoke": [
+        "IAM-08"
+      ],
+      "models trust-measurements": [
+        "PRO-11",
+        "PRO-12",
+        "PRO-13"
+      ],
+      "models validate": [
+        "REG-10",
+        "PRO-06",
+        "PRO-08",
+        "LCP-05"
+      ],
+      "serve": [
+        "CFG-02",
+        "CFG-03",
+        "CFG-04",
+        "CFG-06",
+        "CFG-07",
+        "CFG-13"
+      ],
+      "status": [
+        "UI-10",
+        "OPS-15"
+      ],
+      "summarize": [
+        "IAM-15"
+      ]
+    },
+    "tui": {
+      "confirm-cancel": [
+        "UI-12"
+      ],
+      "confirm-submit": [
+        "UI-12"
+      ],
+      "form-cancel": [
+        "UI-12"
+      ],
+      "form-submit": [
+        "UI-03",
+        "UI-04"
+      ],
+      "dashboard-refresh": [
+        "UI-10"
+      ],
+      "keys-access-update": [
+        "IAM-08",
+        "IAM-09"
+      ],
+      "keys-copy": [
+        "UI-13"
+      ],
+      "keys-create": [
+        "IAM-03",
+        "IAM-04"
+      ],
+      "keys-delete": [
+        "IAM-07"
+      ],
+      "keys-limit": [
+        "IAM-11"
+      ],
+      "keys-refresh": [
+        "UI-05"
+      ],
+      "keys-reset": [
+        "IAM-14"
+      ],
+      "keys-restore": [
+        "IAM-06"
+      ],
+      "keys-revoke": [
+        "IAM-06"
+      ],
+      "keys-rotate": [
+        "IAM-05"
+      ],
+      "maintenance-drain": [
+        "OPS-01"
+      ],
+      "maintenance-refresh": [
+        "UI-10"
+      ],
+      "maintenance-resume": [
+        "OPS-02",
+        "REG-08"
+      ],
+      "maintenance-summarize": [
+        "IAM-15"
+      ],
+      "models-add": [
+        "REG-01",
+        "REG-02",
+        "LCP-01"
+      ],
+      "models-clone": [
+        "PRO-07",
+        "PRO-08"
+      ],
+      "models-disable": [
+        "REG-19"
+      ],
+      "models-edit": [
+        "PRO-10"
+      ],
+      "models-profiles": [
+        "PRO-01"
+      ],
+      "models-refresh": [
+        "UI-05"
+      ],
+      "models-retry": [
+        "REG-10",
+        "UI-14"
+      ],
+      "models-review": [
+        "REG-11"
+      ],
+      "models-user-access": [
+        "IAM-08",
+        "IAM-09"
+      ],
+      "nav-dashboard": [
+        "UI-01"
+      ],
+      "nav-keys": [
+        "UI-01"
+      ],
+      "nav-maintenance": [
+        "UI-01"
+      ],
+      "nav-models": [
+        "UI-01"
+      ],
+      "nav-quit": [
+        "UI-01"
+      ],
+      "nav-system": [
+        "UI-01"
+      ],
+      "profiles-activation": [
+        "PRO-02",
+        "PRO-03",
+        "UI-08"
+      ],
+      "profiles-advanced": [
+        "PRO-11",
+        "PRO-12",
+        "PRO-13",
+        "UI-09"
+      ],
+      "profiles-back": [
+        "UI-01"
+      ],
+      "profiles-edit": [
+        "PRO-04",
+        "PRO-05"
+      ],
+      "profiles-refresh": [
+        "UI-05"
+      ],
+      "profiles-revalidate": [
+        "PRO-06",
+        "PRO-08",
+        "LCP-05"
+      ],
+      "system-doctor": [
+        "CFG-14"
+      ],
+      "system-info": [
+        "UI-11"
+      ],
+      "system-start-service": [
+        "UI-11",
+        "CFG-02"
+      ]
+    },
+    "settings": {
+      "api_host": [
+        "CFG-02",
+        "CFG-03",
+        "CFG-04",
+        "CFG-08"
+      ],
+      "api_port": [
+        "CFG-02",
+        "CFG-03",
+        "CFG-04",
+        "CFG-08"
+      ],
+      "config_file": [
+        "CFG-02",
+        "CFG-03",
+        "CFG-04",
+        "CFG-08"
+      ],
+      "serving_mode": [
+        "CFG-02",
+        "CFG-03",
+        "CFG-04",
+        "CFG-08"
+      ],
+      "database_path": [
+        "CFG-06",
+        "CFG-07",
+        "CFG-13",
+        "OPS-11"
+      ],
+      "model_store": [
+        "REG-01",
+        "REG-11",
+        "OPS-14"
+      ],
+      "hf_token": [
+        "REG-01",
+        "REG-11",
+        "OPS-14"
+      ],
+      "log_dir": [
+        "CFG-08",
+        "CFG-11",
+        "OPS-09",
+        "OPS-14"
+      ],
+      "log_level": [
+        "CFG-08",
+        "CFG-11",
+        "OPS-09",
+        "OPS-14"
+      ],
+      "capture_worker_engine_logs": [
+        "CFG-08",
+        "CFG-11",
+        "OPS-09",
+        "OPS-14"
+      ],
+      "machine_id": [
+        "CFG-09",
+        "PRO-11",
+        "PRO-12"
+      ],
+      "managed_gpu_uuids": [
+        "CFG-09",
+        "PRO-11",
+        "PRO-12"
+      ],
+      "engines.enable_llama_cpp": [
+        "LCP-01",
+        "LCP-08",
+        "LCP-09"
+      ],
+      "engines.llama_cpp_executable": [
+        "LCP-01",
+        "LCP-08",
+        "LCP-09"
+      ],
+      "engines.vllm_executable": [
+        "CFG-08",
+        "CFG-10",
+        "CFG-11",
+        "PRO-15"
+      ],
+      "engines.environment": [
+        "CFG-08",
+        "CFG-10",
+        "CFG-11",
+        "PRO-15"
+      ],
+      "engines.gpu_memory_utilization": [
+        "REG-09",
+        "REQ-09",
+        "REQ-11"
+      ],
+      "engines.max_model_len": [
+        "REG-09",
+        "REQ-09",
+        "REQ-11"
+      ],
+      "engines.max_num_seqs": [
+        "REG-09",
+        "REQ-09",
+        "REQ-11"
+      ],
+      "engines.max_num_batched_tokens": [
+        "REG-09",
+        "REQ-09",
+        "REQ-11"
+      ],
+      "fair_share_seconds": [
+        "CFG-16",
+        "QUE-02",
+        "QUE-04",
+        "SLP-22"
+      ],
+      "minimum_residency_seconds": [
+        "CFG-16",
+        "QUE-02",
+        "QUE-04",
+        "SLP-22"
+      ],
+      "wait_duration_seconds": [
+        "CFG-16",
+        "QUE-02",
+        "QUE-04",
+        "SLP-22"
+      ],
+      "reserved_vram_mib": [
+        "REG-15",
+        "QUE-11",
+        "SLP-05",
+        "SLP-07"
+      ],
+      "validation_idle_window_seconds": [
+        "CFG-16",
+        "REG-07",
+        "REG-13"
+      ],
+      "scheduler_tick_seconds": [
+        "CFG-16",
+        "REG-07",
+        "REG-13"
+      ],
+      "queue_capacity_per_model": [
+        "QUE-06",
+        "REQ-15"
+      ],
+      "queue_capacity_per_tenant": [
+        "QUE-06",
+        "REQ-15"
+      ],
+      "max_n": [
+        "REQ-09",
+        "REQ-10",
+        "REQ-11"
+      ],
+      "max_output_tokens": [
+        "REQ-09",
+        "REQ-10",
+        "REQ-11"
+      ],
+      "max_prompt_tokens": [
+        "REQ-09",
+        "REQ-10",
+        "REQ-11"
+      ],
+      "quota_charge_requested_maximum": [
+        "IAM-13",
+        "REQ-21"
+      ],
+      "worker_port_end": [
+        "CFG-12",
+        "LCP-06",
+        "OPS-15"
+      ],
+      "worker_port_start": [
+        "CFG-12",
+        "LCP-06",
+        "OPS-15"
+      ],
+      "worker_startup_timeout_seconds": [
+        "OPS-09"
+      ],
+      "worker_drain_watchdog_seconds": [
+        "REQ-16",
+        "OPS-07"
+      ],
+      "worker_request_timeout_seconds": [
+        "REQ-16",
+        "OPS-07"
+      ],
+      "worker_stream_idle_timeout_seconds": [
+        "REQ-16",
+        "OPS-07"
+      ],
+      "modes.vllm_sleep.host_cache_max_gib": [
+        "SLP-09",
+        "SLP-13"
+      ],
+      "modes.vllm_sleep.host_cache_min_available_gib": [
+        "SLP-10",
+        "SLP-12"
+      ],
+      "modes.vllm_sleep.swap_max_used_gib": [
+        "SLP-11"
+      ],
+      "modes.vllm_sleep.preload_models": [
+        "SLP-16",
+        "SLP-17"
+      ],
+      "modes.vllm_sleep.idle_sleep_seconds": [
+        "SLP-01",
+        "SLP-22"
+      ],
+      "modes.vllm_sleep.transition_timeout_seconds": [
+        "SLP-14",
+        "SLP-15",
+        "SLP-22"
+      ],
+      "modes.queue.scale_window_seconds": [
+        "QUE-09",
+        "CFG-04"
+      ],
+      "modes.queue.minimum_marginal_efficiency": [
+        "QUE-09",
+        "CFG-04"
+      ]
+    }
+  },
+  "requirements": {
+    "mode-isolation-and-explicit-startup": [
+      "CFG-02",
+      "CFG-03",
+      "CFG-05",
+      "CFG-15"
+    ],
+    "common-resource-ownership": [
+      "CFG-12",
+      "CFG-13",
+      "QUE-13",
+      "SLP-13",
+      "OPS-15"
+    ],
+    "profile-launch-artifact-engine-binding": [
+      "PRO-04",
+      "PRO-13",
+      "PRO-15",
+      "REG-17"
+    ],
+    "unified-persisted-validation": [
+      "REG-01",
+      "REG-10",
+      "REG-12",
+      "PRO-06",
+      "PRO-08",
+      "LCP-05"
+    ],
+    "source-support-and-no-fallback": [
+      "REG-01",
+      "REG-02",
+      "REG-04",
+      "LCP-01",
+      "QUE-16"
+    ],
+    "queue-fairness-tp-replicas": [
+      "QUE-03",
+      "QUE-04",
+      "QUE-05",
+      "QUE-07",
+      "QUE-08",
+      "QUE-09",
+      "QUE-10"
+    ],
+    "sleep-residency-live-vram-ram-swap": [
+      "SLP-01",
+      "SLP-04",
+      "SLP-05",
+      "SLP-07",
+      "SLP-09",
+      "SLP-10",
+      "SLP-11",
+      "SLP-12"
+    ],
+    "inference-forwarding-cancellation-accounting": [
+      "REQ-02",
+      "REQ-05",
+      "REQ-06",
+      "REQ-14",
+      "REQ-18",
+      "REQ-19",
+      "REQ-21"
+    ],
+    "capability-enforcement-and-interfaces": [
+      "IAM-02",
+      "LCP-08",
+      "UI-02",
+      "UI-03",
+      "UI-04",
+      "UI-05",
+      "UI-08"
+    ],
+    "new-schema-lab-preservation-and-rollback": [
+      "CFG-06",
+      "CFG-07",
+      "OPS-11",
+      "OPS-12",
+      "OPS-13"
+    ],
+    "fresh-install-documentation-and-ci": [
+      "CFG-01",
+      "CFG-04",
+      "UI-02"
+    ],
+    "physical-transition-soak-and-performance-gate": [
+      "SOAK-01",
+      "SOAK-02",
+      "SOAK-03",
+      "SOAK-04",
+      "SOAK-05"
+    ]
+  },
+  "findings": {
+    "AUD-01": [
+      "REG-05"
+    ],
+    "AUD-02": [
+      "QUE-07"
+    ],
+    "AUD-03": [
+      "SLP-13"
+    ],
+    "AUD-04": [
+      "PRO-13"
+    ],
+    "AUD-05": [
+      "CFG-10",
+      "PRO-15"
+    ],
+    "AUD-06": [
+      "PRO-08"
+    ],
+    "AUD-07": [
+      "PRO-06",
+      "LCP-05"
+    ],
+    "AUD-08": [
+      "REQ-07"
+    ],
+    "AUD-09": [
+      "SOAK-02",
+      "SOAK-03",
+      "SOAK-05"
+    ],
+    "AUD-10": [
+      "CFG-15",
+      "QUE-04",
+      "UI-02"
+    ],
+    "AUD-11": [
+      "OPS-11",
+      "OPS-12"
+    ],
+    "AUD-12": [
+      "CFG-13"
+    ]
+  },
+  "global_modifiers": {
+    "permissions": "IAM-01 and IAM-02 apply to every protected route and mapped operation.",
+    "errors": "Every mutating surface also runs UI-03/UI-04 equivalents: invalid input, duplicate submission, transport error, retry.",
+    "topology": "Run planner/ownership contracts on 1/2/4/8 simulated GPUs; separately record physical topologies tested. Simulation never substitutes for physical evidence.",
+    "results": "Expand by mode, mapped interface, topology and declared fixture capability. Every expanded case needs a terminal result and evidence. BLOCKED/SKIPPED/XFAIL is not PASS."
+  },
+  "implementation_units": {
+    "src/llm_rio/__init__.py": [
+      "CFG-01"
+    ],
+    "src/llm_rio/__main__.py": [
+      "CFG-01",
+      "CFG-02",
+      "CFG-08"
+    ],
+    "src/llm_rio/admin_client.py": [
+      "UI-02",
+      "UI-03",
+      "IAM-02"
+    ],
+    "src/llm_rio/api/__init__.py": [
+      "CFG-01"
+    ],
+    "src/llm_rio/api/app.py": [
+      "CFG-06",
+      "CFG-07",
+      "CFG-13",
+      "OPS-03",
+      "OPS-04"
+    ],
+    "src/llm_rio/api/dependencies.py": [
+      "IAM-01",
+      "IAM-02",
+      "IAM-03",
+      "IAM-05",
+      "IAM-06",
+      "OPS-11"
+    ],
+    "src/llm_rio/api/inference_proxy.py": [
+      "REQ-02",
+      "REQ-14",
+      "REQ-16",
+      "REQ-17",
+      "REQ-18",
+      "REQ-19",
+      "REQ-21"
+    ],
+    "src/llm_rio/api/inference_validation.py": [
+      "PRO-10",
+      "REQ-04",
+      "REQ-08",
+      "REQ-09",
+      "REQ-10",
+      "REQ-11",
+      "REQ-21"
+    ],
+    "src/llm_rio/api/routes_admin.py": [
+      "PRO-01",
+      "PRO-04",
+      "PRO-11",
+      "IAM-03",
+      "OPS-01",
+      "UI-02"
+    ],
+    "src/llm_rio/api/routes_inference.py": [
+      "REQ-01",
+      "REQ-02",
+      "REQ-13",
+      "REQ-14",
+      "REQ-22",
+      "REG-05"
+    ],
+    "src/llm_rio/api/routes_staff.py": [
+      "REG-01",
+      "REG-02",
+      "REG-06",
+      "REG-19",
+      "IAM-08",
+      "UI-02"
+    ],
+    "src/llm_rio/api/schemas.py": [
+      "CFG-05",
+      "REG-03",
+      "REG-09",
+      "REQ-12",
+      "PRO-12"
+    ],
+    "src/llm_rio/artifacts.py": [
+      "REG-02",
+      "REG-16",
+      "REG-17",
+      "REG-18",
+      "PRO-09"
+    ],
+    "src/llm_rio/cli.py": [
+      "CFG-01",
+      "CFG-02",
+      "UI-01",
+      "UI-02"
+    ],
+    "src/llm_rio/commands/__init__.py": [
+      "CFG-01"
+    ],
+    "src/llm_rio/commands/common.py": [
+      "UI-02",
+      "IAM-02",
+      "REG-10",
+      "PRO-06",
+      "OPS-02"
+    ],
+    "src/llm_rio/commands/keys.py": [
+      "UI-02",
+      "IAM-02",
+      "REG-10",
+      "PRO-06",
+      "OPS-02"
+    ],
+    "src/llm_rio/commands/maintenance.py": [
+      "UI-02",
+      "IAM-02",
+      "REG-10",
+      "PRO-06",
+      "OPS-02"
+    ],
+    "src/llm_rio/commands/models.py": [
+      "UI-02",
+      "IAM-02",
+      "REG-10",
+      "PRO-06",
+      "OPS-02"
+    ],
+    "src/llm_rio/config.py": [
+      "CFG-02",
+      "CFG-03",
+      "CFG-04",
+      "CFG-05",
+      "UI-11"
+    ],
+    "src/llm_rio/connection.py": [
+      "CFG-02",
+      "CFG-03",
+      "CFG-04",
+      "CFG-05",
+      "UI-11"
+    ],
+    "src/llm_rio/database_schema.py": [
+      "CFG-06",
+      "CFG-07",
+      "IAM-12",
+      "OPS-06",
+      "OPS-07"
+    ],
+    "src/llm_rio/domain.py": [
+      "PRO-03",
+      "PRO-13",
+      "QUE-13",
+      "SLP-18",
+      "OPS-15"
+    ],
+    "src/llm_rio/engine_args.py": [
+      "REG-09",
+      "LCP-03",
+      "QUE-16",
+      "CFG-15"
+    ],
+    "src/llm_rio/engine_runtime.py": [
+      "CFG-15",
+      "QUE-16"
+    ],
+    "src/llm_rio/engines/__init__.py": [
+      "CFG-01"
+    ],
+    "src/llm_rio/engines/identity.py": [
+      "CFG-10",
+      "CFG-11",
+      "PRO-15"
+    ],
+    "src/llm_rio/engines/launch.py": [
+      "REG-09",
+      "LCP-03",
+      "QUE-16",
+      "CFG-15"
+    ],
+    "src/llm_rio/errors.py": [
+      "CFG-05",
+      "REG-03",
+      "REG-09",
+      "REQ-12",
+      "PRO-12"
+    ],
+    "src/llm_rio/gpu_memory.py": [
+      "CFG-09",
+      "REG-14",
+      "REG-15",
+      "QUE-11",
+      "QUE-12",
+      "SLP-05",
+      "SLP-06"
+    ],
+    "src/llm_rio/host_memory.py": [
+      "SLP-09",
+      "SLP-10",
+      "SLP-11",
+      "SLP-12"
+    ],
+    "src/llm_rio/inventory.py": [
+      "CFG-09",
+      "REG-14",
+      "REG-15",
+      "QUE-11",
+      "QUE-12",
+      "SLP-05",
+      "SLP-06"
+    ],
+    "src/llm_rio/llama_validation.py": [
+      "LCP-01",
+      "LCP-03",
+      "LCP-05",
+      "LCP-06",
+      "LCP-10"
+    ],
+    "src/llm_rio/main.py": [
+      "CFG-01",
+      "CFG-02",
+      "CFG-08"
+    ],
+    "src/llm_rio/modes/__init__.py": [
+      "CFG-01"
+    ],
+    "src/llm_rio/modes/actions.py": [
+      "CFG-02",
+      "PRO-03",
+      "PRO-13",
+      "QUE-07",
+      "SLP-03"
+    ],
+    "src/llm_rio/modes/cache_settings.py": [
+      "CFG-05",
+      "CFG-16",
+      "SLP-16",
+      "SLP-22"
+    ],
+    "src/llm_rio/modes/contracts.py": [
+      "CFG-02",
+      "PRO-03",
+      "PRO-13",
+      "QUE-07",
+      "SLP-03"
+    ],
+    "src/llm_rio/modes/factory.py": [
+      "CFG-02",
+      "PRO-03",
+      "PRO-13",
+      "QUE-07",
+      "SLP-03"
+    ],
+    "src/llm_rio/modes/lifecycle.py": [
+      "QUE-01",
+      "QUE-02",
+      "QUE-13",
+      "QUE-16"
+    ],
+    "src/llm_rio/modes/queue/__init__.py": [
+      "CFG-01"
+    ],
+    "src/llm_rio/modes/queue/lifecycle.py": [
+      "QUE-01",
+      "QUE-02",
+      "QUE-13",
+      "QUE-16"
+    ],
+    "src/llm_rio/modes/queue/planner.py": [
+      "QUE-03",
+      "QUE-04",
+      "QUE-07",
+      "QUE-08",
+      "QUE-09",
+      "QUE-10"
+    ],
+    "src/llm_rio/modes/queue/settings.py": [
+      "CFG-05",
+      "CFG-16",
+      "SLP-16",
+      "SLP-22"
+    ],
+    "src/llm_rio/modes/queue/validation.py": [
+      "REG-09",
+      "REG-14",
+      "REG-15",
+      "QUE-16",
+      "SLP-05"
+    ],
+    "src/llm_rio/modes/settings.py": [
+      "CFG-05",
+      "CFG-16",
+      "SLP-16",
+      "SLP-22"
+    ],
+    "src/llm_rio/modes/validation.py": [
+      "REG-09",
+      "REG-14",
+      "REG-15",
+      "QUE-16",
+      "SLP-05"
+    ],
+    "src/llm_rio/modes/vllm_sleep/__init__.py": [
+      "CFG-01"
+    ],
+    "src/llm_rio/modes/vllm_sleep/lifecycle.py": [
+      "SLP-01",
+      "SLP-04",
+      "SLP-09",
+      "SLP-13",
+      "SLP-14",
+      "SLP-15",
+      "SLP-18"
+    ],
+    "src/llm_rio/modes/vllm_sleep/planner.py": [
+      "SLP-02",
+      "SLP-03",
+      "SLP-06",
+      "SLP-16",
+      "SLP-17"
+    ],
+    "src/llm_rio/modes/vllm_sleep/settings.py": [
+      "CFG-05",
+      "CFG-16",
+      "SLP-16",
+      "SLP-22"
+    ],
+    "src/llm_rio/modes/vllm_sleep/validation.py": [
+      "REG-09",
+      "REG-14",
+      "REG-15",
+      "QUE-16",
+      "SLP-05"
+    ],
+    "src/llm_rio/operations/__init__.py": [
+      "CFG-01"
+    ],
+    "src/llm_rio/operations/archive.py": [
+      "OPS-11",
+      "OPS-12",
+      "OPS-13"
+    ],
+    "src/llm_rio/planner.py": [
+      "QUE-03",
+      "QUE-04",
+      "QUE-07",
+      "QUE-08",
+      "QUE-09",
+      "QUE-10"
+    ],
+    "src/llm_rio/ports.py": [
+      "CFG-12",
+      "QUE-13",
+      "LCP-06",
+      "OPS-05",
+      "OPS-10",
+      "OPS-15"
+    ],
+    "src/llm_rio/process_cleanup.py": [
+      "CFG-12",
+      "QUE-13",
+      "LCP-06",
+      "OPS-05",
+      "OPS-10",
+      "OPS-15"
+    ],
+    "src/llm_rio/profiles.py": [
+      "PRO-01",
+      "PRO-03",
+      "PRO-04",
+      "PRO-06",
+      "PRO-08",
+      "PRO-11",
+      "PRO-13",
+      "PRO-15"
+    ],
+    "src/llm_rio/queueing.py": [
+      "QUE-05",
+      "QUE-06",
+      "REQ-14",
+      "OPS-01"
+    ],
+    "src/llm_rio/recovery.py": [
+      "OPS-03",
+      "OPS-04",
+      "OPS-05",
+      "OPS-10"
+    ],
+    "src/llm_rio/registration.py": [
+      "REG-01",
+      "REG-02",
+      "REG-10",
+      "REG-11",
+      "REG-12",
+      "REG-16",
+      "REG-19",
+      "PRO-08"
+    ],
+    "src/llm_rio/repositories/__init__.py": [
+      "CFG-01"
+    ],
+    "src/llm_rio/repositories/accounting.py": [
+      "IAM-12",
+      "IAM-13",
+      "IAM-14",
+      "IAM-15",
+      "REQ-13",
+      "REQ-21",
+      "OPS-07"
+    ],
+    "src/llm_rio/repositories/catalog.py": [
+      "REG-01",
+      "REG-02",
+      "REG-10",
+      "REG-11",
+      "REG-12",
+      "REG-16",
+      "REG-19",
+      "PRO-08"
+    ],
+    "src/llm_rio/repositories/events.py": [
+      "OPS-03",
+      "OPS-04",
+      "OPS-05",
+      "OPS-10"
+    ],
+    "src/llm_rio/repositories/identity.py": [
+      "IAM-03",
+      "IAM-04",
+      "IAM-05",
+      "IAM-06",
+      "IAM-07",
+      "IAM-08",
+      "IAM-09",
+      "IAM-11"
+    ],
+    "src/llm_rio/runtime.py": [
+      "QUE-03",
+      "QUE-08",
+      "QUE-09",
+      "SLP-16",
+      "SLP-17",
+      "SLP-18",
+      "OPS-01",
+      "OPS-07",
+      "OPS-15"
+    ],
+    "src/llm_rio/security.py": [
+      "IAM-01",
+      "IAM-02",
+      "IAM-03",
+      "IAM-05",
+      "IAM-06",
+      "OPS-11"
+    ],
+    "src/llm_rio/services/__init__.py": [
+      "CFG-01"
+    ],
+    "src/llm_rio/services/access.py": [
+      "IAM-03",
+      "IAM-04",
+      "IAM-05",
+      "IAM-06",
+      "IAM-07",
+      "IAM-08",
+      "IAM-09",
+      "IAM-11"
+    ],
+    "src/llm_rio/services/diagnostics.py": [
+      "UI-10",
+      "SLP-05",
+      "OPS-15",
+      "SOAK-05"
+    ],
+    "src/llm_rio/services/profile_edit.py": [
+      "PRO-01",
+      "PRO-03",
+      "PRO-04",
+      "PRO-06",
+      "PRO-08",
+      "PRO-11",
+      "PRO-13",
+      "PRO-15"
+    ],
+    "src/llm_rio/services/profile_trust.py": [
+      "PRO-01",
+      "PRO-03",
+      "PRO-04",
+      "PRO-06",
+      "PRO-08",
+      "PRO-11",
+      "PRO-13",
+      "PRO-15"
+    ],
+    "src/llm_rio/storage.py": [
+      "CFG-06",
+      "CFG-07",
+      "IAM-12",
+      "OPS-06",
+      "OPS-07"
+    ],
+    "src/llm_rio/timestamps.py": [
+      "REQ-21",
+      "SOAK-05"
+    ],
+    "src/llm_rio/tool_support.py": [
+      "REQ-05",
+      "REQ-06",
+      "REG-09"
+    ],
+    "src/llm_rio/tui.py": [
+      "UI-01",
+      "UI-02",
+      "UI-03",
+      "UI-04",
+      "UI-05",
+      "UI-06",
+      "UI-07",
+      "UI-12"
+    ],
+    "src/llm_rio/ui/__init__.py": [
+      "CFG-01"
+    ],
+    "src/llm_rio/ui/components.py": [
+      "UI-01",
+      "UI-02",
+      "UI-03",
+      "UI-04",
+      "UI-05",
+      "UI-06",
+      "UI-07",
+      "UI-12"
+    ],
+    "src/llm_rio/ui/dashboard.py": [
+      "UI-05",
+      "UI-10"
+    ],
+    "src/llm_rio/ui/keys.py": [
+      "IAM-03",
+      "IAM-04",
+      "IAM-05",
+      "IAM-06",
+      "IAM-07",
+      "UI-03",
+      "UI-13"
+    ],
+    "src/llm_rio/ui/models.py": [
+      "REG-01",
+      "REG-02",
+      "REG-11",
+      "PRO-06",
+      "PRO-08",
+      "UI-05",
+      "UI-14"
+    ],
+    "src/llm_rio/ui/profiles.py": [
+      "PRO-04",
+      "PRO-06",
+      "PRO-11",
+      "PRO-13",
+      "UI-08",
+      "UI-09"
+    ],
+    "src/llm_rio/ui/system.py": [
+      "UI-10",
+      "UI-11",
+      "OPS-01",
+      "OPS-02",
+      "CFG-14"
+    ],
+    "src/llm_rio/usage_summary.py": [
+      "IAM-12",
+      "IAM-13",
+      "IAM-14",
+      "IAM-15",
+      "REQ-13",
+      "REQ-21",
+      "OPS-07"
+    ],
+    "src/llm_rio/validation.py": [
+      "REG-07",
+      "REG-08",
+      "REG-09",
+      "REG-11",
+      "REG-12",
+      "REG-14",
+      "REG-15",
+      "SLP-05"
+    ],
+    "src/llm_rio/worker_protocol.py": [
+      "REQ-02",
+      "REQ-14",
+      "REQ-16",
+      "REQ-17",
+      "REQ-18",
+      "REQ-19",
+      "REQ-21"
+    ],
+    "src/llm_rio/worker_types.py": [
+      "QUE-11",
+      "QUE-12",
+      "QUE-13",
+      "QUE-15",
+      "SLP-04",
+      "OPS-09",
+      "OPS-15"
+    ],
+    "src/llm_rio/workers.py": [
+      "QUE-11",
+      "QUE-12",
+      "QUE-13",
+      "QUE-15",
+      "SLP-04",
+      "OPS-09",
+      "OPS-15"
+    ],
+    "src/llm_rio/operations/ownership.py": [
+      "CFG-13",
+      "OPS-07",
+      "OPS-11"
+    ],
+    "src/llm_rio/operations/build_identity.py": [
+      "CFG-10",
+      "CFG-15"
+    ],
+    "src/llm_rio/services/validation_jobs.py": [
+      "PRO-06",
+      "PRO-08",
+      "LCP-05",
+      "REG-05"
+    ]
+  }
+}

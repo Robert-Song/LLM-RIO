@@ -284,30 +284,28 @@ class AccountingRepository:
 
     async def inference_requests_for_test_run(self, test_run_id: str) -> list[dict[str, Any]]:
         rows = await self.database.fetchall(
-            (
-                "\n"
-                "            SELECT r.id AS request_id, r.test_run_id, r.client_wo"
-                "rker,\n"
-                "                   m.nickname AS model, r.worker_id,\n"
-                "                   r.state AS completion_status, r.error_code,\n"
-                "                   r.estimated_tokens, r.actual_prompt_tokens,\n"
-                "                   r.actual_completion_tokens, r.accepted_count, "
-                "r.completion_count,\n"
-                "                   r.created_at AS admission_time,\n"
-                "                   r.admitted_at AS worker_accepted_time,\n"
-                "                   r.completed_at AS completion_time,\n"
-                "                   w.gpu_uuids_json,\n"
-                "                   json_extract(p.profile_json, '$.tensor_paralle"
-                "l_size')\n"
-                "                       AS tensor_parallel_size\n"
-                "              FROM inference_requests r\n"
-                "              JOIN model_catalog m ON m.id = r.model_id\n"
-                "              LEFT JOIN workers w ON w.id = r.worker_id\n"
-                "              LEFT JOIN model_profiles p ON p.id = w.profile_id\n"
-                "             WHERE r.test_run_id = ?\n"
-                "             ORDER BY r.created_at, r.id\n"
-                "            "
-            ),
+            """
+            SELECT r.id AS request_id, r.test_run_id, r.client_worker,
+                   r.account_id, r.key_id, m.nickname AS model, r.worker_id,
+                   r.state AS completion_status, r.error_code,
+                   r.estimated_tokens, r.actual_prompt_tokens, r.actual_completion_tokens,
+                   r.accepted_count, r.completion_count,
+                   r.created_at AS admission_time, r.admitted_at AS worker_accepted_time,
+                   r.completed_at AS completion_time, w.gpu_uuids_json,
+                   json_extract(p.profile_json, '$.tensor_parallel_size') AS tensor_parallel_size,
+                   q.id AS reservation_id, q.state AS reservation_state,
+                   q.reserved_tokens, q.actual_tokens AS charged_tokens,
+                   a.unlimited AS account_unlimited,
+                   COALESCE((SELECT SUM(delta_tokens) FROM quota_ledger l
+                             WHERE l.reservation_id=q.id), 0) AS ledger_delta_tokens
+              FROM inference_requests r
+              JOIN model_catalog m ON m.id=r.model_id
+              JOIN quota_reservations q ON q.id=r.reservation_id
+              JOIN quota_accounts a ON a.id=r.account_id
+              LEFT JOIN workers w ON w.id=r.worker_id
+              LEFT JOIN model_profiles p ON p.id=w.profile_id
+             WHERE r.test_run_id=? ORDER BY r.created_at, r.id
+            """,
             (test_run_id,),
         )
         result: list[dict[str, Any]] = []

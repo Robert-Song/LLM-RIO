@@ -241,23 +241,27 @@ def model_job(job_or_model: str, json_output: bool = typer.Option(False, "--json
 @models_app.command("validate")
 def retry_model_job(
     job_or_model: str,
+    profile: str | None = typer.Option(
+        None, "--profile", help="Profile ID or position to probe exactly."
+    ),
     max_model_len: int | None = typer.Option(
         None, "--max-model-len", min=1, help="Context length to probe during real validation."
     ),
 ) -> None:
     """Re-run registration; accepts its ID or the model nickname."""
     job_id = _job_id_from_selector(job_or_model)
-    if max_model_len is None:
-        result = client_api.request("POST", f"/staff/model-jobs/{job_id}/retry")
-    else:
+    if profile is not None:
         job = client_api.request("GET", f"/staff/model-jobs/{job_id}")
-        overrides = dict(job.get("validation_overrides") or {})
-        overrides["max_model_len"] = max_model_len
-        result = client_api.request(
-            "POST",
-            f"/staff/model-jobs/{job_id}/retry",
-            json_body={"validation_overrides": overrides},
+        selected = client_api.profile_record(str(job["nickname"]), profile)
+        result = client_api.validate_job(
+            job_id,
+            profile_id=str(selected["id"]),
+            overrides={"max_model_len": max_model_len} if max_model_len is not None else None,
         )
+    elif max_model_len is None:
+        result = client_api.validate_job(job_id)
+    else:
+        result = client_api.validate_job(job_id, overrides={"max_model_len": max_model_len})
     typer.echo(f"Registration job {result['job_id']} was queued for retry.")
 
 

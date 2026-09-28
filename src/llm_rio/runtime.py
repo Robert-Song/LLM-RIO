@@ -64,6 +64,8 @@ class ResidencyScheduler:
             settings.queue_capacity_per_model, settings.queue_capacity_per_tenant
         )
         self.mode = create_mode(settings, inventory)
+        if isinstance(supervisor, WorkerSupervisor):
+            supervisor.bind_mode(self.mode)
         self.planner = self.mode.planner
         self._state_lock = asyncio.Lock()
         self._event = asyncio.Event()
@@ -90,6 +92,14 @@ class ResidencyScheduler:
     @property
     def validation_gpu_uuids(self) -> tuple[str, ...]:
         return tuple(sorted(self._validation_gpu_uuids))
+
+    def resource_ownership_snapshot(self) -> dict[str, object]:
+        """Expose ownership counts without leaking mutable scheduler internals."""
+        return {
+            "request_leases": len(self._request_leases),
+            "reserved_ports": sorted(self.supervisor.ports.snapshot()),
+            "validation_gpu_uuids": self.validation_gpu_uuids,
+        }
 
     async def start(self) -> None:
         if self._task is None:

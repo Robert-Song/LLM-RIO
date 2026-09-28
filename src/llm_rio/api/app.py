@@ -21,6 +21,7 @@ from llm_rio.config import Settings
 from llm_rio.domain import MachineInventory, Role
 from llm_rio.errors import RioError
 from llm_rio.inventory import discover_inventory
+from llm_rio.operations.ownership import database_resource, gpu_ownership, owner_lock
 from llm_rio.profiles import ProfileRepository
 from llm_rio.recovery import terminate_recorded_workers
 from llm_rio.registration import RegistrationManager
@@ -71,6 +72,7 @@ def create_app(
             format="%(asctime)s %(levelname)s %(name)s %(message)s",
         )
         async with AsyncExitStack() as resources:
+            resources.enter_context(owner_lock(database_resource(resolved_settings.database_path)))
             database = Database(resolved_settings.database_path)
             await database.open()
             resources.push_async_callback(database.close)
@@ -84,6 +86,7 @@ def create_app(
                 resolved_settings.machine_id,
                 resolved_settings.managed_gpu_uuids,
             )
+            resources.enter_context(gpu_ownership([gpu.uuid for gpu in inventory.gpus]))
             recovery = await terminate_recorded_workers(database)
             for item in recovery:
                 await database.record_event("STARTUP_WORKER_RECONCILIATION", payload=item)
